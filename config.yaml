@@ -33,11 +33,12 @@ training:
   n_ensemble_models: 3
 
 # Model Configuration
-models:
-  model_type: "hybrid"   # ou lstm, gru, transformer, cnn_lstm
+model:
+  type: "hybrid"
   units: 64
   num_layers: 3
   dropout: 0.15
+  
   lstm:
     units: 64
   gru:
