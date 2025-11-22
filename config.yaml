@@ -34,8 +34,17 @@ training:
 
 # Model Configuration
 models:
-  available: ["lstm", "gru", "hybrid", "transformer"]
-  default: ["lstm", "gru", "hybrid"]
+  model_type: "hybrid"   # ou lstm, gru, transformer, cnn_lstm
+  units: 64
+  num_layers: 3
+  dropout: 0.15
+  lstm:
+    units: 64
+  gru:
+    units: 64
+  transformer:
+    heads: 4
+    depth: 2
   
 # Forecast Horizons (hours)
 horizons: [1, 3, 6, 12, 24, 48]
