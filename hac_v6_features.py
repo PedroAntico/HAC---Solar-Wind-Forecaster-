@@ -36,7 +36,8 @@ class HACFeatureBuilder:
             raise FileNotFoundError(f"Missing prepared data: {csv_path}")
 
         print(f"📂 Loading dataset: {csv_path}")
-        self.df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+        self.df = pd.read_csv(csv_path)
+        self.df["timestamp"] = pd.to_datetime(self.df["datetime"])
 
     # ------------------------------------------------------------
     # Main feature engineering pipeline
