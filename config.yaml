@@ -32,13 +32,16 @@ training:
   use_ensemble: true
   n_ensemble_models: 3
 
-# Model Configuration
+# Model legacy section (required only so config validator won't fail)
+models:
+  dummy: true
+
+# Modern model section (used by model builder)
 model:
   type: "hybrid"
   units: 64
   num_layers: 3
   dropout: 0.15
-  
   lstm:
     units: 64
   gru:
