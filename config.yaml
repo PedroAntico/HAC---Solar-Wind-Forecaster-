@@ -1,0 +1,103 @@
+# HAC v6 - Real-Time AI Solar Wind Forecaster
+# Configuration File
+
+# Paths and Directories
+paths:
+  data_dir: "data_real"
+  model_dir: "models/hac_omni_v6" 
+  results_dir: "results"
+  logs_dir: "logs"
+  dashboard_dir: "dashboard"
+  
+  data_files:
+    - "omni_prepared.csv"
+    - "omni_converted.csv"
+    - "omni_processed.csv"
+
+# Training Parameters
+training:
+  lookback_windows: [24, 72, 168]
+  main_lookback: 168
+  batch_size: 64
+  max_epochs: 150
+  val_split: 0.15
+  test_split: 0.15
+  learning_rate: 0.001
+  min_samples: 500
+  
+  # Advanced Features
+  use_feature_engineering: true
+  use_seasonal_features: true
+  use_cross_validation: true
+  use_ensemble: true
+  n_ensemble_models: 3
+
+# Model Configuration
+models:
+  available: ["lstm", "gru", "hybrid", "transformer"]
+  default: ["lstm", "gru", "hybrid"]
+  
+# Forecast Horizons (hours)
+horizons: [1, 3, 6, 12, 24, 48]
+
+# Targets Configuration
+targets:
+  primary:
+    - "speed"
+    - "bz_gse" 
+    - "density"
+  secondary:
+    - "bt"
+    - "temperature"
+    - "pressure"
+
+# Real-time Prediction
+realtime:
+  update_interval_minutes: 60
+  max_retries: 3
+  timeout_seconds: 30
+  confidence_intervals: [0.8, 0.9, 0.95]
+  
+# Dashboard Configuration
+dashboard:
+  port: 8050
+  host: "0.0.0.0"
+  update_interval: 60000  # milliseconds
+  theme: "dark"
+  
+# SHAP Interpretability
+shap:
+  enabled: true
+  n_background_samples: 100
+  n_explanation_samples: 50
+  
+# Uncertainty Quantification
+uncertainty:
+  enabled: true
+  n_ensemble_members: 10
+  confidence_levels: [0.8, 0.9, 0.95]
+  calibration_bins: 10
+  
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_retention_days: 30
+
+# Performance Optimization
+performance:
+  use_gpu: true
+  n_jobs: -1
+  memory_limit: "8GB"
+  
+# Alert System
+alerts:
+  enabled: true
+  thresholds:
+    speed_high: 600
+    speed_low: 250
+    bz_extreme: 10
+    density_high: 20
+  notification:
+    email: false
+    webhook: ""
