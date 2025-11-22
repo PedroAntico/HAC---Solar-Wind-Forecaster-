@@ -146,8 +146,8 @@ if __name__ == "__main__":
     os.makedirs(out_dir, exist_ok=True)
 
     for h, data in datasets.items():
-        np.save(os.path.join(out_dir, f"X_h{h}.npy"), data["X"])
-        np.save(os.path.join(out_dir, f"y_h{h}.npy"], data["y"])
+        np.save(os.path.join(out_dir, f"X_{h}.npy"), data["X"])
+        np.save(os.path.join(out_dir, f"y_{h}.npy"), data["y"])
         print(f"💾 Saved horizon {h} → {out_dir}")
 
     print("✅ Feature preparation completed!")
