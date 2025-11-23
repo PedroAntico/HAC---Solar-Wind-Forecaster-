@@ -2,18 +2,13 @@
 """
 hac_v6_features.py
 Feature Engineering & Dataset Builder for HAC v6 Solar Wind Forecaster
-
-Prepares the OMNI real-time data into:
-- normalized feature matrices
-- temporal windows (lookback)
-- target arrays for multi-horizon forecasting
 """
 
 import os
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-from typing import Dict, Tuple, List
+from typing import Dict
 from hac_v6_config import HACConfig
 
 
@@ -22,8 +17,6 @@ class HACFeatureBuilder:
 
     def __init__(self, config: HACConfig):
         self.config = config
-
-        # Scalers for each feature
         self.scalers = {}
 
         # Load data
@@ -38,36 +31,34 @@ class HACFeatureBuilder:
         print(f"📂 Loading dataset: {csv_path}")
         self.df = pd.read_csv(csv_path)
 
-        # Your dataset uses 'datetime'
+        # Convert timestamp
         self.df["timestamp"] = pd.to_datetime(self.df["datetime"])
 
-        # Validate required columns
+        # Drop known non-numeric columns early
+        date_cols = ["datetime", "timestamp", "year", "doy", "hour"]
+        for col in date_cols:
+            if col in self.df.columns:
+                self.df = self.df.drop(columns=[col])
+
+        # Validate required numeric fields
         self._validate_columns()
 
     # ------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------
-
     def _validate_columns(self):
-        """Ensure dataset has all required columns"""
+        """Ensure required fields exist."""
 
         required = ["speed", "bz_gsm", "density"]
 
         missing = [c for c in required if c not in self.df.columns]
-
         if missing:
             raise ValueError(
-                f"❌ Missing required OMNI columns: {missing}. "
-                f"Your file contains: {list(self.df.columns)}"
+                f"❌ Missing required OMNI columns: {missing}\n"
+                f"Available: {list(self.df.columns)}"
             )
 
     # ------------------------------------------------------------
-    # Main feature engineering pipeline
-    # ------------------------------------------------------------
-
     def build_all(self):
-        """Run the full pipeline"""
-
+        """Run full pipeline."""
         print("🔧 Creating engineered features...")
         df = self._engineer_features(self.df.copy())
 
@@ -80,19 +71,14 @@ class HACFeatureBuilder:
         return datasets
 
     # ------------------------------------------------------------
-    # Feature engineering
-    # ------------------------------------------------------------
-
     def _engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Generate lags, rolling statistics"""
+        """Generate lags, rolling stats."""
 
-        # ✔ corrected for your dataset
         feature_cols = [
             "speed", "bz_gsm", "density",
             "temperature", "pressure", "bt"
         ]
 
-        # Filter only existing columns (safeguard)
         feature_cols = [c for c in feature_cols if c in df.columns]
 
         # Lags
@@ -110,35 +96,35 @@ class HACFeatureBuilder:
         return df
 
     # ------------------------------------------------------------
-    # Scaling
-    # ------------------------------------------------------------
-
     def _scale_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Standard scale all numeric features"""
+        """Standard scale only numeric columns."""
 
-        cols = [c for c in df.columns if c not in ["timestamp"]]
+        # Remove any non-numeric column
+        numeric_df = df.select_dtypes(include=["number"])
+        non_numeric = [c for c in df.columns if c not in numeric_df.columns]
 
+        if non_numeric:
+            print(f"⚠️ Removing non-numeric columns before scaling: {non_numeric}")
+
+        df = numeric_df.copy()
+
+        # Apply scaler
         scaler = StandardScaler()
-        df[cols] = scaler.fit_transform(df[cols])
+        df[df.columns] = scaler.fit_transform(df[df.columns])
 
         self.scalers["main"] = scaler
         return df
 
     # ------------------------------------------------------------
-    # Window builder
-    # ------------------------------------------------------------
-
     def _make_all_horizon_windows(self, df: pd.DataFrame) -> Dict:
-        """Create supervised datasets for all horizons"""
+        """Create temporal windows."""
 
         lookback = self.config.get("training")["main_lookback"]
         horizons = self.config.get("horizons")
 
-        feature_cols = [c for c in df.columns if c != "timestamp"]
-
+        feature_cols = list(df.columns)
         data = df[feature_cols].values
 
-        # ✔ corrected target columns
         targets = df[["speed", "bz_gsm", "density"]].values
 
         datasets = {}
@@ -146,8 +132,7 @@ class HACFeatureBuilder:
         for h in horizons:
             print(f"🪟 Building horizon {h}h...")
 
-            X_list = []
-            y_list = []
+            X_list, y_list = [], []
 
             for i in range(len(data) - lookback - h):
                 X_list.append(data[i:i + lookback])
@@ -162,15 +147,11 @@ class HACFeatureBuilder:
 
 
 # ------------------------------------------------------------
-# Script mode
-# ------------------------------------------------------------
-
 if __name__ == "__main__":
     print("🚀 HAC v6 FEATURE BUILDER")
 
     config = HACConfig("config.yaml")
     builder = HACFeatureBuilder(config)
-
     datasets = builder.build_all()
 
     out_dir = os.path.join(config.get("paths")["data_dir"], "prepared")
