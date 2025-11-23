@@ -151,6 +151,7 @@ performance:
   use_gpu: true
   n_jobs: -1
   memory_limit: "8GB"
+  low_memory_mode: true
 
 # ----------------------------------------------------------
 # Alerts
