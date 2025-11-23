@@ -40,9 +40,10 @@ training:
   n_ensemble_models: 3
 
 # ----------------------------------------------------------
-# Model Selection (USED BY MODEL BUILDER)
+# Modern model section (USED BY MODEL BUILDER)
 # ----------------------------------------------------------
 model:
+  # tipo principal usado nos scripts
   type: "hybrid"        # choices: lstm, gru, hybrid, transformer, ensemble
 
   # Shared parameters
@@ -61,13 +62,32 @@ model:
     - "lstm"
     - "gru"
     - "hybrid"
-    # - "transformer"   # enable if desired
+    # - "transformer"   # habilite se quiser
 
 # ----------------------------------------------------------
 # Legacy section required by HACConfig validator
+# (mantém compatibilidade com código antigo)
 # ----------------------------------------------------------
 models:
-  dummy: true
+  model_type: "hybrid"
+  units: 64
+  num_layers: 2
+  dropout: 0.1
+
+  lstm:
+    units: 64
+  gru:
+    units: 64
+  transformer:
+    heads: 4
+    depth: 2
+    ff_dim: 64
+
+  ensemble_types:
+    - "lstm"
+    - "gru"
+    - "hybrid"
+    # - "transformer"
 
 # ----------------------------------------------------------
 # Forecast Horizons
