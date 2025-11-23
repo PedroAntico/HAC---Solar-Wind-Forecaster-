@@ -1,219 +1,81 @@
 #!/usr/bin/env python3
-"""
-hac_v6_predictor.py
-Real-Time Predictor for HAC v6 Solar Wind Forecaster
-
-- Loads trained models (.h5)
-- Loads scalers and metadata
-- Handles custom metrics
-- Predicts multi-horizon outputs
-- Generates alerts
-"""
-
-import os
-import json
+import os, json
 import numpy as np
 import pandas as pd
 import joblib
 
 from hac_v6_config import HACConfig
 from tensorflow.keras.models import load_model
-import tensorflow as tf
 
-
-# ==========================================================
-# ✔ CUSTOM METRICS (NO SYNTAX ERRORS!)
-# ==========================================================
-
-def rmse(y_true, y_pred):
-    return tf.sqrt(tf.reduce_mean(tf.square(y_pred - y_true)))
-
-def mse(y_true, y_pred):
-    return tf.reduce_mean(tf.square(y_pred - y_true))
-
-def mae(y_true, y_pred):
-    return tf.reduce_mean(tf.abs(y_pred - y_true))
-
-def directional_accuracy(y_true, y_pred):
-    """
-    Compara direção de variação (subiu / caiu)
-    """
-    true_dir = tf.sign(y_true[:, 1:] - y_true[:, :-1])
-    pred_dir = tf.sign(y_pred[:, 1:] - y_pred[:, :-1])
-    return tf.reduce_mean(tf.cast(tf.equal(true_dir, pred_dir), tf.float32))
-
-
-# Registrar métricas para Keras
-custom_objects = {
-    "rmse": rmse,
-    "mse": mse,
-    "mae": mae,
-    "directional_accuracy": directional_accuracy
-}
-
-
-# ==========================================================
-# ✔ PREDICTOR CLASS
-# ==========================================================
 
 class HACv6Predictor:
-    """Loads trained HAC models and performs predictions."""
 
     def __init__(self, config_path="config.yaml"):
-        print("📡 Loading configuration...")
         self.config = HACConfig(config_path)
-
         self.model_dir = self.config.get("paths")["model_dir"]
 
-        print("🧠 Loading models...")
+        print("📡 Loading models...")
         self.models = {}
         self.scalers = {}
-        self.metadata = {}
+        self.meta = {}
 
-        self._load_all_models()
+        self._load_all()
 
         print("✅ Predictor ready!")
 
-    # ------------------------------------------------------
-    # Load all trained models
-    # ------------------------------------------------------
-    def _load_all_models(self):
-
-        if not os.path.isdir(self.model_dir):
-            print(f"❌ Model directory not found: {self.model_dir}")
-            return
+    # ---------------------------------------------
+    def _load_all(self):
 
         for folder in os.listdir(self.model_dir):
             path = os.path.join(self.model_dir, folder)
             if not os.path.isdir(path):
                 continue
 
-            # folder example: hybrid_h24_20251122_223213
             parts = folder.split("_")
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
 
-            model_type = parts[0].lower()
+            model_type = parts[0]
             horizon = int(parts[1].replace("h", ""))
 
-            print(f"→ Loading model: {model_type.upper()} | horizon={horizon}")
-
-            model_path = os.path.join(path, "model.h5")
-            scaler_X_path = os.path.join(path, "scaler_X.pkl")
-            scaler_Y_path = os.path.join(path, "scaler_Y.pkl")
-            metadata_path = os.path.join(path, "metadata.json")
+            model_path = os.path.join(path, "model.keras")
+            scaler_path = os.path.join(path, "scaler.pkl")
+            meta_path = os.path.join(path, "metadata.json")
 
             if not os.path.exists(model_path):
-                print("⚠ model.h5 missing:", folder)
                 continue
 
-            try:
-                model = load_model(model_path, custom_objects=custom_objects)
-                scaler_X = joblib.load(scaler_X_path)
-                scaler_Y = joblib.load(scaler_Y_path)
+            model = load_model(model_path)
+            scaler = joblib.load(scaler_path)
 
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
+            with open(meta_path) as f:
+                meta = json.load(f)
 
-                self.models.setdefault(model_type, {})
-                self.scalers.setdefault(model_type, {})
-                self.metadata.setdefault(model_type, {})
+            self.models[horizon] = model
+            self.scalers[horizon] = scaler
+            self.meta[horizon] = meta
 
-                self.models[model_type][horizon] = model
-                self.scalers[model_type][horizon] = {"X": scaler_X, "Y": scaler_Y}
-                self.metadata[model_type][horizon] = metadata
+    # ---------------------------------------------
+    def predict(self, df, horizon):
 
-            except Exception as e:
-                print(f"❌ Failed to load {folder}: {e}")
+        if horizon not in self.models:
+            raise ValueError(f"No model for horizon {horizon}h")
 
-    # ------------------------------------------------------
-    # Prepare window
-    # ------------------------------------------------------
-    def prepare_features(self, df, horizon, model_type):
+        model = self.models[horizon]
+        scaler = self.scalers[horizon]
+        meta = self.meta[horizon]
 
-        metadata = self.metadata[model_type][horizon]
-        lookback = metadata.get("lookback", 168)
-        targets = metadata["targets"]
+        lookback = meta["lookback"]
 
-        feature_cols = [c for c in df.columns if c not in targets]
-        window = df[feature_cols].tail(lookback)
-
-        if len(window) < lookback:
-            print("⚠ Not enough data for lookback window.")
-            return None
-
-        X = window.values
-        scaler_X = self.scalers[model_type][horizon]["X"]
-        X_scaled = scaler_X.transform(X)
-
-        return X_scaled.reshape(1, lookback, len(feature_cols))
-
-    # ------------------------------------------------------
-    # Predict
-    # ------------------------------------------------------
-    def predict(self, df, model_type="hybrid", horizon=24):
-
-        if model_type not in self.models:
-            raise ValueError(f"No model type found: {model_type}")
-
-        if horizon not in self.models[model_type]:
-            raise ValueError(f"No trained model for horizon {horizon}h")
-
-        X_scaled = self.prepare_features(df, horizon, model_type)
-        if X_scaled is None:
-            return None
-
-        model = self.models[model_type][horizon]
-        scaler_Y = self.scalers[model_type][horizon]["Y"]
-        metadata = self.metadata[model_type][horizon]
-        targets = metadata["targets"]
+        df = df.tail(lookback)
+        X = df.values
+        X_scaled = scaler.transform(X)
+        X_scaled = X_scaled.reshape(1, lookback, X_scaled.shape[1])
 
         y_scaled = model.predict(X_scaled, verbose=0)
-        y = scaler_Y.inverse_transform(y_scaled)[0]
+        y = y_scaled[0]
 
-        prediction = {targets[i]: float(y[i]) for i in range(len(targets))}
-        prediction["alerts"] = self.generate_alerts(prediction)
-
-        return prediction
-
-    # ------------------------------------------------------
-    # Alerts
-    # ------------------------------------------------------
-    def generate_alerts(self, p):
-
-        thresholds = self.config.get("alerts")["thresholds"]
-        alerts = []
-
-        if p["speed"] > thresholds["speed_high"]:
-            alerts.append("HIGH_SPEED")
-        if p["speed"] < thresholds["speed_low"]:
-            alerts.append("LOW_SPEED")
-
-        if p["density"] > thresholds["density_high"]:
-            alerts.append("HIGH_DENSITY")
-
-        if abs(p["bz_gse"]) > thresholds["bz_extreme"]:
-            alerts.append("EXTREME_BZ")
-
-        return alerts
-
-
-# ==========================================================
-# TEST ENTRY
-# ==========================================================
-if __name__ == "__main__":
-    pred = HACv6Predictor()
-
-    print("\nModels loaded:")
-    for m in pred.models:
-        print(" -", m, list(pred.models[m].keys()))
-
-    # Fake test
-    example = pd.DataFrame(
-        np.random.random((300, 3)),
-        columns=["speed", "bz_gse", "density"]
-    )
-
-    result = pred.predict(example, model_type="hybrid", horizon=24)
-    print("\nExample prediction:")
-    print(result)
+        return {
+            meta["targets"][i]: float(y[i])
+            for i in range(len(y))
+        }
