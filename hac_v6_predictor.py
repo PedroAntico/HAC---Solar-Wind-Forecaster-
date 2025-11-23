@@ -5,9 +5,9 @@ Real-Time Predictor for HAC v6 Solar Wind Forecaster
 
 - Loads trained models (.h5)
 - Loads scalers and metadata
-- Handles custom metrics used in training
-- Predicts multi-horizon solar wind values
-- Generates alerts based on thresholds
+- Handles custom metrics
+- Predicts multi-horizon outputs
+- Generates alerts
 """
 
 import os
@@ -15,7 +15,6 @@ import json
 import numpy as np
 import pandas as pd
 import joblib
-from datetime import datetime, timedelta
 
 from hac_v6_config import HACConfig
 from tensorflow.keras.models import load_model
@@ -23,28 +22,28 @@ import tensorflow as tf
 
 
 # ==========================================================
-# CUSTOM METRICS (needed to load saved models)
+# ✔ CUSTOM METRICS (NO SYNTAX ERRORS!)
 # ==========================================================
 
 def rmse(y_true, y_pred):
     return tf.sqrt(tf.reduce_mean(tf.square(y_pred - y_true)))
 
 def mse(y_true, y_pred):
-    return tf.reduce_mean(tf.square(y_pred - y_true)))
+    return tf.reduce_mean(tf.square(y_pred - y_true))
 
 def mae(y_true, y_pred):
-    return tf.reduce_mean(tf.abs(y_pred - y_true)))
+    return tf.reduce_mean(tf.abs(y_pred - y_true))
 
 def directional_accuracy(y_true, y_pred):
     """
-    Compares direction changes (rise/fall) instead of magnitude.
+    Compara direção de variação (subiu / caiu)
     """
     true_dir = tf.sign(y_true[:, 1:] - y_true[:, :-1])
     pred_dir = tf.sign(y_pred[:, 1:] - y_pred[:, :-1])
     return tf.reduce_mean(tf.cast(tf.equal(true_dir, pred_dir), tf.float32))
 
 
-# Register for Keras
+# Registrar métricas para Keras
 custom_objects = {
     "rmse": rmse,
     "mse": mse,
@@ -54,11 +53,11 @@ custom_objects = {
 
 
 # ==========================================================
-# PREDICTOR CLASS
+# ✔ PREDICTOR CLASS
 # ==========================================================
 
 class HACv6Predictor:
-    """Loads trained models and performs solar wind forecasting."""
+    """Loads trained HAC models and performs predictions."""
 
     def __init__(self, config_path="config.yaml"):
         print("📡 Loading configuration...")
@@ -66,17 +65,17 @@ class HACv6Predictor:
 
         self.model_dir = self.config.get("paths")["model_dir"]
 
-        print("🧠 Loading available models...")
-        self.models = {}       # models[model_type][horizon]
-        self.scalers = {}      # scalers[model_type][horizon]
-        self.metadata = {}     # metadata[model_type][horizon]
+        print("🧠 Loading models...")
+        self.models = {}
+        self.scalers = {}
+        self.metadata = {}
 
         self._load_all_models()
 
         print("✅ Predictor ready!")
 
     # ------------------------------------------------------
-    # Load all saved models
+    # Load all trained models
     # ------------------------------------------------------
     def _load_all_models(self):
 
@@ -89,7 +88,7 @@ class HACv6Predictor:
             if not os.path.isdir(path):
                 continue
 
-            # Folder pattern: hybrid_h24_20251122_223213
+            # folder example: hybrid_h24_20251122_223213
             parts = folder.split("_")
             if len(parts) < 3:
                 continue
@@ -97,7 +96,7 @@ class HACv6Predictor:
             model_type = parts[0].lower()
             horizon = int(parts[1].replace("h", ""))
 
-            print(f"→ Loading model: {model_type.upper()} horizon={horizon}")
+            print(f"→ Loading model: {model_type.upper()} | horizon={horizon}")
 
             model_path = os.path.join(path, "model.h5")
             scaler_X_path = os.path.join(path, "scaler_X.pkl")
@@ -105,7 +104,7 @@ class HACv6Predictor:
             metadata_path = os.path.join(path, "metadata.json")
 
             if not os.path.exists(model_path):
-                print("⚠ Missing model.h5 in folder:", folder)
+                print("⚠ model.h5 missing:", folder)
                 continue
 
             try:
@@ -116,7 +115,6 @@ class HACv6Predictor:
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
 
-                # Store
                 self.models.setdefault(model_type, {})
                 self.scalers.setdefault(model_type, {})
                 self.metadata.setdefault(model_type, {})
@@ -126,39 +124,32 @@ class HACv6Predictor:
                 self.metadata[model_type][horizon] = metadata
 
             except Exception as e:
-                print(f"❌ Failed to load model {folder}: {e}")
+                print(f"❌ Failed to load {folder}: {e}")
 
     # ------------------------------------------------------
-    # Prepare input window
+    # Prepare window
     # ------------------------------------------------------
     def prepare_features(self, df, horizon, model_type):
-        if model_type not in self.metadata:
-            print(f"❌ Unknown model type: {model_type}")
-            return None
 
         metadata = self.metadata[model_type][horizon]
-        targets = metadata["targets"]
         lookback = metadata.get("lookback", 168)
+        targets = metadata["targets"]
 
         feature_cols = [c for c in df.columns if c not in targets]
-
         window = df[feature_cols].tail(lookback)
 
         if len(window) < lookback:
-            print("⚠ Not enough data to form input window")
+            print("⚠ Not enough data for lookback window.")
             return None
 
         X = window.values
-
         scaler_X = self.scalers[model_type][horizon]["X"]
         X_scaled = scaler_X.transform(X)
 
-        X_scaled = X_scaled.reshape(1, lookback, len(feature_cols))
-
-        return X_scaled
+        return X_scaled.reshape(1, lookback, len(feature_cols))
 
     # ------------------------------------------------------
-    # Prediction
+    # Predict
     # ------------------------------------------------------
     def predict(self, df, model_type="hybrid", horizon=24):
 
@@ -181,7 +172,6 @@ class HACv6Predictor:
         y = scaler_Y.inverse_transform(y_scaled)[0]
 
         prediction = {targets[i]: float(y[i]) for i in range(len(targets))}
-
         prediction["alerts"] = self.generate_alerts(prediction)
 
         return prediction
@@ -189,41 +179,41 @@ class HACv6Predictor:
     # ------------------------------------------------------
     # Alerts
     # ------------------------------------------------------
-    def generate_alerts(self, prediction):
+    def generate_alerts(self, p):
 
         thresholds = self.config.get("alerts")["thresholds"]
         alerts = []
 
-        if prediction["speed"] > thresholds["speed_high"]:
+        if p["speed"] > thresholds["speed_high"]:
             alerts.append("HIGH_SPEED")
-        if prediction["speed"] < thresholds["speed_low"]:
+        if p["speed"] < thresholds["speed_low"]:
             alerts.append("LOW_SPEED")
 
-        if prediction["density"] > thresholds["density_high"]:
+        if p["density"] > thresholds["density_high"]:
             alerts.append("HIGH_DENSITY")
 
-        if abs(prediction["bz_gse"]) > thresholds["bz_extreme"]:
+        if abs(p["bz_gse"]) > thresholds["bz_extreme"]:
             alerts.append("EXTREME_BZ")
 
         return alerts
 
 
-# ----------------------------------------------------------
-# Direct run test
-# ----------------------------------------------------------
+# ==========================================================
+# TEST ENTRY
+# ==========================================================
 if __name__ == "__main__":
     pred = HACv6Predictor()
 
     print("\nModels loaded:")
     for m in pred.models:
-        print(f" - {m}: horizons {list(pred.models[m].keys())}")
+        print(" -", m, list(pred.models[m].keys()))
 
-    # Example dummy data
+    # Fake test
     example = pd.DataFrame(
         np.random.random((300, 3)),
         columns=["speed", "bz_gse", "density"]
     )
 
     result = pred.predict(example, model_type="hybrid", horizon=24)
-    print("\nPrediction example:")
+    print("\nExample prediction:")
     print(result)
