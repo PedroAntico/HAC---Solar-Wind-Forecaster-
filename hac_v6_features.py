@@ -19,7 +19,7 @@ class HACFeatureBuilder:
         self.config = config
         self.scalers = {}
 
-        # Load data
+        # Load raw prepared data
         csv_path = os.path.join(
             config.get("paths")["data_dir"],
             "omni_prepared.csv"
@@ -32,15 +32,16 @@ class HACFeatureBuilder:
         self.df = pd.read_csv(csv_path)
 
         # Convert timestamp
-        self.df["timestamp"] = pd.to_datetime(self.df["datetime"])
+        if "datetime" in self.df.columns:
+            self.df["timestamp"] = pd.to_datetime(self.df["datetime"])
 
         # Drop known non-numeric columns early
-        date_cols = ["datetime", "timestamp", "year", "doy", "hour"]
-        for col in date_cols:
+        drop_cols = ["datetime", "timestamp", "year", "doy", "hour"]
+        for col in drop_cols:
             if col in self.df.columns:
                 self.df = self.df.drop(columns=[col])
 
-        # Validate required numeric fields
+        # Validate columns exist
         self._validate_columns()
 
     # ------------------------------------------------------------
@@ -57,32 +58,37 @@ class HACFeatureBuilder:
             )
 
     # ------------------------------------------------------------
-    # LOW MEMORY MODE FOR CODESPACES
-    # -----------------------------
-    low_mem = self.config.get("performance", {}).get("low_memory_mode", False)
+    def build_all(self):
+        """Run the entire feature engineering and dataset preparation"""
 
-    if low_mem:
-        print("⚠️ LOW MEMORY MODE ENABLED (Codespaces 2GB)")
-        print("⚠️ Reducing dataset size to avoid OOM kill...")
+        # ------------------------------------------------------------
+        # LOW MEMORY MODE (for Codespaces)
+        # ------------------------------------------------------------
+        low_mem = self.config.get("performance", {}).get("low_memory_mode", False)
 
-        # Keep only the last 3000 rows (enough for training)
-        self.df = self.df.tail(3000).reset_index(drop=True)
+        if low_mem:
+            print("⚠️ LOW MEMORY MODE ENABLED (Codespaces 2GB)")
+            print("⚠️ Trimming dataset to avoid OOM kill...")
 
-        # Reduce lookback automatically
-        self.config.config_dict["training"]["main_lookback"] = 48
+            # Keep only last part of data to reduce RAM
+            self.df = self.df.tail(3000).reset_index(drop=True)
 
-        # Reduce rolling features (lighter)
-        self.df = self.df.copy()
+            # Reduce lookback
+            self.config.config_dict["training"]["main_lookback"] = 48
 
-        # Drop complex stats if needed
-        cols_to_keep = [
-            "datetime", "timestamp",
-            "speed", "bz_gsm", "density",
-            "temperature", "pressure", "bt"
-        ]
-        self.df = self.df[[c for c in self.df.columns if any(k in c for k in cols_to_keep)]]
+            print("⚠️ Dataset reduced successfully.")
 
-        print("⚠️ Dataset trimmed for low-RAM execution.")
+        # ------------------------------------------------------------
+        print("🔧 Creating engineered features...")
+        df = self._engineer_features(self.df.copy())
+
+        print("📏 Scaling features...")
+        df_scaled = self._scale_features(df)
+
+        print("📦 Building supervised learning windows...")
+        datasets = self._make_all_horizon_windows(df_scaled)
+
+        return datasets
 
     # ------------------------------------------------------------
     def _engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -111,9 +117,8 @@ class HACFeatureBuilder:
 
     # ------------------------------------------------------------
     def _scale_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Standard scale only numeric columns."""
+        """Standard scale numeric columns only."""
 
-        # Remove any non-numeric column
         numeric_df = df.select_dtypes(include=["number"])
         non_numeric = [c for c in df.columns if c not in numeric_df.columns]
 
@@ -122,11 +127,11 @@ class HACFeatureBuilder:
 
         df = numeric_df.copy()
 
-        # Apply scaler
         scaler = StandardScaler()
         df[df.columns] = scaler.fit_transform(df[df.columns])
 
         self.scalers["main"] = scaler
+
         return df
 
     # ------------------------------------------------------------
