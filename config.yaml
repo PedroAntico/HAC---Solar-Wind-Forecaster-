@@ -26,3 +26,7 @@ alerts:
     speed_low: 300
     density_high: 20
     bz_extreme: 10
+
+realtime:
+  enabled: false
+  update_interval_minutes: 60
