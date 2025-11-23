@@ -1,20 +1,28 @@
+# ==========================================================
 # HAC v6 - Real-Time AI Solar Wind Forecaster
-# Configuration File
+# Main Configuration File
+# ==========================================================
 
-# Paths and Directories
+version: "6.0"
+
+# ----------------------------------------------------------
+# Directories
+# ----------------------------------------------------------
 paths:
   data_dir: "data_real"
-  model_dir: "models/hac_omni_v6" 
+  model_dir: "models/hac_v6"
   results_dir: "results"
   logs_dir: "logs"
   dashboard_dir: "dashboard"
-  
+
   data_files:
-    - "omni_prepared.csv"
     - "omni_converted.csv"
+    - "omni_prepared.csv"
     - "omni_processed.csv"
 
-# Training Parameters
+# ----------------------------------------------------------
+# Training Settings
+# ----------------------------------------------------------
 training:
   lookback_windows: [24, 72, 168]
   main_lookback: 168
@@ -24,86 +32,116 @@ training:
   test_split: 0.15
   learning_rate: 0.001
   min_samples: 500
-  
-  # Advanced Features
+
   use_feature_engineering: true
   use_seasonal_features: true
-  use_cross_validation: true
-  use_ensemble: true
+  use_cross_validation: false
+  use_ensemble: false
   n_ensemble_models: 3
 
-# Model legacy section (required only so config validator won't fail)
-models:
-  dummy: true
-
-# Modern model section (used by model builder)
+# ----------------------------------------------------------
+# Model Selection (USED BY MODEL BUILDER)
+# ----------------------------------------------------------
 model:
-  type: "hybrid"
+  type: "hybrid"        # choices: lstm, gru, hybrid, transformer, ensemble
+
+  # Shared parameters
   units: 64
-  num_layers: 3
-  dropout: 0.15
-  lstm:
-    units: 64
-  gru:
-    units: 64
+  num_layers: 2
+  dropout: 0.1
+
+  # Transformer parameters
   transformer:
     heads: 4
     depth: 2
-  
-# Forecast Horizons (hours)
+    ff_dim: 64
+
+  # Ensemble parameters
+  ensemble_types:
+    - "lstm"
+    - "gru"
+    - "hybrid"
+    # - "transformer"   # enable if desired
+
+# ----------------------------------------------------------
+# Legacy section required by HACConfig validator
+# ----------------------------------------------------------
+models:
+  dummy: true
+
+# ----------------------------------------------------------
+# Forecast Horizons
+# ----------------------------------------------------------
 horizons: [1, 3, 6, 12, 24, 48]
 
-# Targets Configuration
+# ----------------------------------------------------------
+# Targets (the 3 most important must be PRIMARY)
+# ----------------------------------------------------------
 targets:
   primary:
     - "speed"
-    - "bz_gse" 
+    - "bz_gse"
     - "density"
+
   secondary:
     - "bt"
     - "temperature"
     - "pressure"
 
-# Real-time Prediction
+# ----------------------------------------------------------
+# Real-Time Prediction
+# ----------------------------------------------------------
 realtime:
   update_interval_minutes: 60
   max_retries: 3
   timeout_seconds: 30
   confidence_intervals: [0.8, 0.9, 0.95]
-  
-# Dashboard Configuration
+
+# ----------------------------------------------------------
+# Dashboard Config
+# ----------------------------------------------------------
 dashboard:
   port: 8050
   host: "0.0.0.0"
-  update_interval: 60000  # milliseconds
+  update_interval: 60000   # ms
   theme: "dark"
-  
-# SHAP Interpretability
+
+# ----------------------------------------------------------
+# SHAP
+# ----------------------------------------------------------
 shap:
   enabled: true
-  n_background_samples: 100
-  n_explanation_samples: 50
-  
-# Uncertainty Quantification
+  n_background_samples: 50
+  n_explanation_samples: 25
+
+# ----------------------------------------------------------
+# Uncertainty
+# ----------------------------------------------------------
 uncertainty:
   enabled: true
   n_ensemble_members: 10
   confidence_levels: [0.8, 0.9, 0.95]
-  calibration_bins: 10
-  
+  calibration_bins: 8
+
+# ----------------------------------------------------------
 # Logging
+# ----------------------------------------------------------
 logging:
   level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  format: "%(asctime)s - %(levelname)s - %(message)s"
   file_retention_days: 30
 
-# Performance Optimization
+# ----------------------------------------------------------
+# Hardware
+# ----------------------------------------------------------
 performance:
   use_gpu: true
   n_jobs: -1
   memory_limit: "8GB"
-  
-# Alert System
+
+# ----------------------------------------------------------
+# Alerts
+# ----------------------------------------------------------
 alerts:
   enabled: true
   thresholds:
@@ -111,6 +149,7 @@ alerts:
     speed_low: 250
     bz_extreme: 10
     density_high: 20
+
   notification:
     email: false
     webhook: ""
