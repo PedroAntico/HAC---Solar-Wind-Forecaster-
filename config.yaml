@@ -1,169 +1,28 @@
-# ==========================================================
-# HAC v6 - Real-Time AI Solar Wind Forecaster
-# Main Configuration File
-# ==========================================================
-
-version: "6.0"
-
-# ----------------------------------------------------------
-# Directories
-# ----------------------------------------------------------
 paths:
-  data_dir: "data_real"
-  model_dir: "models/hac_v6"
-  results_dir: "results"
-  logs_dir: "logs"
-  dashboard_dir: "dashboard"
+  data_dir: data_real
+  model_dir: models/hac_v6
 
-  data_files:
-    - "omni_converted.csv"
-    - "omni_prepared.csv"
-    - "omni_processed.csv"
-
-# ----------------------------------------------------------
-# Training Settings
-# ----------------------------------------------------------
-training:
-  lookback_windows: [24, 72, 168]
-  main_lookback: 168
-  batch_size: 64
-  max_epochs: 150
-  val_split: 0.15
-  test_split: 0.15
-  learning_rate: 0.001
-  min_samples: 500
-
-  use_feature_engineering: true
-  use_seasonal_features: true
-  use_cross_validation: false
-  use_ensemble: false
-  n_ensemble_models: 3
-
-# ----------------------------------------------------------
-# Modern model section (USED BY MODEL BUILDER)
-# ----------------------------------------------------------
-model:
-  type: "hybrid"        # choices: lstm, gru, hybrid, transformer, ensemble
-
-  units: 64
-  num_layers: 2
-  dropout: 0.1
-
-  transformer:
-    heads: 4
-    depth: 2
-    ff_dim: 64
-
-  ensemble_types:
-    - "lstm"
-    - "gru"
-    - "hybrid"
-
-# ----------------------------------------------------------
-# Legacy section required by HACConfig
-# ----------------------------------------------------------
-models:
-  train_single: "hybrid"
-  model_type: "hybrid"
-  units: 64
-  num_layers: 2
-  dropout: 0.1
-
-  lstm:
-    units: 64
-  gru:
-    units: 64
-  transformer:
-    heads: 4
-    depth: 2
-    ff_dim: 64
-
-  ensemble_types:
-    - "lstm"
-    - "gru"
-    - "hybrid"
-
-# ----------------------------------------------------------
-# Forecast Horizons
-# ----------------------------------------------------------
-horizons: [1, 3, 6, 12, 24, 48]
-
-# ----------------------------------------------------------
-# Targets
-# ----------------------------------------------------------
-targets:
-  primary:
-    - "speed"
-    - "bz_gsm"        # CORRIGIDO — existe no seu dataset
-    - "density"
-
-  secondary:
-    - "bt"
-    - "temperature"
-    - "pressure"
-
-# ----------------------------------------------------------
-# Real-Time Prediction
-# ----------------------------------------------------------
-realtime:
-  update_interval_minutes: 60
-  max_retries: 3
-  timeout_seconds: 30
-  confidence_intervals: [0.8, 0.9, 0.95]
-
-# ----------------------------------------------------------
-# Dashboard Config
-# ----------------------------------------------------------
-dashboard:
-  port: 8050
-  host: "0.0.0.0"
-  update_interval: 60000   # ms
-  theme: "dark"
-
-# ----------------------------------------------------------
-# SHAP
-# ----------------------------------------------------------
-shap:
-  enabled: true
-  n_background_samples: 50
-  n_explanation_samples: 25
-
-# ----------------------------------------------------------
-# Uncertainty
-# ----------------------------------------------------------
-uncertainty:
-  enabled: true
-  n_ensemble_members: 10
-  confidence_levels: [0.8, 0.9, 0.95]
-  calibration_bins: 8
-
-# ----------------------------------------------------------
-# Logging
-# ----------------------------------------------------------
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(levelname)s - %(message)s"
-  file_retention_days: 30
-
-# ----------------------------------------------------------
-# Hardware
-# ----------------------------------------------------------
 performance:
   low_memory_mode: true
-  use_gpu: false
-  n_jobs: 1
-  memory_limit: "1GB"
-# ----------------------------------------------------------
-# Alerts
-# ----------------------------------------------------------
-alerts:
-  enabled: true
-  thresholds:
-    speed_high: 600
-    speed_low: 250
-    bz_extreme: 10
-    density_high: 20
 
-  notification:
-    email: false
-    webhook: ""
+training:
+  main_lookback: 48
+  batch_size: 16
+  max_epochs: 50
+  val_split: 0.15
+  test_split: 0.15
+
+horizons: [1, 3, 6, 12, 24, 48]
+
+targets:
+  primary: ["speed", "bz_gsm", "density"]
+
+models:
+  default: ["hybrid"]
+
+alerts:
+  thresholds:
+    speed_high: 650
+    speed_low: 300
+    density_high: 20
+    bz_extreme: 10
