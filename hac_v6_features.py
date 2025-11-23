@@ -57,18 +57,32 @@ class HACFeatureBuilder:
             )
 
     # ------------------------------------------------------------
-    def build_all(self):
-        """Run full pipeline."""
-        print("🔧 Creating engineered features...")
-        df = self._engineer_features(self.df.copy())
+    # LOW MEMORY MODE FOR CODESPACES
+    # -----------------------------
+    low_mem = self.config.get("performance", {}).get("low_memory_mode", False)
 
-        print("📏 Scaling features...")
-        df_scaled = self._scale_features(df)
+    if low_mem:
+        print("⚠️ LOW MEMORY MODE ENABLED (Codespaces 2GB)")
+        print("⚠️ Reducing dataset size to avoid OOM kill...")
 
-        print("📦 Building supervised windows...")
-        datasets = self._make_all_horizon_windows(df_scaled)
+        # Keep only the last 3000 rows (enough for training)
+        self.df = self.df.tail(3000).reset_index(drop=True)
 
-        return datasets
+        # Reduce lookback automatically
+        self.config.config_dict["training"]["main_lookback"] = 48
+
+        # Reduce rolling features (lighter)
+        self.df = self.df.copy()
+
+        # Drop complex stats if needed
+        cols_to_keep = [
+            "datetime", "timestamp",
+            "speed", "bz_gsm", "density",
+            "temperature", "pressure", "bt"
+        ]
+        self.df = self.df[[c for c in self.df.columns if any(k in c for k in cols_to_keep)]]
+
+        print("⚠️ Dataset trimmed for low-RAM execution.")
 
     # ------------------------------------------------------------
     def _engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
