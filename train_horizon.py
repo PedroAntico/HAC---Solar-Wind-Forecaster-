@@ -1,54 +1,66 @@
 #!/usr/bin/env python3
-import argparse
-import os
-import json
-import numpy as np
-import tensorflow as tf
+"""
+train_horizon.py
+Train HAC v6 for a single horizon only.
+"""
 
+import argparse
+import sys
 from hac_v6_config import HACConfig
 from hac_v6_features import HACFeatureBuilder
 from hac_v6_models import create_model_builder
+import tensorflow as tf
+import numpy as np
+import os
 
 
 def train_single_horizon(h):
-
+    print("📡 Loading configuration...")
     config = HACConfig("config.yaml")
 
-    feature_builder = HACFeatureBuilder(config)
-    datasets = feature_builder.build_all()
+    print("🧬 Loading dataset builder...")
+    features = HACFeatureBuilder(config)
+
+    print("🧠 Initializing model builder...")
+    model_builder = create_model_builder(config)
+
+    print("📁 Loading dataset: data_real/omni_prepared.csv")
+    datasets = features.build_all()
 
     if h not in datasets:
-        raise RuntimeError(f"Horizon {h} not available in datasets")
+        raise ValueError(f"Horizon {h}h not found in dataset.")
 
     X = datasets[h]["X"]
     y = datasets[h]["y"]
 
-    if len(X) < 100:
-        raise RuntimeError(f"Not enough data to train horizon {h}h ({len(X)} samples).")
+    print(f"📊 Dataset for horizon {h}h: X={X.shape}, y={y.shape}")
 
-    lookback = config.get("training")["main_lookback"]
-    feature_count = X.shape[2]
-    output_dim = len(config.get("targets")["primary"])
-
-    builder = create_model_builder(config)
-
-    model = builder.build_model(
-        model_type="hybrid",
-        input_shape=(lookback, feature_count),
-        output_dim=output_dim
-    )
-
-    # Train/Val/Test split
+    # splits
     n = len(X)
-    n_train = int(n * 0.7)
-    n_val = int(n * 0.15)
+    val_split = config.get("training")["val_split"]
+    test_split = config.get("training")["test_split"]
+
+    n_train = int(n * (1 - val_split - test_split))
+    n_val = int(n * val_split)
 
     X_train, y_train = X[:n_train], y[:n_train]
-    X_val,   y_val   = X[n_train:n_train+n_val], y[n_train:n_train+n_val]
-    X_test,  y_test  = X[n_train+n_val:], y[n_train+n_val:]
+    X_val, y_val = X[n_train:n_train+n_val], y[n_train:n_train+n_val]
+    X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
 
-    callbacks = builder.create_advanced_callbacks("hybrid", h)
+    print(f"→ Train = {len(X_train)}, Val = {len(X_val)}, Test = {len(X_test)}")
 
+    model_type = config.get("models")["default"][0]
+
+    print(f"🧠 Building model {model_type.upper()} for horizon {h}h...")
+    model = model_builder.build_model(
+        model_type=model_type,
+        input_shape=X_train.shape[1:],
+        output_dim=y_train.shape[1],
+    )
+
+    callbacks = model_builder.create_advanced_callbacks(model_type, h)
+
+    print("🚀 Training...")
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
@@ -58,26 +70,20 @@ def train_single_horizon(h):
         callbacks=callbacks
     )
 
-    loss, mae, mse, rmse = model.evaluate(X_test, y_test, verbose=0)
-
-    stamp = tf.timestamp().numpy().astype(int)
-    out_dir = os.path.join(config.get("paths")["model_dir"], f"hybrid_h{h}_{stamp}")
-    os.makedirs(out_dir, exist_ok=True)
-
-    model.save(os.path.join(out_dir, "model.keras"))
-
-    import joblib
-    joblib.dump(feature_builder.scalers["main"], os.path.join(out_dir, "scaler.pkl"))
-
-    meta = {"horizon": h, "lookback": lookback, "targets": config.get("targets")["primary"]}
-    with open(os.path.join(out_dir, "metadata.json"), "w") as f:
-        json.dump(meta, f, indent=2)
-
-    print(f"✔ Saved model for horizon {h}h in {out_dir}")
+    print("🧪 Evaluating...")
+    loss, mae, mse, rmse, dir_acc = model.evaluate(X_test, y_test, verbose=0)
+    print(f"🎯 RMSE={rmse:.3f} MAE={mae:.3f} DIR_ACC={dir_acc:.3f}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--h", type=int, required=True)
+    parser = argparse.ArgumentParser(
+        description="Train HAC v6 model for a single horizon."
+    )
+    parser.add_argument(
+        "--h", "--horizon", dest="horizon", type=int, required=True,
+        help="Horizon to train (1,3,6,12,24,48)"
+    )
+
     args = parser.parse_args()
-    train_single_horizon(args.h)
+
+    train_single_horizon(args.horizon)
