@@ -43,30 +43,24 @@ training:
 # Modern model section (USED BY MODEL BUILDER)
 # ----------------------------------------------------------
 model:
-  # tipo principal usado nos scripts
   type: "hybrid"        # choices: lstm, gru, hybrid, transformer, ensemble
 
-  # Shared parameters
   units: 64
   num_layers: 2
   dropout: 0.1
 
-  # Transformer parameters
   transformer:
     heads: 4
     depth: 2
     ff_dim: 64
 
-  # Ensemble parameters
   ensemble_types:
     - "lstm"
     - "gru"
     - "hybrid"
-    # - "transformer"   # habilite se quiser
 
 # ----------------------------------------------------------
-# Legacy section required by HACConfig validator
-# (mantém compatibilidade com código antigo)
+# Legacy section required by HACConfig
 # ----------------------------------------------------------
 models:
   model_type: "hybrid"
@@ -87,7 +81,6 @@ models:
     - "lstm"
     - "gru"
     - "hybrid"
-    # - "transformer"
 
 # ----------------------------------------------------------
 # Forecast Horizons
@@ -95,12 +88,12 @@ models:
 horizons: [1, 3, 6, 12, 24, 48]
 
 # ----------------------------------------------------------
-# Targets (the 3 most important must be PRIMARY)
+# Targets
 # ----------------------------------------------------------
 targets:
   primary:
     - "speed"
-    - "bz_gse"
+    - "bz_gsm"        # CORRIGIDO — existe no seu dataset
     - "density"
 
   secondary:
