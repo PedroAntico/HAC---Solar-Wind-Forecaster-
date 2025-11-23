@@ -63,6 +63,7 @@ model:
 # Legacy section required by HACConfig
 # ----------------------------------------------------------
 models:
+  train_single: "hybrid"
   model_type: "hybrid"
   units: 64
   num_layers: 2
