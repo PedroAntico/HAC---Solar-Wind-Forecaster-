@@ -1,158 +1,208 @@
 #!/usr/bin/env python3
 """
-hac_v6_predictor.py
-Real-Time Predictor for HAC v6
-
-- Carrega o ÚLTIMO modelo treinado por horizonte
-- Carrega scaler_X
-- Prepara janela de entrada a partir de um DataFrame
-- Faz previsão (y em unidades físicas, sem inversão de escala)
+hac_v6_predictor.py - Predictor otimizado para GitHub Free
 """
 
 import os
+import re
 import json
-from typing import Dict, Any
+import logging
+from typing import Dict, Any, Tuple, Optional
+import gc
 
 import numpy as np
 import pandas as pd
-import joblib
-from tensorflow.keras.models import load_model
 
-from hac_v6_config import HACConfig
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+try:
+    from tensorflow.keras.models import load_model
+    TF_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"TensorFlow não disponível: {e}")
+    TF_AVAILABLE = False
+
+try:
+    from hac_v6_config import HACConfig
+except ImportError:
+    # Fallback para import local
+    import sys
+    sys.path.append('.')
+    from hac_v6_config import HACConfig
 
 
 class HACv6Predictor:
-
-    def __init__(self, config_path="config.yaml"):
-        print("📡 Loading configuration...")
+    """Carregador e predictor otimizado para GitHub Free"""
+    
+    def __init__(self, config_path: str = "config.yaml"):
         self.config = HACConfig(config_path)
-        self.paths = self.config.get("paths")
-        self.model_dir = self.paths["model_dir"]
+        paths = self.config.get("paths")
+        self.model_dir = paths["model_dir"]
+        self.default_targets = self.config.get("targets")["primary"]
+        
+        self.models: Dict[int, Any] = {}
+        self.meta: Dict[int, Dict[str, Any]] = {}
+        self._is_loaded = False
+        
+        logger.info("🧠 Inicializando HACv6Predictor...")
+        
+    def _safe_load_model(self, model_path: str) -> Optional[Any]:
+        """Carrega modelo com tratamento de erro"""
+        if not TF_AVAILABLE:
+            raise RuntimeError("TensorFlow não está disponível")
+            
+        try:
+            # Otimização para GitHub Free - limpa memória antes
+            gc.collect()
+            model = load_model(model_path)
+            logger.info(f"✅ Modelo carregado: {os.path.basename(model_path)}")
+            return model
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar {model_path}: {e}")
+            return None
 
-        self.models: Dict[int, Any] = {}   # horizon → model
-        self.scalers: Dict[int, Any] = {}  # horizon → scaler_X
-        self.meta: Dict[int, Dict] = {}    # horizon → metadata
-
-        print("🧠 Scanning model directory...")
-        self._load_latest_models()
-        print("✅ Predictor ready!")
-
-    # ------------------------------------------------------------
-    def _load_latest_models(self):
-        """Para cada horizonte, pega o diretório mais recente."""
-
+    def _load_all(self) -> None:
+        """Carrega modelos com fallbacks"""
         if not os.path.isdir(self.model_dir):
-            print(f"⚠ Model directory not found: {self.model_dir}")
+            logger.warning(f"Diretório não encontrado: {self.model_dir}")
+            # Tenta criar ou usar fallback
+            os.makedirs(self.model_dir, exist_ok=True)
             return
 
-        # Map horizon → list of (folder_name, full_path)
-        horizon_folders: Dict[int, list] = {}
+        pattern = re.compile(r"^(?P<type>\w+)_h(?P<h>\d+)_")
+        loaded_count = 0
 
-        for folder in os.listdir(self.model_dir):
-            path = os.path.join(self.model_dir, folder)
-            if not os.path.isdir(path):
+        for folder in sorted(os.listdir(self.model_dir)):
+            full_path = os.path.join(self.model_dir, folder)
+            if not os.path.isdir(full_path):
                 continue
 
-            parts = folder.split("_")
-            if len(parts) < 3:
-                # Ex: hybrid_h24_20250101...
+            match = pattern.match(folder)
+            if not match:
                 continue
 
-            model_type = parts[0]
-            h_part = parts[1]  # ex: "h24"
-            if not h_part.startswith("h"):
-                continue
-
-            try:
-                horizon = int(h_part[1:])
-            except ValueError:
-                continue
-
-            horizon_folders.setdefault(horizon, []).append((folder, path))
-
-        # Para cada horizonte, escolhe o mais recente (ordem alfabética do timestamp já funciona)
-        for horizon, folders in horizon_folders.items():
-            # Ordena por folder name decrescente (o timestamp no final garante ordem temporal)
-            folders_sorted = sorted(folders, key=lambda x: x[0], reverse=True)
-            latest_name, latest_path = folders_sorted[0]
-
-            model_path = os.path.join(latest_path, "model.keras")
-            scaler_X_path = os.path.join(latest_path, "scaler_X.pkl")
-            meta_path = os.path.join(latest_path, "metadata.json")
+            horizon = int(match.group("h"))
+            model_path = os.path.join(full_path, "model.keras")
+            meta_path = os.path.join(full_path, "metadata.json")
 
             if not os.path.exists(model_path):
+                logger.warning(f"Modelo não encontrado: {model_path}")
                 continue
 
-            print(f"→ Loading H{horizon} from {latest_name} ...")
-            model = load_model(model_path)
-            scaler_X = joblib.load(scaler_X_path)
+            # Carrega modelo
+            model = self._safe_load_model(model_path)
+            if model is None:
+                continue
 
-            with open(meta_path, "r") as f:
-                meta = json.load(f)
+            # Carrega metadata
+            meta = {}
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Erro ao carregar metadata {meta_path}: {e}")
 
             self.models[horizon] = model
-            self.scalers[horizon] = scaler_X
             self.meta[horizon] = meta
+            loaded_count += 1
 
-    # ------------------------------------------------------------
-    def prepare_input(self, df: pd.DataFrame, horizon: int) -> np.ndarray:
-        """Prepara X (1, lookback, n_features) para o modelo."""
+        if loaded_count > 0:
+            self._is_loaded = True
+            logger.info(f"✅ {loaded_count} modelos carregados: {sorted(self.models.keys())}")
+        else:
+            logger.warning("⚠️ Nenhum modelo foi carregado")
 
-        if horizon not in self.meta:
-            raise ValueError(f"No metadata for horizon {horizon}h. Train models first.")
+    def ensure_loaded(self) -> bool:
+        """Garante que os modelos estão carregados"""
+        if not self._is_loaded:
+            self._load_all()
+        return self._is_loaded
 
-        meta = self.meta[horizon]
-        lookback = meta["lookback"]
+    def _ensure_model(self, horizon: int) -> Tuple[Any, Dict[str, Any]]:
+        if not self.ensure_loaded():
+            raise RuntimeError("Nenhum modelo disponível")
+        if horizon not in self.models:
+            available = sorted(self.models.keys())
+            raise ValueError(f"Modelo H{horizon} não encontrado. Disponíveis: {available}")
+        return self.models[horizon], self.meta.get(horizon, {})
 
-        # Pega apenas colunas numéricas
-        numeric_df = df.select_dtypes(include=["number"])
-        if numeric_df.shape[0] < lookback:
-            raise ValueError(
-                f"Not enough rows ({numeric_df.shape[0]}) for lookback {lookback}"
+    def predict_from_features_array(
+        self,
+        X_window: np.ndarray,
+        horizon: int,
+    ) -> Dict[str, float]:
+        """Previsão a partir de array de features"""
+        model, meta = self._ensure_model(horizon)
+
+        try:
+            arr = np.asarray(X_window, dtype=np.float32)  # Otimização: float32
+            if arr.ndim == 2:
+                arr = np.expand_dims(arr, axis=0)
+            elif arr.ndim != 3:
+                raise ValueError(f"Shape inválido: {arr.shape}")
+
+            # Previsão com batch_size=1 para otimizar memória
+            y_pred = model.predict(arr, batch_size=1, verbose=0)[0]
+            
+            targets = meta.get("targets", self.default_targets)
+            result = {targets[i]: float(y_pred[i]) for i in range(len(targets))}
+            
+            # Limpeza de memória
+            del arr, y_pred
+            gc.collect()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Erro na previsão H{horizon}: {e}")
+            raise
+
+    def predict_from_dataframe(
+        self,
+        df_feat: pd.DataFrame,
+        horizon: int,
+        lookback: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """Previsão a partir de DataFrame"""
+        _, meta = self._ensure_model(horizon)
+
+        if lookback is None:
+            lookback = meta.get(
+                "lookback",
+                self.config.get("training")["main_lookback"],
             )
 
-        window = numeric_df.tail(lookback)
-        scaler_X = self.scalers[horizon]
+        if len(df_feat) < lookback:
+            raise ValueError(
+                f"Dados insuficientes: precisa {lookback}, tem {len(df_feat)}"
+            )
 
-        X_scaled = scaler_X.transform(window.values)
-        X_scaled = X_scaled.reshape(1, lookback, X_scaled.shape[1])
+        # Usa float32 para otimização
+        window = df_feat.tail(lookback).astype(np.float32).values
+        return self.predict_from_features_array(window, horizon)
 
-        return X_scaled
+    def predict(self, data: Any, horizon: int, lookback: Optional[int] = None) -> Dict[str, float]:
+        """Interface unificada"""
+        if isinstance(data, pd.DataFrame):
+            return self.predict_from_dataframe(data, horizon, lookback)
+        else:
+            return self.predict_from_features_array(data, horizon)
 
-    # ------------------------------------------------------------
-    def predict(self, df: pd.DataFrame, horizon: int = 24) -> Dict[str, float]:
-        """Retorna um dicionário {target: valor_previsto} para um horizonte."""
-
-        if horizon not in self.models:
-            raise ValueError(f"No model found for horizon {horizon}h")
-
-        model = self.models[horizon]
-        meta = self.meta[horizon]
-        targets = meta["targets"]
-
-        X_input = self.prepare_input(df, horizon)
-        y_pred = model.predict(X_input, verbose=0)[0]  # shape (3,)
-
-        return {
-            targets[i]: float(y_pred[i])
-            for i in range(len(targets))
-        }
+    def get_available_horizons(self) -> list:
+        """Retorna horizontes disponíveis"""
+        self.ensure_loaded()
+        return sorted(self.models.keys())
 
 
-# ------------------------------------------------------------
-if __name__ == "__main__":
-    pred = HACv6Predictor()
+# Singleton para otimização
+_predictor_instance = None
 
-    print("\nModels loaded per horizon:")
-    for h in sorted(pred.models.keys()):
-        print(f" - H{h}h")
-
-    # Exemplo de uso com dados fake
-    example = pd.DataFrame(
-        np.random.random((300, 10)),
-        columns=[f"var{i}" for i in range(10)]
-    )
-
-    res = pred.predict(example, horizon=24)
-    print("\nExample prediction (fake input):")
-    print(res)
+def get_predictor(config_path: str = "config.yaml") -> HACv6Predictor:
+    """Retorna instância singleton do predictor"""
+    global _predictor_instance
+    if _predictor_instance is None:
+        _predictor_instance = HACv6Predictor(config_path)
+    return _predictor_instance
