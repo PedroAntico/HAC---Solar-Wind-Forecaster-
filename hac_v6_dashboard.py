@@ -288,7 +288,7 @@ if __name__ == "__main__":
     
     logger.info(f"🚀 Iniciando Dashboard na porta {port}")
     
-    app.run_server(
+    app.run(
         host="0.0.0.0",
         port=port,
         debug=debug,
