@@ -1,58 +1,90 @@
 #!/usr/bin/env python3
 """
 save_report.py
-Gera e salva relatórios completos das predições do HAC v6
+Generates and saves a full prediction report using HAC v6 models.
+
+This script:
+- Loads HACv6Predictor
+- Runs predictions for all horizons
+- Saves results to results/model_report.json
 """
 
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
+import sys
+import os
 import json
-import pandas as pd
+from datetime import datetime
 
-from hac_v6_predicter import HACv6Predictor
+# ---------------------------------------------------------
+# Make sure we can import hac_v6_predictor
+# ---------------------------------------------------------
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(BASE_DIR)
 
-RESULT_DIR = "results"
+try:
+    from hac_v6_predictor import HACv6Predictor
+except ModuleNotFoundError as e:
+    print("❌ ERROR: Could not import HACv6Predictor.")
+    print("Details:", e)
+    print("\nCheck that hac_v6_predictor.py exists in the project root.")
+    sys.exit(1)
 
-def ensure_results_dir():
-    if not os.path.exists(RESULT_DIR):
-        print("📁 Creating results/ folder...")
-        os.makedirs(RESULT_DIR, exist_ok=True)
+# ---------------------------------------------------------
+# Create output folder
+# ---------------------------------------------------------
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
-def save_json(data, filename):
-    path = os.path.join(RESULT_DIR, filename)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=4)
-    print(f"💾 Saved: {path}")
+OUTPUT_FILE = os.path.join(RESULTS_DIR, "model_report.json")
 
+# ---------------------------------------------------------
+# Horizons you want to evaluate
+# ---------------------------------------------------------
+HORIZONS = [1, 3, 6, 12, 24, 48]
+
+# ---------------------------------------------------------
+# Main Execution
+# ---------------------------------------------------------
 def main():
-    ensure_results_dir()
 
-    print("📡 Loading predictor...")
-    pred = HACv6Predictor()
+    print("🚀 Initializing HACv6Predictor...")
+    
+    try:
+        predictor = HACv6Predictor()
+    except Exception as e:
+        print("❌ ERROR initializing HACv6Predictor:")
+        print(e)
+        sys.exit(1)
 
-    print("📘 Loading dataset (omni_prepared.csv)...")
-    df = pd.read_csv("data_real/omni_prepared.csv")
+    print("✅ Predictor loaded!")
+    print("🔍 Running predictions...\n")
 
-    horizons = [1, 3, 6, 12, 24, 48]
-    models = ["hybrid", "lstm", "gru", "ensemble"]
+    results = {
+        "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "predictions": {}
+    }
 
-    full_report = {}
+    for h in HORIZONS:
+        print(f"➡️  Predicting horizon: {h}h ...")
+        try:
+            pred = predictor.predict(model_type="hybrid", horizon=h)
+            results["predictions"][str(h)] = pred
+        except Exception as e:
+            print(f"❌ Failed at horizon {h}h: {e}")
+            results["predictions"][str(h)] = {"error": str(e)}
 
-    for model_type in models:
-        print(f"\n🧠 Running predictions for model: {model_type}")
-        full_report[model_type] = {}
+    # ---------------------------------------------------------
+    # Save final report
+    # ---------------------------------------------------------
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(results, f, indent=4)
 
-        for h in horizons:
-            print(f"   → Horizon: {h}h")
-            result = pred.predict(df, model_type=model_type, horizon=h)
-            full_report[model_type][h] = result
+    print("\n📁 Report saved in:")
+    print(f"   {OUTPUT_FILE}")
+    print("\n🎉 Done!")
 
-            save_json(result, f"{model_type}_{h}h.json")
 
-    save_json(full_report, "full_report.json")
-
-    print("\n🏁 All reports saved successfully.")
-
+# ---------------------------------------------------------
+# Run
+# ---------------------------------------------------------
 if __name__ == "__main__":
     main()
