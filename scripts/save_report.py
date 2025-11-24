@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""
-save_report.py
-Gera um relatório completo de previsões usando todos os modelos HACv6.
-
-Saída salva em:
-    results/model_report.json
-"""
-
-import os
-import json
+import os, json
+import pandas as pd
 from datetime import datetime
 
-import pandas as pd
-
-from hac_v6_predictor import HACv6Predictor
+from hac_v6.hac_v6_predictor import HACv6Predictor
 
 
 # ---------------------------------------------------
