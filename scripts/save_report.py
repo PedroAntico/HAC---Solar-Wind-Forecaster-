@@ -1,80 +1,77 @@
 #!/usr/bin/env python3
 """
 save_report.py
-Generates and saves a full prediction report using HAC v6 models.
-
-Compatible with the current HACv6Predictor.predict() signature:
-    predict(horizon)
+Gera um arquivo JSON com as predições de todos os horizontes do HAC v6.
 """
 
-import sys
 import os
 import json
+import pandas as pd
 from datetime import datetime
+from hac_v6_predictor import HACv6Predictor
 
 
 # ---------------------------------------------------------
-# Adjust import path
+# Caminhos
 # ---------------------------------------------------------
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(BASE_DIR)
 
-try:
-    from hac_v6_predictor import HACv6Predictor
-except Exception as e:
-    print("❌ ERROR importing HACv6Predictor:", e)
-    sys.exit(1)
+RESULT_DIR = "results"
+DATA_FILE = "omni_prepared.csv"
 
 
 # ---------------------------------------------------------
-# Setup output directory
+# Carregar dados e predictor
 # ---------------------------------------------------------
-RESULTS_DIR = os.path.join(BASE_DIR, "results")
-os.makedirs(RESULTS_DIR, exist_ok=True)
 
-OUTPUT_FILE = os.path.join(RESULTS_DIR, "model_report.json")
+print("📥 Carregando dados recentes...")
+df = pd.read_csv(DATA_FILE)
+df["timestamp"] = pd.to_datetime(df["datetime"])
+df = df.drop(columns=["datetime"])
 
-HORIZONS = [1, 3, 6, 12, 24, 48]
+print("🤖 Inicializando predictor...")
+predictor = HACv6Predictor()
+
+# todos os modelos disponíveis
+available_horizons = sorted(list(predictor.models.keys()))
+print(f"🔭 Modelos encontrados: {available_horizons}h")
 
 
-def main():
-    print("🚀 Initializing HACv6Predictor...")
+# ---------------------------------------------------------
+# Rodar previsões
+# ---------------------------------------------------------
+
+report = {
+    "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+    "predictions": {},
+    "errors": {}
+}
+
+print("🚀 Rodando previsões...")
+
+for h in available_horizons:
+
+    print(f" ▸ Predizendo horizonte {h}h...")
 
     try:
-        predictor = HACv6Predictor()
+        pred = predictor.predict(df.copy(), horizon=h)
+        report["predictions"][str(h)] = pred
+        print(f"   ✅ Sucesso: {pred}")
+
     except Exception as e:
-        print("❌ ERROR initializing HACv6Predictor:", e)
-        sys.exit(1)
-
-    print("✅ Predictor ready!")
-    print("🔍 Running predictions...\n")
-
-    results = {
-        "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "predictions": {}
-    }
-
-    for h in HORIZONS:
-        print(f"➡️ Predicting horizon {h}h ...")
-
-        try:
-            pred = predictor.predict(horizon=h)   # <-- FIXED HERE
-            results["predictions"][str(h)] = pred
-
-        except Exception as e:
-            print(f"❌ Failed at horizon {h}h: {e}")
-            results["predictions"][str(h)] = {"error": str(e)}
-
-    # ---------------------------------------------------------
-    # Save output
-    # ---------------------------------------------------------
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(results, f, indent=4)
-
-    print("\n📁 Report saved in:")
-    print(f"   {OUTPUT_FILE}")
-    print("🎉 Done!")
+        report["errors"][str(h)] = str(e)
+        print(f"   ❌ Falha: {e}")
 
 
-if __name__ == "__main__":
-    main()
+# ---------------------------------------------------------
+# Salvar arquivo
+# ---------------------------------------------------------
+
+os.makedirs(RESULT_DIR, exist_ok=True)
+out_path = os.path.join(RESULT_DIR, "model_report.json")
+
+with open(out_path, "w") as f:
+    json.dump(report, f, indent=4)
+
+print("\n📄 Relatório salvo em:")
+print(f"   {out_path}")
+print("✨ Concluído!")
