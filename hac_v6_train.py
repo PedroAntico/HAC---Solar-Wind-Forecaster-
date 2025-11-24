@@ -111,13 +111,29 @@ class HACTainer:
             )
 
             # -------------------------------------------------------
-            # EVALUATE
+            # EVALUATE (Robust unpacking)
             # -------------------------------------------------------
             print("\n📊 Evaluating...")
             eval_results = model.evaluate(X_test, y_test, verbose=0)
 
-            loss, mae, mse, rmse, dir_acc = eval_results
-            print(f"🎯 Horizon {horizon}h — RMSE={rmse:.3f} | MAE={mae:.3f} | DIR={dir_acc:.3f}")
+            # Ensure it's always list/tuple
+            if not isinstance(eval_results, (list, tuple)):
+                eval_results = [eval_results]
+
+            # Safe extraction of metrics
+            loss = eval_results[0] if len(eval_results) > 0 else None
+            mae  = eval_results[1] if len(eval_results) > 1 else None
+            mse  = eval_results[2] if len(eval_results) > 2 else None
+            rmse = eval_results[3] if len(eval_results) > 3 else None
+
+            # Print only available metrics
+            msg = f"🎯 Horizon {horizon}h:"
+            if rmse is not None: msg += f"  RMSE={rmse:.3f}"
+            if mae  is not None: msg += f"  MAE={mae:.3f}"
+            if mse  is not None: msg += f"  MSE={mse:.3f}"
+            msg += f"  (metrics={len(eval_results)})"
+
+            print(msg)
 
             # -------------------------------------------------------
             # SAVE
