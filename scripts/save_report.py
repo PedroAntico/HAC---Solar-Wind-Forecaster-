@@ -4,11 +4,12 @@ save_report.py
 Gera e salva relatórios completos das predições do HAC v6
 """
 
-import os
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import json
 import pandas as pd
 
-# IMPORTAÇÃO CORRETA
 from hac_v6_predicter import HACv6Predictor
 
 RESULT_DIR = "results"
