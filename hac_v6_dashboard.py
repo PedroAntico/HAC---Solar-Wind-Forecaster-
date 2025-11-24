@@ -3,12 +3,12 @@
 hac_v6_dashboard.py
 Real-Time Dashboard for HAC v6 Solar Wind Forecaster
 
-This dashboard:
-- Pulls live predictions from the HACv6RealTimePredictor API
-- Displays multi-horizon forecasts (speed, Bz, density)
-- Visualizes confidence intervals
-- Shows active alerts in real-time
-- Refreshes automatically every 60 seconds
+Features:
+- Fetches real-time predictions from HACv6RealTime API
+- Visualizes multi-horizon forecasts (speed, Bz, density)
+- Includes confidence intervals (80%)
+- Automatic refresh every 60 seconds
+- Real-time alert panel
 """
 
 import requests
@@ -22,22 +22,23 @@ from dash.dependencies import Input, Output
 
 import plotly.graph_objects as go
 
-# -------------------------------------------------------
-# Dashboard Settings
-# -------------------------------------------------------
+
+# ======================================================
+# Configuration
+# ======================================================
 
 API_URL = "http://localhost:5000/api/v1/forecast"
 
-# Dash App
 app = dash.Dash(__name__)
 app.title = "HAC v6 - Solar Wind Dashboard"
 
-# -------------------------------------------------------
-# Dashboard Layout
-# -------------------------------------------------------
+
+# ======================================================
+# Layout
+# ======================================================
 
 app.layout = html.Div([
-    html.H1("🌪️ HAC v6 – Real-Time Solar Wind Forecast", 
+    html.H1("🌪️ HAC v6 – Real-Time Solar Wind Forecast",
             style={"textAlign": "center", "color": "#1E90FF"}),
 
     html.Div("AI-Powered Multi-Horizon Space Weather Forecasting",
@@ -45,7 +46,7 @@ app.layout = html.Div([
 
     html.Br(),
 
-    # Controls
+    # Dropdowns
     html.Div([
         html.Div([
             html.Label("Model Type"),
@@ -53,9 +54,9 @@ app.layout = html.Div([
                 id="model_type",
                 options=[
                     {"label": "Ensemble (recommended)", "value": "ensemble"},
+                    {"label": "Hybrid", "value": "hybrid"},
                     {"label": "LSTM", "value": "lstm"},
                     {"label": "GRU", "value": "gru"},
-                    {"label": "Hybrid", "value": "hybrid"}
                 ],
                 value="ensemble"
             )
@@ -73,7 +74,7 @@ app.layout = html.Div([
 
     html.Br(),
 
-    # Forecast Plots
+    # Graphs
     dcc.Graph(id="speed_plot"),
     dcc.Graph(id="bz_plot"),
     dcc.Graph(id="density_plot"),
@@ -87,63 +88,56 @@ app.layout = html.Div([
 ])
 
 
-# -------------------------------------------------------
+# ======================================================
 # Helper Functions
-# -------------------------------------------------------
+# ======================================================
 
 def fetch_predictions(model_type: str, horizon: int):
-    """Get latest prediction from local API"""
+    """Fetch latest real-time forecast."""
     try:
         response = requests.get(
             API_URL,
             params={"model_type": model_type, "horizon": horizon},
             timeout=10
         )
-
         if response.status_code == 200:
             return response.json()
-        else:
-            return {"error": f"HTTP {response.status_code}"}
-
+        return {"error": f"HTTP {response.status_code}"}
     except Exception as e:
         return {"error": str(e)}
 
 
 def build_forecast_figure(pred, target_name, title, y_label):
-    """Build forecast plot with confidence intervals."""
+    """Generate graph for one target component."""
+    fig = go.Figure()
 
     if "predictions" not in pred:
-        fig = go.Figure()
         fig.update_layout(title="No data available")
         return fig
 
-    h = list(pred["predictions"].keys())[0]
-    pdata = pred["predictions"][h]
+    horizon = list(pred["predictions"].keys())[0]
+    pdata = pred["predictions"][horizon]
 
     if target_name not in pdata:
-        fig = go.Figure()
         fig.update_layout(title="Target not found")
         return fig
 
-    forecast_value = pdata[target_name]
+    value = pdata[target_name]
 
-    # Time axis
-    now = datetime.utcnow()
-    future_time = now + timedelta(hours=int(h))
+    future_time = datetime.utcnow() + timedelta(hours=int(horizon))
 
-    fig = go.Figure()
-
+    # Forecast point
     fig.add_trace(go.Scatter(
         x=[future_time],
-        y=[forecast_value],
+        y=[value],
         mode="markers+text",
-        text=[f"{forecast_value:.2f}"],
+        text=[f"{value:.2f}"],
         textposition="top center",
-        marker=dict(size=12, color="red"),
+        marker=dict(size=14, color="#FF5733"),
         name="Forecast"
     ))
 
-    # Confidence intervals (if available)
+    # Confidence interval
     if "confidence_intervals" in pdata:
         ci = pdata["confidence_intervals"]
         if "0.8" in ci:
@@ -151,13 +145,13 @@ def build_forecast_figure(pred, target_name, title, y_label):
                 x=[future_time, future_time],
                 y=[ci["0.8"]["lower"], ci["0.8"]["upper"]],
                 mode="lines",
-                line=dict(color="rgba(255,0,0,0.3)", width=8),
+                line=dict(color="rgba(255,0,0,0.3)", width=10),
                 name="80% CI"
             ))
 
     fig.update_layout(
         title=title,
-        xaxis_title="Time (UTC)",
+        xaxis_title="UTC Time",
         yaxis_title=y_label,
         template="plotly_white"
     )
@@ -166,12 +160,13 @@ def build_forecast_figure(pred, target_name, title, y_label):
 
 
 def build_alert_panel(pred):
+    """Generate alerts panel."""
     if "alerts" not in pred or len(pred["alerts"]) == 0:
         return html.Div("No active alerts", style={"color": "green"})
 
-    alerts = []
+    blocks = []
     for alert in pred["alerts"]:
-        alerts.append(html.Div([
+        blocks.append(html.Div([
             html.B(f"{alert['level']} ALERT – {alert['target'].upper()}"),
             html.Br(),
             alert["message"],
@@ -182,15 +177,14 @@ def build_alert_panel(pred):
             "padding": "10px",
             "marginTop": "10px",
             "backgroundColor": "#ffe6e6",
-            "borderRadius": "5px"
+            "borderRadius": "6px"
         }))
+    return blocks
 
-    return alerts
 
-
-# -------------------------------------------------------
-# Callbacks
-# -------------------------------------------------------
+# ======================================================
+# Dash Callbacks
+# ======================================================
 
 @app.callback(
     [
@@ -206,20 +200,22 @@ def build_alert_panel(pred):
     ]
 )
 def update_dashboard(_, model_type, horizon):
+
     pred = fetch_predictions(model_type, horizon)
 
     speed_fig = build_forecast_figure(pred, "speed", "Solar Wind Speed Forecast", "km/s")
-    bz_fig = build_forecast_figure(pred, "bz_gse", "Bz Component Forecast", "nT")
-    density_fig = build_forecast_figure(pred, "density", "Plasma Density Forecast", "n/cc")
-    alert_panel = build_alert_panel(pred)
+    bz_fig = build_forecast_figure(pred, "bz_gsm", "IMF Bz Forecast", "nT")
+    density_fig = build_forecast_figure(pred, "density", "Plasma Density Forecast", "particles/cm³")
 
-    return speed_fig, bz_fig, density_fig, alert_panel
+    alerts = build_alert_panel(pred)
+
+    return speed_fig, bz_fig, density_fig, alerts
 
 
-# -------------------------------------------------------
-# Run
-# -------------------------------------------------------
+# ======================================================
+# Run Dashboard
+# ======================================================
 
 if __name__ == "__main__":
     print("🚀 Dashboard running at http://localhost:8050")
-    app.run_server(host="0.0.0.0", port=8050, debug=False)
+    app.run(host="0.0.0.0", port=8050, debug=False)
