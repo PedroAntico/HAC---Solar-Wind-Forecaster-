@@ -1,25 +1,57 @@
+# ============================================================
+# HAC v6 - Master Configuration File
+# ============================================================
+
+# ------------------------------------------------------------
+# PATHS
+# (todos obrigatórios — pipelines quebram sem eles)
+# ------------------------------------------------------------
 paths:
-  data_dir: data_real
-  model_dir: models/hac_v6
+  data_dir: "data_real"
+  model_dir: "models/hac_v6"
+  results_dir: "results"
+  logs_dir: "logs"
 
+# ------------------------------------------------------------
+# PERFORMANCE OPTIONS
+# ------------------------------------------------------------
 performance:
-  low_memory_mode: true
+  low_memory_mode: true   # ativa processos seguros para codespaces
 
+# ------------------------------------------------------------
+# TRAINING PARAMETERS
+# ------------------------------------------------------------
 training:
-  main_lookback: 48
+  main_lookback: 48       # janela de entrada
   batch_size: 16
   max_epochs: 50
   val_split: 0.15
   test_split: 0.15
 
+# ------------------------------------------------------------
+# HORIZONS TO TRAIN
+# ------------------------------------------------------------
 horizons: [1, 3, 6, 12, 24, 48]
 
+# ------------------------------------------------------------
+# TARGET VARIABLES
+# ------------------------------------------------------------
 targets:
   primary: ["speed", "bz_gsm", "density"]
+
+# ------------------------------------------------------------
+# MODEL DEFINITIONS
+# (compatível com hac_v6_models)
+# ------------------------------------------------------------
+model:
+  type: "hybrid"   # único modelo suportado no HAC v6
 
 models:
   default: ["hybrid"]
 
+# ------------------------------------------------------------
+# ALERT SYSTEM (usado por dashboard e save_report)
+# ------------------------------------------------------------
 alerts:
   thresholds:
     speed_high: 650
@@ -27,6 +59,10 @@ alerts:
     density_high: 20
     bz_extreme: 10
 
+# ------------------------------------------------------------
+# REALTIME SECTION
+# (para futura automação)
+# ------------------------------------------------------------
 realtime:
   enabled: false
   update_interval_minutes: 60
