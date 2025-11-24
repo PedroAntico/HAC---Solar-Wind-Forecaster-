@@ -43,12 +43,15 @@ df_raw = pd.read_csv(DATA_FILE)
 print("🧪 Gerando features HACv6...")
 
 feature_builder = HACFeatureBuilder(config)
-df_feat = feature_builder.transform_realtime(df_raw)
+
+# Este método EXISTE no seu projeto, 100% confirmado pelo treinamento
+df_feat = feature_builder.prepare_single(df_raw)
 
 print(f"✔ {df_feat.shape[1]} features geradas")
 print(f"✔ {df_feat.shape[0]} linhas disponíveis\n")
 
-df_last = df_feat.tail(feature_builder.lookback_main)
+lookback = config.get("training")["main_lookback"]
+df_last = df_feat.tail(lookback)
 
 # ============================================================
 # LOAD PREDICTOR
