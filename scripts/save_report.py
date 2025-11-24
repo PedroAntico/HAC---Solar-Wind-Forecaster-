@@ -7,7 +7,7 @@ Gera e salva relatórios completos das predições do HAC v6
 import os
 import json
 import pandas as pd
-from hac_v6_predictor import HACv6Predictor
+from hac_v6_predicter import HACv6Predictor
 
 RESULT_DIR = "results"
 
