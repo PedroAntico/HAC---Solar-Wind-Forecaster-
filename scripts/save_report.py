@@ -7,6 +7,8 @@ Gera e salva relatórios completos das predições do HAC v6
 import os
 import json
 import pandas as pd
+
+# IMPORTAÇÃO CORRETA
 from hac_v6_predicter import HACv6Predictor
 
 RESULT_DIR = "results"
@@ -16,13 +18,11 @@ def ensure_results_dir():
         print("📁 Creating results/ folder...")
         os.makedirs(RESULT_DIR, exist_ok=True)
 
-
 def save_json(data, filename):
     path = os.path.join(RESULT_DIR, filename)
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
     print(f"💾 Saved: {path}")
-
 
 def main():
     ensure_results_dir()
@@ -47,14 +47,11 @@ def main():
             result = pred.predict(df, model_type=model_type, horizon=h)
             full_report[model_type][h] = result
 
-            # Save each horizon separately
             save_json(result, f"{model_type}_{h}h.json")
 
-    # Save combined master report
     save_json(full_report, "full_report.json")
 
     print("\n🏁 All reports saved successfully.")
-
 
 if __name__ == "__main__":
     main()
