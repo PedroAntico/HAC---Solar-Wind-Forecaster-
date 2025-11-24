@@ -4,7 +4,12 @@ save_report.py — HAC v6
 Gera relatório de previsões usando modelos HAC v6 treinados.
 """
 
-import os
+# ------------------------------------------------------------
+# Corrige PATH para permitir imports corretos
+# ------------------------------------------------------------
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import json
 import pandas as pd
 from datetime import datetime
@@ -33,23 +38,22 @@ print(f"📄 Lendo dataset bruto → {DATA_FILE}")
 df_raw = pd.read_csv(DATA_FILE)
 
 # ============================================================
-# BUILD FEATURES (SAME PIPELINE AS TRAINING)
+# BUILD FEATURES (MESMO PIPELINE DO TREINO)
 # ============================================================
-print("🧪 Gerando features HACv6 (MESMO PIPELINE DO TREINO)...")
+print("🧪 Gerando features HACv6...")
 
 feature_builder = HACFeatureBuilder(config)
 df_feat = feature_builder.transform_realtime(df_raw)
 
-print(f"✔ Features geradas: {df_feat.shape[1]} colunas")
-print(f"✔ Linhas disponíveis: {df_feat.shape[0]}")
+print(f"✔ {df_feat.shape[1]} features geradas")
+print(f"✔ {df_feat.shape[0]} linhas disponíveis\n")
 
-# Usar apenas os últimos dados possíveis
-df_last = df_feat.tail( feature_builder.lookback_main )
+df_last = df_feat.tail(feature_builder.lookback_main)
 
 # ============================================================
 # LOAD PREDICTOR
 # ============================================================
-print("\n🧠 Inicializando HACv6Predictor...")
+print("🧠 Inicializando HACv6Predictor...")
 predictor = HACv6Predictor("config.yaml")
 print("✔ Predictor pronto!\n")
 
@@ -62,7 +66,7 @@ predictions = {}
 print("🚀 Iniciando previsões...\n")
 
 for h in horizons:
-    print(f"🔮 Previndo horizonte {h}h ...")
+    print(f"🔮 Previndo horizonte {h}h...")
 
     try:
         pred = predictor.predict(df_last, h)
@@ -70,14 +74,14 @@ for h in horizons:
             "ok": True,
             "values": pred
         }
-        print(f"   ✔ Sucesso: {pred}")
+        print(f"   ✔ {pred}\n")
 
     except Exception as e:
         predictions[str(h)] = {
             "ok": False,
             "error": str(e)
         }
-        print(f"   ❌ Falhou: {e}")
+        print(f"   ❌ Falhou: {e}\n")
 
 # ============================================================
 # ALERTS
@@ -87,25 +91,26 @@ alert_rules = config.get("alerts")["thresholds"]
 def compute_alerts(pred):
     alerts = []
 
-    if "speed" in pred and pred["speed"] > alert_rules["speed_high"]:
+    if pred.get("speed", 0) > alert_rules["speed_high"]:
         alerts.append("HIGH_SPEED")
 
-    if "speed" in pred and pred["speed"] < alert_rules["speed_low"]:
+    if pred.get("speed", 0) < alert_rules["speed_low"]:
         alerts.append("LOW_SPEED")
 
-    if "density" in pred and pred["density"] > alert_rules["density_high"]:
+    if pred.get("density", 0) > alert_rules["density_high"]:
         alerts.append("HIGH_DENSITY")
 
-    if "bz_gsm" in pred and abs(pred["bz_gsm"]) > alert_rules["bz_extreme"]:
+    if abs(pred.get("bz_gsm", 0)) > alert_rules["bz_extreme"]:
         alerts.append("EXTREME_BZ")
 
     return alerts
 
 for h in predictions:
-    if predictions[h]["ok"]:
-        predictions[h]["alerts"] = compute_alerts(predictions[h]["values"])
+    item = predictions[h]
+    if item["ok"]:
+        item["alerts"] = compute_alerts(item["values"])
     else:
-        predictions[h]["alerts"] = []
+        item["alerts"] = []
 
 # ============================================================
 # SAVE REPORT
@@ -121,6 +126,6 @@ OUT_PATH = os.path.join(results_dir, "model_report.json")
 with open(OUT_PATH, "w") as f:
     json.dump(report, f, indent=2)
 
-print("\n📦 Relatório salvo em:")
-print("   →", OUT_PATH)
+print("📦 Relatório salvo em:")
+print(f"   → {OUT_PATH}")
 print("🎉 Concluído!")
