@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import os, json
+import os, sys, json
 import pandas as pd
 from datetime import datetime
 
-from hac_v6.hac_v6_predictor import HACv6Predictor
+# --- Fix para conseguir importar da raiz ---
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from hac_v6_predictor import HACv6Predictor
 
 # ---------------------------------------------------
 # Carregar dataset mais recente (omni_prepared.csv)
