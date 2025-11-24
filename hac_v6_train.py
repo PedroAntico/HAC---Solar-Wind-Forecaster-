@@ -1,195 +1,102 @@
 #!/usr/bin/env python3
 """
-hac_v6_train.py
-Training pipeline for HAC v6 Solar Wind Forecaster
+hac_v6_models.py
+Model builder for HAC v6 Solar Wind Forecasting System
 
-• Loads engineered datasets (hac_v6_features)
-• Builds models (hac_v6_models)
-• Trains per horizon (1–48 hours)
-• Saves models using Modern Keras format (.keras)
-• Saves scalers + metadata
-• Fully compatible with predictor
+• Supports HYBRID (CNN + LSTM ultraleve)
+• Clean, stable, compatible with hac_v6_train.py and hac_v6_predictor.py
+• Provides:
+      create_model_builder(config)
+      HACModelBuilder.build_model(...)
+      HACModelBuilder.create_advanced_callbacks(...)
 """
 
-import os
-import json
-import numpy as np
-from datetime import datetime
-
-from hac_v6_config import HACConfig
-from hac_v6_features import HACFeatureBuilder
-from hac_v6_models import create_model_builder
-
 import tensorflow as tf
-import joblib
+from tensorflow.keras import layers, models, callbacks
 
 
-class HACTainer:
-    """Runs the entire HAC v6 training pipeline"""
+class HACModelBuilder:
 
-    def __init__(self, config_path="config.yaml"):
-        print("📡 Loading configuration...")
-        self.config = HACConfig(config_path)
+    def __init__(self, config):
+        self.config = config
 
-        print("🧱 Loading feature builder...")
-        self.feature_builder = HACFeatureBuilder(self.config)
+    # ======================================================================
+    # FACTORY
+    # ======================================================================
+    def build_model(self, model_type, input_shape, output_dim):
+        """
+        Returns a compiled Keras model.
+        """
+        if model_type == "hybrid":
+            return self._build_hybrid(input_shape, output_dim)
 
-        print("🧠 Initializing model builder...")
-        self.model_builder = create_model_builder(self.config)
+        raise ValueError(f"Unknown model type: {model_type}")
 
-        self.model_dir = self.config.get("paths")["model_dir"]
-        os.makedirs(self.model_dir, exist_ok=True)
+    # ======================================================================
+    # HYBRID MODEL (CNN + LSTM)
+    # Ultraleve, rápido, estável e compatível com seu predictor
+    # ======================================================================
+    def _build_hybrid(self, input_shape, output_dim):
 
-    # ============================================================
-    # Main loop
-    # ============================================================
-    def run(self):
-        print("\n🚀 Starting HAC v6 training pipeline...")
-        print("---------------------------------------------------")
+        inputs = layers.Input(shape=input_shape)
 
-        datasets = self.feature_builder.build_all()
+        # 1) CNN leve para extrair padrões locais
+        x = layers.Conv1D(
+            filters=16,
+            kernel_size=3,
+            activation="relu",
+            padding="same"
+        )(inputs)
 
-        lookback = self.config.get("training")["main_lookback"]
-        feature_count = datasets[self.config.get("horizons")[0]]["X"].shape[2]
-        output_dim = len(self.config.get("targets")["primary"])
+        x = layers.MaxPooling1D(pool_size=2)(x)
 
-        horizons = self.config.get("horizons")
+        # 2) LSTM leve para capturar dependências temporais
+        x = layers.LSTM(32, return_sequences=False)(x)
 
-        # Train for each horizon
-        for horizon in horizons:
-            print(f"\n========== TRAINING HORIZON {horizon}h ==========")
+        # 3) Saída final de 3 variáveis (speed, bz_gse, density)
+        outputs = layers.Dense(output_dim)(x)
 
-            X = datasets[horizon]["X"]
-            y = datasets[horizon]["y"]
+        model = models.Model(inputs, outputs)
 
-            n = len(X)
-            val_split = self.config.get("training")["val_split"]
-            test_split = self.config.get("training")["test_split"]
-
-            n_train = int(n * (1 - val_split - test_split))
-            n_val = int(n * val_split)
-
-            X_train = X[:n_train]
-            y_train = y[:n_train]
-
-            X_val = X[n_train:n_train + n_val]
-            y_val = y[n_train:n_train + n_val]
-
-            X_test = X[n_train + n_val:]
-            y_test = y[n_train + n_val:]
-
-            print(f"→ Dataset: {X.shape}")
-            print(f"   train = {len(X_train)}, val = {len(X_val)}, test = {len(X_test)}")
-
-            # -------------------------------------------------------
-            # Only one model type: HYBRID (from config)
-            # -------------------------------------------------------
-            model_type = self.config.get("model")["type"]
-            print(f"\n🧠 Training model type: {model_type.upper()}")
-
-            model = self.model_builder.build_model(
-                model_type=model_type,
-                input_shape=(lookback, feature_count),
-                output_dim=output_dim
-            )
-
-            callbacks = self.model_builder.create_advanced_callbacks(
-                model_type,
-                horizon
-            )
-
-            # -------------------------------------------------------
-            # TRAIN
-            # -------------------------------------------------------
-            history = model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=self.config.get("training")["max_epochs"],
-                batch_size=self.config.get("training")["batch_size"],
-                callbacks=callbacks,
-                verbose=1
-            )
-
-            # -------------------------------------------------------
-            # EVALUATE (Robust unpacking)
-            # -------------------------------------------------------
-            print("\n📊 Evaluating...")
-            eval_results = model.evaluate(X_test, y_test, verbose=0)
-
-            # Ensure it's always list/tuple
-            if not isinstance(eval_results, (list, tuple)):
-                eval_results = [eval_results]
-
-            # Safe extraction of metrics
-            loss = eval_results[0] if len(eval_results) > 0 else None
-            mae  = eval_results[1] if len(eval_results) > 1 else None
-            mse  = eval_results[2] if len(eval_results) > 2 else None
-            rmse = eval_results[3] if len(eval_results) > 3 else None
-
-            # Print only available metrics
-            msg = f"🎯 Horizon {horizon}h:"
-            if rmse is not None: msg += f"  RMSE={rmse:.3f}"
-            if mae  is not None: msg += f"  MAE={mae:.3f}"
-            if mse  is not None: msg += f"  MSE={mse:.3f}"
-            msg += f"  (metrics={len(eval_results)})"
-
-            print(msg)
-
-            # -------------------------------------------------------
-            # SAVE
-            # -------------------------------------------------------
-            self.save_artifacts(model, model_type, horizon, history)
-
-        print("\n\n🎉 ALL TRAINING COMPLETE!")
-
-    # ============================================================
-    # Save models + metadata
-    # ============================================================
-    def save_artifacts(self, model, model_type, horizon, history):
-
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join(
-            self.model_dir,
-            f"{model_type}_h{horizon}_{timestamp}"
+        # ------------------------------------------------------------------
+        # 🔥 COMPILAÇÃO CONSISTENTE COM TRAIN + PREDICTOR
+        # IMPORTANTE → métricas devolvem APENAS:
+        #   loss, mae, mse, rmse
+        # ------------------------------------------------------------------
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(1e-3),
+            loss="mse",
+            metrics=[
+                "mae",
+                "mse",
+                tf.keras.metrics.RootMeanSquaredError(name="rmse")
+            ]
         )
-        os.makedirs(out_dir, exist_ok=True)
 
-        # --------------------------
-        # Save model (MODERN FORMAT)
-        # --------------------------
-        model_path = os.path.join(out_dir, "model.keras")
-        model.save(model_path)
-        print(f"💾 Saved model → {model_path}")
+        return model
 
-        # --------------------------
-        # Save scalers
-        # --------------------------
-        scaler = self.feature_builder.scalers["main"]
-        joblib.dump(scaler, os.path.join(out_dir, "scaler_X.pkl"))
-        joblib.dump(scaler, os.path.join(out_dir, "scaler_Y.pkl"))
+    # ======================================================================
+    # CALLBACKS PROFISSIONAIS
+    # ======================================================================
+    def create_advanced_callbacks(self, model_type, horizon):
 
-        # --------------------------
-        # Save metadata
-        # --------------------------
-        metadata = {
-            "model_type": model_type,
-            "horizon": horizon,
-            "timestamp": timestamp,
-            "lookback": self.config.get("training")["main_lookback"],
-            "feature_count": len(self.feature_builder.df.columns),
-            "targets": self.config.get("targets")["primary"],
-            "history": {k: list(v) for k, v in history.history.items()}
-        }
-
-        with open(os.path.join(out_dir, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        print(f"📄 Saved metadata → {out_dir}/metadata.json\n")
+        return [
+            callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=10,
+                restore_best_weights=True
+            ),
+            callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            )
+        ]
 
 
-# ============================================================
-# Entry point
-# ============================================================
-if __name__ == "__main__":
-    trainer = HACTainer()
-    trainer.run()
+# ======================================================================
+# FACTORY WRAPPER
+# ======================================================================
+def create_model_builder(config):
+    return HACModelBuilder(config)
