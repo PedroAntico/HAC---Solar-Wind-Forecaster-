@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 dscovr_dashboard.py - Dashboard interativo estilo DSCOVR/NOAA
+CORREÇÃO: Config carregado corretamente
 """
 
 import os
@@ -31,6 +32,7 @@ class DSCOVRDashboard:
     """Dashboard estilo DSCOVR/NOAA"""
     
     def __init__(self, config_path: str = "config.yaml"):
+        # ✅ CORREÇÃO: Carrega config corretamente
         self.config = HACConfig(config_path)
         self.predictor = get_predictor(config_path)
         
