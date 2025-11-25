@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-hac_v6_predictor.py - Predictor otimizado para GitHub Free
+hac_v6_predictor.py - CORRIGIDO para scaling reverso dos targets
 """
 
 import os
 import re
 import json
 import logging
+import joblib
 from typing import Dict, Any, Tuple, Optional
 import gc
 
@@ -27,14 +28,13 @@ except ImportError as e:
 try:
     from hac_v6_config import HACConfig
 except ImportError:
-    # Fallback para import local
     import sys
     sys.path.append('.')
     from hac_v6_config import HACConfig
 
 
 class HACv6Predictor:
-    """Carregador e predictor otimizado para GitHub Free"""
+    """Predictor com correção de scaling dos targets"""
     
     def __init__(self, config_path: str = "config.yaml"):
         self.config = HACConfig(config_path)
@@ -44,17 +44,16 @@ class HACv6Predictor:
         
         self.models: Dict[int, Any] = {}
         self.meta: Dict[int, Dict[str, Any]] = {}
+        self.scalers_y: Dict[int, Any] = {}  # 🆕 Scaler Y por horizonte
         self._is_loaded = False
         
-        logger.info("🧠 Inicializando HACv6Predictor...")
+        logger.info("🧠 Inicializando HACv6Predictor (COM CORREÇÃO DE SCALING)...")
         
     def _safe_load_model(self, model_path: str) -> Optional[Any]:
-        """Carrega modelo com tratamento de erro"""
         if not TF_AVAILABLE:
             raise RuntimeError("TensorFlow não está disponível")
             
         try:
-            # Otimização para GitHub Free - limpa memória antes
             gc.collect()
             model = load_model(model_path)
             logger.info(f"✅ Modelo carregado: {os.path.basename(model_path)}")
@@ -64,10 +63,8 @@ class HACv6Predictor:
             return None
 
     def _load_all(self) -> None:
-        """Carrega modelos com fallbacks"""
         if not os.path.isdir(self.model_dir):
             logger.warning(f"Diretório não encontrado: {self.model_dir}")
-            # Tenta criar ou usar fallback
             os.makedirs(self.model_dir, exist_ok=True)
             return
 
@@ -86,6 +83,7 @@ class HACv6Predictor:
             horizon = int(match.group("h"))
             model_path = os.path.join(full_path, "model.keras")
             meta_path = os.path.join(full_path, "metadata.json")
+            scaler_y_path = os.path.join(full_path, "scaler_Y.pkl")  # 🆕 Scaler Y
 
             if not os.path.exists(model_path):
                 logger.warning(f"Modelo não encontrado: {model_path}")
@@ -105,8 +103,20 @@ class HACv6Predictor:
                 except Exception as e:
                     logger.warning(f"Erro ao carregar metadata {meta_path}: {e}")
 
+            # 🆕 CARREGA SCALER Y (CRÍTICO!)
+            scaler_y = None
+            if os.path.exists(scaler_y_path):
+                try:
+                    scaler_y = joblib.load(scaler_y_path)
+                    logger.info(f"✅ Scaler Y carregado para H{horizon}")
+                except Exception as e:
+                    logger.error(f"❌ Erro ao carregar scaler Y {scaler_y_path}: {e}")
+            else:
+                logger.warning(f"⚠️ Scaler Y não encontrado: {scaler_y_path}")
+
             self.models[horizon] = model
             self.meta[horizon] = meta
+            self.scalers_y[horizon] = scaler_y  # 🆕 Armazena scaler Y
             loaded_count += 1
 
         if loaded_count > 0:
@@ -116,7 +126,6 @@ class HACv6Predictor:
             logger.warning("⚠️ Nenhum modelo foi carregado")
 
     def ensure_loaded(self) -> bool:
-        """Garante que os modelos estão carregados"""
         if not self._is_loaded:
             self._load_all()
         return self._is_loaded
@@ -134,24 +143,36 @@ class HACv6Predictor:
         X_window: np.ndarray,
         horizon: int,
     ) -> Dict[str, float]:
-        """Previsão a partir de array de features"""
+        """PREVISÃO COM CORREÇÃO DE SCALING DOS TARGETS"""
         model, meta = self._ensure_model(horizon)
 
         try:
-            arr = np.asarray(X_window, dtype=np.float32)  # Otimização: float32
+            arr = np.asarray(X_window, dtype=np.float32)
             if arr.ndim == 2:
                 arr = np.expand_dims(arr, axis=0)
             elif arr.ndim != 3:
                 raise ValueError(f"Shape inválido: {arr.shape}")
 
-            # Previsão com batch_size=1 para otimizar memória
-            y_pred = model.predict(arr, batch_size=1, verbose=0)[0]
+            # Previsão (valores escalados)
+            y_scaled = model.predict(arr, batch_size=1, verbose=0)[0]
+            
+            # 🆕 CORREÇÃO CRÍTICA: Reverte scaling dos targets
+            if horizon in self.scalers_y and self.scalers_y[horizon] is not None:
+                # Converte para formato 2D para inverse_transform
+                y_scaled_2d = y_scaled.reshape(1, -1)
+                y_real = self.scalers_y[horizon].inverse_transform(y_scaled_2d)[0]
+                logger.info(f"🔄 Scaling revertido H{horizon}: {y_scaled} → {y_real}")
+            else:
+                y_real = y_scaled
+                logger.error(f"🚨 SCALER Y NÃO DISPONÍVEL PARA H{horizon} - VALORES INVALIDOS!")
             
             targets = meta.get("targets", self.default_targets)
-            result = {targets[i]: float(y_pred[i]) for i in range(len(targets))}
+            result = {targets[i]: float(y_real[i]) for i in range(len(targets))}
             
-            # Limpeza de memória
-            del arr, y_pred
+            # Validação física básica
+            self._validate_physical_ranges(result, horizon)
+            
+            del arr, y_scaled
             gc.collect()
             
             return result
@@ -160,13 +181,29 @@ class HACv6Predictor:
             logger.error(f"Erro na previsão H{horizon}: {e}")
             raise
 
+    def _validate_physical_ranges(self, pred: Dict[str, float], horizon: int):
+        """Valida se os valores estão em ranges físicos razoáveis"""
+        speed = pred.get("speed", 0)
+        density = pred.get("density", 0)
+        bz = pred.get("bz_gsm", pred.get("bz", 0))
+        
+        warnings = []
+        if speed > 2000 or speed < 0:
+            warnings.append(f"Velocidade fora do range: {speed} km/s")
+        if density > 100 or density < 0:
+            warnings.append(f"Densidade fora do range: {density} cm⁻³")
+        if abs(bz) > 50:
+            warnings.append(f"Bz extremo: {bz} nT")
+            
+        if warnings:
+            logger.warning(f"⚠️ Valores físicos questionáveis H{horizon}: {', '.join(warnings)}")
+
     def predict_from_dataframe(
         self,
         df_feat: pd.DataFrame,
         horizon: int,
         lookback: Optional[int] = None,
     ) -> Dict[str, float]:
-        """Previsão a partir de DataFrame"""
         _, meta = self._ensure_model(horizon)
 
         if lookback is None:
@@ -180,28 +217,28 @@ class HACv6Predictor:
                 f"Dados insuficientes: precisa {lookback}, tem {len(df_feat)}"
             )
 
-        # Usa float32 para otimização
         window = df_feat.tail(lookback).astype(np.float32).values
         return self.predict_from_features_array(window, horizon)
 
     def predict(self, data: Any, horizon: int, lookback: Optional[int] = None) -> Dict[str, float]:
-        """Interface unificada"""
         if isinstance(data, pd.DataFrame):
             return self.predict_from_dataframe(data, horizon, lookback)
         else:
             return self.predict_from_features_array(data, horizon)
 
     def get_available_horizons(self) -> list:
-        """Retorna horizontes disponíveis"""
         self.ensure_loaded()
         return sorted(self.models.keys())
+    
+    def has_scalers_y(self) -> bool:
+        """Verifica se todos os modelos têm scalers Y"""
+        return all(horizon in self.scalers_y and self.scalers_y[horizon] is not None 
+                  for horizon in self.models.keys())
 
 
-# Singleton para otimização
 _predictor_instance = None
 
 def get_predictor(config_path: str = "config.yaml") -> HACv6Predictor:
-    """Retorna instância singleton do predictor"""
     global _predictor_instance
     if _predictor_instance is None:
         _predictor_instance = HACv6Predictor(config_path)
