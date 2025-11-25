@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 compare_models.py - Compara diferentes arquiteturas de modelo
+CORREÇÃO: Config carregado corretamente
 """
 
 import os
@@ -29,8 +30,9 @@ class ModelComparator:
     """Comparador de diferentes arquiteturas de modelo"""
     
     def __init__(self, config_path: str = "config.yaml"):
+        # ✅ CORREÇÃO: Carrega config corretamente
         self.config = HACConfig(config_path)
-        self.feature_builder = HACFeatureBuilder(config)
+        self.feature_builder = HACFeatureBuilder(self.config)  # ✅ Agora usa self.config
         
     def train_comparison_models(self):
         """Treina diferentes arquiteturas para comparação"""
@@ -224,7 +226,7 @@ class ModelComparator:
         ax2.tick_params(axis='x', rotation=45)
         
         plt.tight_layout()
-        plt.savefig(f'{save_path}/metrics_comparison.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'{save_dir}/metrics_comparison.png', dpi=300, bbox_inches='tight')
         plt.close()
         
         logger.info(f"📈 Gráficos de comparação salvos em: {save_path}")
