@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 EMERGENCY: Cria scalers Y para modelos existentes quando o treino foi interrompido
+CORREÇÃO: Config carregado corretamente
 """
 
 import os
@@ -30,8 +31,9 @@ class EmergencyScalerFix:
     """Cria scalers Y de emergência baseados nas estatísticas dos dados OMNI"""
     
     def __init__(self, config_path: str = "config.yaml"):
+        # ✅ CORREÇÃO: Carrega config corretamente
         self.config = HACConfig(config_path)
-        self.feature_builder = HACFeatureBuilder(config)
+        self.feature_builder = HACFeatureBuilder(self.config)  # ✅ Agora usa self.config
         
         # 🎯 ESTATÍSTICAS REAIS DO VENTO SOLAR (base OMNI)
         self.omni_stats = {
