@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 plot_features.py - Análise visual das features de entrada
+CORREÇÃO: Config carregado corretamente
 """
 
 import os
@@ -29,8 +30,9 @@ class FeatureAnalyzer:
     """Analisador de features HAC v6"""
     
     def __init__(self, config_path: str = "config.yaml"):
+        # ✅ CORREÇÃO: Carrega config corretamente
         self.config = HACConfig(config_path)
-        self.feature_builder = HACFeatureBuilder(config)
+        self.feature_builder = HACFeatureBuilder(self.config)  # ✅ Agora usa self.config
     
     def analyze_features(self):
         """Análise completa das features"""
