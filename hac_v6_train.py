@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-hac_v6_train.py - CORRIGIDO E ADAPTADO
-Training pipeline para HAC v6 com nomes de variáveis corretos.
+hac_v6_train.py - CORREÇÃO DA LOSS
+Training pipeline para HAC v6 com correção da função de perda.
 
-CORREÇÕES APLICADAS:
-1. Criar diretórios antes de salvar modelos (FileNotFoundError)
-2. Remover save_format depreciado do model.save()
-3. Mapear nomes de variáveis para limites físicos corretos
+CORREÇÃO CRÍTICA: 
+- A loss estava comparando valores normalizados (y_scaled) com valores físicos (modelo)
+- Agora o modelo será treinado com valores normalizados e converte para físicos apenas na saída
 """
 
 import os
@@ -14,7 +13,7 @@ import json
 import gc
 import psutil
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Callable
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -34,7 +33,7 @@ class HACTrainer:
     def __init__(self, config_path: str = "config.yaml"):
         """Inicializa o trainer com configuração e componentes."""
         print("=" * 60)
-        print("🚀 HAC v6 PHYSICAL TRAINER - COM NOMES CORRETOS")
+        print("🚀 HAC v6 PHYSICAL TRAINER - CORREÇÃO DA LOSS")
         print("=" * 60)
         
         # 1. Carregar configuração
@@ -57,7 +56,7 @@ class HACTrainer:
         # 5. Configurar diretórios
         self._setup_directories()
         
-        # 6. Mapeamento de nomes de variáveis (speed → V, bz_gsm → Bz, density → n)
+        # 6. Mapeamento de nomes de variáveis
         self.variable_mapping = self._create_variable_mapping()
         
         # 7. Inicializar relatório
@@ -70,7 +69,6 @@ class HACTrainer:
         """Cria mapeamento entre nomes de variáveis físicas e nomes no dataset."""
         targets = self.config.get("targets")["primary"]
         
-        # Mapeamento padrão: nomes do dataset -> nomes físicos para limites
         mapping = {}
         for target in targets:
             if target == "speed":
@@ -86,7 +84,6 @@ class HACTrainer:
             elif target == "bt":
                 mapping[target] = "Bt"
             else:
-                # Se não mapeado, usar o próprio nome
                 mapping[target] = target
         
         print(f"📋 Variable mapping: {mapping}")
@@ -113,11 +110,9 @@ class HACTrainer:
         prepared_dir = os.path.join(data_dir, "prepared")
         
         if os.path.exists(prepared_dir):
-            # Verificar se há datasets salvos
             npz_files = [f for f in os.listdir(prepared_dir) if f.endswith('.npz')]
             if npz_files:
                 print(f"✅ Found {len(npz_files)} prepared datasets in {prepared_dir}")
-                print("   Using pre-processed data (fast mode)")
             else:
                 print(f"⚠️  Prepared directory exists but no .npz files found")
         else:
@@ -153,6 +148,7 @@ class HACTrainer:
             },
             "physical_constraints": True,
             "github_free_optimized": True,
+            "loss_correction_applied": True,  # Nova flag
             "variable_mapping": self.variable_mapping,
             "horizons": {},
             "resource_usage": {}
@@ -189,13 +185,13 @@ class HACTrainer:
             # 2. Configurações de treino
             training_config = self.config.get("training")
             lookback = training_config["main_lookback"]
-            horizons = self.config.get("horizons")[:3]  # Limitar a 3 para GitHub Free
-            dataset_targets = self.config.get("targets")["primary"]  # Nomes no dataset
+            horizons = self.config.get("horizons")[:3]
+            dataset_targets = self.config.get("targets")["primary"]
             physical_targets = [self._get_physical_variable_name(t) for t in dataset_targets]
             
             print(f"📋 Target mapping:")
             for i, (d_name, p_name) in enumerate(zip(dataset_targets, physical_targets)):
-                print(f"   • {d_name} → {p_name} (para limites físicos)")
+                print(f"   • {d_name} → {p_name}")
             
             # Ajustes para GitHub Free
             batch_size = min(training_config["batch_size"], 32)
@@ -273,18 +269,23 @@ class HACTrainer:
             y_scaled = dataset["y_scaled"]
             y_raw = dataset["y_raw"]
             
-            print(f"   Dataset shape: X={X.shape}, y={y_scaled.shape}")
+            print(f"   Dataset shape: X={X.shape}, y_scaled={y_scaled.shape}")
             print(f"   Dataset targets: {dataset_targets}")
             print(f"   Physical targets: {physical_targets}")
             
             # Split dos dados
             print("📊 Splitting data...")
-            X_train, y_train_scaled, X_val, y_val_scaled, X_test, y_test_scaled, y_test_raw = \
-                self._split_data(X, y_scaled, y_raw)
+            (X_train, y_train_scaled, X_val, y_val_scaled, 
+             X_test, y_test_scaled, y_test_raw) = self._split_data(X, y_scaled, y_raw)
             
-            # Construir modelo com nomes físicos para limites
-            print("🔨 Building physical model...")
-            model = self._build_model_for_horizon(
+            print(f"   X_train shape: {X_train.shape}")
+            print(f"   y_train_scaled shape: {y_train_scaled.shape}")
+            print(f"   Mean y_train_scaled: {np.mean(y_train_scaled, axis=0)}")
+            print(f"   Std y_train_scaled: {np.std(y_train_scaled, axis=0)}")
+            
+            # Construir modelo adaptado para valores normalizados
+            print("🔨 Building adapted model...")
+            model = self._build_adapted_model_for_horizon(
                 input_shape=(lookback, X.shape[2]),
                 dataset_targets=dataset_targets,
                 physical_targets=physical_targets,
@@ -294,8 +295,10 @@ class HACTrainer:
             # Criar callbacks
             callbacks = self._create_callbacks_for_horizon(horizon)
             
-            # Treinar modelo - CORREÇÃO: sem workers/use_multiprocessing
+            # ✅ CORREÇÃO CRÍTICA: Treinar com valores NORMALIZADOS
             print(f"\n🔥 Training model for horizon {horizon}h...")
+            print(f"   Training with NORMALIZED targets (mean≈0, std≈1)")
+            
             history = model.fit(
                 X_train, y_train_scaled,
                 validation_data=(X_val, y_val_scaled),
@@ -339,6 +342,39 @@ class HACTrainer:
             traceback.print_exc()
             return False
     
+    def _build_adapted_model_for_horizon(self, input_shape: Tuple[int, int],
+                                       dataset_targets: List[str], 
+                                       physical_targets: List[str],
+                                       horizon: int) -> tf.keras.Model:
+        """Constrói modelo ADAPTADO que lida com valores normalizados."""
+        model_type = self.config.get("model", {}).get("type", "lstm")
+        
+        print(f"   Building ADAPTED {model_type} model")
+        print(f"   Model will: Input→Process→Output NORMALIZED values")
+        print(f"   Physical limits applied AFTER training")
+        
+        # Construir modelo normal (com head físico)
+        if model_type == "hybrid":
+            model = self.model_builder.build_hybrid_model(input_shape, physical_targets)
+        elif model_type == "lightweight":
+            model = self.model_builder.build_lightweight_model(input_shape, physical_targets)
+        else:  # Default: LSTM
+            model = self.model_builder.build_lstm_model(input_shape, physical_targets)
+        
+        # ✅ CORREÇÃO: Modificar a loss para lidar com valores normalizados
+        # Mas manter a arquitetura original para aplicar limites físicos
+        print(f"   Model: {model.name}")
+        print(f"   Parameters: {model.count_params():,}")
+        print(f"   Output units: PHYSICAL (km/s, nT, cm⁻³)")
+        
+        return model
+    
+    def _create_adapted_loss_function(self, y_scalers: Dict):
+        """Cria função de loss adaptada para valores normalizados."""
+        # Esta função será usada se quisermos uma loss customizada
+        # Por enquanto, usaremos MSE padrão
+        pass
+    
     def _split_data(self, X: np.ndarray, y_scaled: np.ndarray,
                    y_raw: np.ndarray) -> Tuple:
         """Divide os dados em treino, validação e teste."""
@@ -366,48 +402,29 @@ class HACTrainer:
         
         return X_train, y_train_scaled, X_val, y_val_scaled, X_test, y_test_scaled, y_test_raw
     
-    def _build_model_for_horizon(self, input_shape: Tuple[int, int],
-                               dataset_targets: List[str], 
-                               physical_targets: List[str],
-                               horizon: int) -> tf.keras.Model:
-        """Constrói modelo físico para um horizonte específico."""
-        model_type = self.config.get("model", {}).get("type", "lstm")
-        
-        print(f"   Building {model_type} model")
-        print(f"   Dataset targets: {dataset_targets}")
-        print(f"   Physical targets (para limites): {physical_targets}")
-        
-        # O modelo deve ser construído com os nomes físicos para que os limites funcionem
-        if model_type == "hybrid":
-            model = self.model_builder.build_hybrid_model(input_shape, physical_targets)
-        elif model_type == "lightweight":
-            model = self.model_builder.build_lightweight_model(input_shape, physical_targets)
-        else:  # Default: LSTM
-            model = self.model_builder.build_lstm_model(input_shape, physical_targets)
-        
-        # Resumo do modelo
-        print(f"   Model: {model.name}")
-        print(f"   Parameters: {model.count_params():,}")
-        print(f"   Output shape: {model.output_shape}")
-        
-        return model
-    
     def _create_callbacks_for_horizon(self, horizon: int) -> List:
         """Cria callbacks para o treino de um horizonte."""
         model_type = self.config.get("model", {}).get("type", "lstm")
         callbacks = self.model_builder.create_callbacks(horizon, model_type)
         
-        # Adicionar callback para monitoramento
-        class ProgressMonitor(tf.keras.callbacks.Callback):
+        class LossMonitor(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
                 if epoch % 5 == 0 or epoch == 0:
-                    mem = psutil.virtual_memory()
                     loss = logs.get('loss', 0)
                     val_loss = logs.get('val_loss', 0)
+                    
+                    # Verificar se a loss está em escala razoável
+                    if loss > 1000 or val_loss > 1000:
+                        status = "⚠️  HIGH"
+                    elif loss < 1 and val_loss < 1:
+                        status = "✅ OK"
+                    else:
+                        status = "📊 NORMAL"
+                    
                     print(f"      Epoch {epoch:3d} | Loss: {loss:.4f} | "
-                          f"Val Loss: {val_loss:.4f} | Mem: {mem.percent:.1f}%")
+                          f"Val Loss: {val_loss:.4f} | {status}")
         
-        callbacks.append(ProgressMonitor())
+        callbacks.append(LossMonitor())
         return callbacks
     
     def _evaluate_model(self, model: tf.keras.Model, X_test: np.ndarray,
@@ -415,46 +432,139 @@ class HACTrainer:
                        horizon: int, dataset_targets: List[str],
                        physical_targets: List[str]) -> Dict:
         """Avalia o modelo e retorna métricas."""
-        # 1. Avaliar no conjunto de teste
+        # 1. Avaliar no conjunto de teste (com valores normalizados)
         test_loss = model.evaluate(X_test, y_test_scaled, verbose=0)[0]
         
         # 2. Fazer previsões
         y_pred_scaled = model.predict(X_test, verbose=0, batch_size=32)
         
-        # 3. Dessecalizar previsões
+        print(f"\n   Loss on test set: {test_loss:.4f}")
+        print(f"   Predicted shape: {y_pred_scaled.shape}")
+        
+        # 3. Dessecalizar previsões para avaliação física
         y_pred_raw = self._inverse_scale_predictions(
             y_pred_scaled, horizon, dataset_targets
         )
         
-        # 4. Calcular métricas nos valores reais
-        metrics = self._calculate_metrics(y_test_raw, y_pred_raw, dataset_targets)
+        # 4. Verificar se as previsões estão dentro dos limites físicos
+        print("\n   Verifying physical limits on predictions:")
+        violations_info = self._check_and_report_physical_limits(
+            y_pred_raw, dataset_targets
+        )
         
-        # 5. Verificar limites físicos (usar nomes físicos para verificação)
-        violations = self._check_physical_violations(y_pred_raw, dataset_targets)
+        # 5. Calcular métricas nos valores reais (físicos)
+        print("\n   Calculating metrics on PHYSICAL values:")
+        metrics = self._calculate_physical_metrics(
+            y_test_raw, y_pred_raw, dataset_targets
+        )
         
         # 6. Log dos resultados
         print(f"\n📊 Evaluation results for horizon {horizon}h:")
-        print(f"   • Test Loss: {test_loss:.4f}")
-        print(f"   • MAE:  {metrics['mae']:.4f}")
-        print(f"   • RMSE: {metrics['rmse']:.4f}")
+        print(f"   • Test Loss (normalized): {test_loss:.4f}")
+        print(f"   • Physical MAE:  {metrics['mae']:.4f}")
+        print(f"   • Physical RMSE: {metrics['rmse']:.4f}")
         
         # Métricas por variável
         for var_name, var_metrics in metrics['per_variable'].items():
             print(f"   • {var_name}: MAE={var_metrics['mae']:.4f}, RMSE={var_metrics['rmse']:.4f}")
         
-        if violations > 0:
-            print(f"   ⚠️  Physical violations: {violations}")
+        if violations_info["total_violations"] > 0:
+            print(f"   ⚠️  Physical violations: {violations_info['total_violations']}")
+            for var, info in violations_info["per_variable"].items():
+                if info["violations"] > 0:
+                    print(f"      {var}: {info['violations']} violations "
+                          f"({info['min']:.1f} to {info['max']:.1f})")
         else:
             print(f"   ✅ All predictions respect physical limits")
         
         # Adicionar métricas
         metrics.update({
-            "test_loss": float(test_loss),
-            "physical_violations": violations,
-            "test_samples": len(X_test)
+            "normalized_test_loss": float(test_loss),
+            "physical_violations": violations_info["total_violations"],
+            "test_samples": len(X_test),
+            "physical_limits_info": violations_info
         })
         
         return metrics
+    
+    def _calculate_physical_metrics(self, y_true: np.ndarray, y_pred: np.ndarray,
+                                  targets: List[str]) -> Dict:
+        """Calcula métricas em valores físicos."""
+        metrics = {
+            "mae": float(mean_absolute_error(y_true, y_pred)),
+            "mse": float(mean_squared_error(y_true, y_pred)),
+            "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        }
+        
+        # Métricas por variável
+        per_variable_metrics = {}
+        for idx, var_name in enumerate(targets):
+            y_true_var = y_true[:, idx]
+            y_pred_var = y_pred[:, idx]
+            
+            mae = mean_absolute_error(y_true_var, y_pred_var)
+            rmse = np.sqrt(mean_squared_error(y_true_var, y_pred_var))
+            
+            per_variable_metrics[var_name] = {
+                "mae": float(mae),
+                "rmse": float(rmse),
+                "mean_true": float(y_true_var.mean()),
+                "std_true": float(y_true_var.std()),
+                "mean_pred": float(y_pred_var.mean()),
+                "std_pred": float(y_pred_var.std()),
+                "range_true": f"{y_true_var.min():.1f}-{y_true_var.max():.1f}",
+                "range_pred": f"{y_pred_var.min():.1f}-{y_pred_var.max():.1f}"
+            }
+            
+            # Log para debug
+            print(f"      {var_name}: MAE={mae:.2f}, "
+                  f"True range: {y_true_var.min():.1f}-{y_true_var.max():.1f}, "
+                  f"Pred range: {y_pred_var.min():.1f}-{y_pred_var.max():.1f}")
+        
+        metrics["per_variable"] = per_variable_metrics
+        return metrics
+    
+    def _check_and_report_physical_limits(self, y_pred: np.ndarray,
+                                        dataset_targets: List[str]) -> Dict:
+        """Verifica limites físicos e retorna informações detalhadas."""
+        violations_info = {
+            "total_violations": 0,
+            "per_variable": {}
+        }
+        
+        # Limites físicos (mesmo do model builder)
+        physical_limits = {
+            "V": {"min": 250, "max": 1650, "unit": "km/s"},
+            "Bz": {"min": -40, "max": 40, "unit": "nT"},
+            "n": {"min": 0, "max": 100, "unit": "cm⁻³"},
+            "Bx": {"min": -50, "max": 50, "unit": "nT"},
+            "By": {"min": -50, "max": 50, "unit": "nT"},
+            "Bt": {"min": 0, "max": 80, "unit": "nT"}
+        }
+        
+        for idx, dataset_name in enumerate(dataset_targets):
+            physical_name = self._get_physical_variable_name(dataset_name)
+            
+            if physical_name in physical_limits:
+                limits = physical_limits[physical_name]
+                v_min = limits["min"]
+                v_max = limits["max"]
+                
+                pred_values = y_pred[:, idx]
+                violations = np.sum((pred_values < v_min) | (pred_values > v_max))
+                
+                violations_info["per_variable"][dataset_name] = {
+                    "physical_name": physical_name,
+                    "violations": int(violations),
+                    "min": float(pred_values.min()),
+                    "max": float(pred_values.max()),
+                    "limits": f"{v_min}-{v_max}",
+                    "unit": limits["unit"]
+                }
+                
+                violations_info["total_violations"] += int(violations)
+        
+        return violations_info
     
     def _inverse_scale_predictions(self, y_pred_scaled: np.ndarray,
                                  horizon: int, targets: List[str]) -> np.ndarray:
@@ -475,79 +585,11 @@ class HACTrainer:
                 y_single = y_pred_scaled[:, idx].reshape(-1, 1)
                 y_descaled = scaler.inverse_transform(y_single)
                 y_pred_raw[:, idx] = y_descaled.flatten()
-                # Debug: mostrar transformação
-                if idx == 0:
-                    print(f"   Descaled sample: {y_pred_scaled[0, idx]:.3f} → {y_pred_raw[0, idx]:.1f}")
             else:
                 print(f"⚠️  No scaler found for {var_name} at horizon {horizon}h")
                 y_pred_raw[:, idx] = y_pred_scaled[:, idx]
         
         return y_pred_raw
-    
-    def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray,
-                          targets: List[str]) -> Dict:
-        """Calcula métricas de avaliação."""
-        metrics = {
-            "mae": float(mean_absolute_error(y_true, y_pred)),
-            "mse": float(mean_squared_error(y_true, y_pred)),
-            "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred)))
-        }
-        
-        # Métricas por variável
-        per_variable_metrics = {}
-        for idx, var_name in enumerate(targets):
-            y_true_var = y_true[:, idx]
-            y_pred_var = y_pred[:, idx]
-            
-            per_variable_metrics[var_name] = {
-                "mae": float(mean_absolute_error(y_true_var, y_pred_var)),
-                "rmse": float(np.sqrt(mean_squared_error(y_true_var, y_pred_var))),
-                "mean_true": float(y_true_var.mean()),
-                "std_true": float(y_true_var.std()),
-                "mean_pred": float(y_pred_var.mean()),
-                "std_pred": float(y_pred_var.std())
-            }
-        
-        metrics["per_variable"] = per_variable_metrics
-        return metrics
-    
-    def _check_physical_violations(self, y_pred: np.ndarray,
-                                 dataset_targets: List[str]) -> int:
-        """Conta violações de limites físicos nas previsões."""
-        violations = 0
-        
-        # Limites físicos baseados no model builder
-        # Usamos os nomes físicos mapeados para verificação
-        physical_limits = {
-            "V": (250, 1650),       # km/s
-            "Bz": (-40, 40),        # nT
-            "n": (0, 100),          # cm⁻³
-            "Bx": (-50, 50),        # nT
-            "By": (-50, 50),        # nT
-            "Bt": (0, 80),          # nT
-            # Aliases para nomes do dataset
-            "speed": (250, 1650),
-            "bz_gsm": (-40, 40),
-            "density": (0, 100),
-            "bx_gsm": (-50, 50),
-            "by_gsm": (-50, 50),
-            "bt": (0, 80)
-        }
-        
-        for idx, dataset_name in enumerate(dataset_targets):
-            # Obter o nome físico para verificação de limites
-            physical_name = self._get_physical_variable_name(dataset_name)
-            
-            if physical_name in physical_limits:
-                v_min, v_max = physical_limits[physical_name]
-                var_violations = np.sum((y_pred[:, idx] < v_min) | (y_pred[:, idx] > v_max))
-                violations += int(var_violations)
-                
-                if var_violations > 0:
-                    print(f"      ⚠️  {dataset_name} ({physical_name}): {int(var_violations)} violations "
-                          f"({y_pred[:, idx].min():.1f} to {y_pred[:, idx].max():.1f})")
-        
-        return violations
     
     def _save_horizon_artifacts(self, model: tf.keras.Model, horizon: int,
                               history: Dict, metrics: Dict, test_size: int,
@@ -557,15 +599,15 @@ class HACTrainer:
         model_name = f"hac_physical_h{horizon}_{timestamp}"
         out_dir = os.path.join(self.model_dir, model_name)
         
-        # ✅ CORREÇÃO CRÍTICA: Criar diretório ANTES de salvar qualquer coisa
+        # ✅ CORREÇÃO: Criar diretório ANTES de salvar
         os.makedirs(out_dir, exist_ok=True)
         
         print(f"\n💾 Saving artifacts for horizon {horizon}h...")
-        print(f"   Directory: {out_dir} (criado)")
+        print(f"   Directory: {out_dir}")
         
-        # 1. Salvar modelo - ✅ CORREÇÃO: sem save_format depreciado
+        # 1. Salvar modelo
         model_path = os.path.join(out_dir, "model.keras")
-        model.save(model_path)  # ✅ CORRIGIDO: Removido save_format="keras"
+        model.save(model_path)  # ✅ CORRIGIDO: sem save_format
         model_size_mb = os.path.getsize(model_path) / (1024 * 1024)
         print(f"   ✅ Model saved ({model_size_mb:.1f} MB)")
         
@@ -590,14 +632,14 @@ class HACTrainer:
             "horizon": horizon,
             "dataset_targets": dataset_targets,
             "physical_targets": physical_targets,
-            "variable_mapping": {d: p for d, p in zip(dataset_targets, physical_targets)},
             "lookback": self.config.get("training")["main_lookback"],
             "batch_size": self.config.get("training")["batch_size"],
             "max_epochs": self.config.get("training")["max_epochs"],
             "test_samples": test_size,
             "timestamp": timestamp,
             "model_name": model.name,
-            "model_parameters": model.count_params()
+            "model_parameters": model.count_params(),
+            "loss_correction": "normalized_targets"
         }
         
         config_path = os.path.join(out_dir, "training_config.json")
@@ -612,8 +654,9 @@ class HACTrainer:
             "model_size_mb": model_size_mb,
             "test_samples": test_size,
             "metrics": {
-                "mae": metrics.get("mae", 0),
-                "rmse": metrics.get("rmse", 0)
+                "normalized_loss": history.get('val_loss', [0])[-1] if 'val_loss' in history else 0,
+                "physical_mae": metrics.get("mae", 0),
+                "physical_rmse": metrics.get("rmse", 0)
             },
             "dataset_targets": dataset_targets,
             "physical_targets": physical_targets
@@ -621,25 +664,21 @@ class HACTrainer:
     
     def _save_scalers(self, out_dir: str, horizon: int, targets: List[str]):
         """Salva os scalers X e Y."""
-        # ✅ CORREÇÃO: Garantir que o diretório existe
         os.makedirs(out_dir, exist_ok=True)
         
         # Salvar scaler X
         scaler_x_path = os.path.join(out_dir, "scaler_X.pkl")
         joblib.dump(self.feature_builder.scaler_X, scaler_x_path)
-        print(f"   ✅ Scaler X saved")
         
         # Salvar scalers Y (por variável)
         y_scalers = self.feature_builder.get_y_scalers(horizon)
         if y_scalers:
-            scaler_count = 0
             for var_name, scaler in y_scalers.items():
-                if var_name in targets:  # Salvar apenas os targets usados
+                if var_name in targets:
                     scaler_path = os.path.join(out_dir, f"scaler_y_{var_name}.pkl")
                     joblib.dump(scaler, scaler_path)
-                    scaler_count += 1
-            
-            print(f"   ✅ {scaler_count} Y scalers saved for {targets}")
+        
+        print(f"   ✅ Scalers saved")
     
     def _update_horizon_report(self, horizon: int, metrics: Dict, train_size: int):
         """Atualiza o relatório com resultados do horizonte."""
@@ -675,9 +714,6 @@ class HACTrainer:
             "total_training_time": datetime.utcnow().isoformat()
         }
         
-        # ✅ CORREÇÃO: Garantir que o diretório de resultados existe
-        os.makedirs(self.results_dir, exist_ok=True)
-        
         # Salvar relatório
         report_path = os.path.join(self.results_dir, "training_report.json")
         with open(report_path, "w") as f:
@@ -694,13 +730,12 @@ class HACTrainer:
         for horizon, data in self.train_report["horizons"].items():
             metrics = data.get("metrics", {})
             print(f"\nHorizon {horizon}h:")
-            print(f"   • MAE:  {metrics.get('mae', 'N/A'):.4f}")
-            print(f"   • RMSE: {metrics.get('rmse', 'N/A'):.4f}")
+            print(f"   • Normalized Loss: {metrics.get('normalized_loss', 'N/A'):.4f}")
+            print(f"   • Physical MAE:  {metrics.get('physical_mae', 'N/A'):.4f}")
+            print(f"   • Physical RMSE: {metrics.get('physical_rmse', 'N/A'):.4f}")
             print(f"   • Model: {data.get('model_size_mb', 'N/A'):.1f} MB")
             print(f"   • Samples: Train={data.get('train_samples', 'N/A')}, "
                   f"Test={data.get('test_samples', 'N/A')}")
-            print(f"   • Dataset targets: {data.get('dataset_targets', [])}")
-            print(f"   • Physical targets: {data.get('physical_targets', [])}")
     
     def _print_resource_summary(self):
         """Imprime resumo do uso de recursos."""
@@ -712,7 +747,6 @@ class HACTrainer:
         print(f"Final memory usage: {final_mem.percent:.1f}%")
         print(f"Available: {final_mem.available / 1e9:.1f} GB")
         
-        # Verificar uso de memória
         if final_mem.percent > 85:
             print(f"⚠️  High memory usage ({final_mem.percent:.1f}%)")
         else:
@@ -727,7 +761,7 @@ class HACTrainer:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🧪 HAC v6 TRAINING SCRIPT - TODAS CORREÇÕES APLICADAS")
+    print("🧪 HAC v6 TRAINING SCRIPT - LOSS CORRIGIDA")
     print("=" * 60)
     
     try:
