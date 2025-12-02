@@ -370,13 +370,14 @@ if __name__ == "__main__":
         
         # Salvar scalers Y (por horizonte e variável)
         y_scalers_info = {}
-        for horizon, scaler_dict in builder.scalers_y.items():
-            y_scalers_info[str(horizon)] = {}
-            for var_name, scaler in scaler_dict.items():
-                y_scalers_info[str(horizon)][var_name] = {
-                    "mean": scaler.mean_.tolist(),
-                    "scale": scaler.scale_.tolist(),
-                    "n_samples": scaler.n_samples_seen_
+
+for h, scaler_dict in builder.scalers_y.items():
+    y_scalers_info[str(h)] = {}
+    for var_name, scaler in scaler_dict.items():
+        y_scalers_info[str(h)][var_name] = {
+            "mean": [float(v) for v in scaler.mean_],
+            "scale": [float(v) for v in scaler.scale_]
+            "n_samples": scaler.n_samples_seen_
                 }
         
         scalers_y_path = os.path.join(out_dir, "y_scalers_info.json")
