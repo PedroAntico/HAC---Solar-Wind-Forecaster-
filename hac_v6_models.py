@@ -410,21 +410,13 @@ class PhysicalModelBuilder:
             )
         )
         
-        # 4. TensorBoard (opcional)
-        # callbacks.append(
-        #     tf.keras.callbacks.TensorBoard(
-        #         log_dir=os.path.join("logs", f"h{horizon}"),
-        #         histogram_freq=1
-        #     )
-        # )
-        
-        # 5. CSV Logger
+        # 4. CSV Logger
         csv_logger_path = os.path.join(checkpoint_dir, f"training_log_h{horizon}.csv")
         callbacks.append(
             tf.keras.callbacks.CSVLogger(csv_logger_path, separator=",", append=False)
         )
         
-        # 6. TerminateOnNaN (segurança)
+        # 5. TerminateOnNaN (segurança)
         callbacks.append(tf.keras.callbacks.TerminateOnNaN())
         
         return callbacks
@@ -448,7 +440,7 @@ class PhysicalModelBuilder:
             "trainable_params": int(trainable_params),
             "non_trainable_params": int(non_trainable_params),
             "layers": len(model.layers),
-            "output_shape": model.output.shape,
+            "output_shape": str(model.output.shape),
             "physical_limits_applied": True
         }
     
@@ -504,18 +496,6 @@ class PhysicalModelBuilder:
         
         print(f"📄 Metadata salva: {metadata_path}")
         
-        # 3. Salvar arquivo de requirements mínimo
-        requirements = {
-            "tensorflow": ">=2.13.0",
-            "numpy": ">=1.24.0",
-            "h5py": ">=3.9.0"
-        }
-        
-        req_path = os.path.join(save_dir, "requirements.txt")
-        with open(req_path, "w") as f:
-            for pkg, ver in requirements.items():
-                f.write(f"{pkg}{ver}\n")
-        
         return model_path, metadata_path
 
 
@@ -548,7 +528,7 @@ def test_physical_limits():
     # Criar builder
     builder = PhysicalModelBuilder(test_config)
     
-     # Testar head físico
+    # Testar head físico
     print("\n1. Testando Physical Head:")
     test_input = tf.keras.Input(shape=(10,))
     test_head = builder.build_physical_head(test_input, ["V", "Bz", "n"])
@@ -565,15 +545,20 @@ def test_physical_limits():
     dummy_input = np.random.randn(1, 24, 20).astype(np.float32)
     predictions = test_model.predict(dummy_input, verbose=0)
     
+    # CORREÇÃO DO ERRO: Converter arrays numpy para float antes de formatar
+    v_pred = float(predictions[0, 0])
+    bz_pred = float(predictions[0, 1])
+    n_pred = float(predictions[0, 2])
+    
     print(f"   Previsões shape: {predictions.shape}")
-    print(f"   V: {predictions[0, 0].item():.2f} km/s (deve estar entre 250-1650)")
-    print(f"   Bz: {predictions[0, 1]:.2f} nT (deve estar entre -40 e 40)")
-    print(f"   n: {predictions[0, 2]:.2f} cm⁻³ (deve estar entre 0-100)")
+    print(f"   V: {v_pred:.2f} km/s (deve estar entre 250-1650)")
+    print(f"   Bz: {bz_pred:.2f} nT (deve estar entre -40 e 40)")
+    print(f"   n: {n_pred:.2f} cm⁻³ (deve estar entre 0-100)")
     
     # Verificar limites
-    v_ok = 250 <= predictions[0, 0] <= 1650
-    bz_ok = -40 <= predictions[0, 1] <= 40
-    n_ok = 0 <= predictions[0, 2] <= 100
+    v_ok = 250 <= v_pred <= 1650
+    bz_ok = -40 <= bz_pred <= 40
+    n_ok = 0 <= n_pred <= 100
     
     print(f"\n✅ Verificação de limites físicos:")
     print(f"   V dentro dos limites: {'✅' if v_ok else '❌'}")
@@ -620,6 +605,28 @@ def create_optimized_model_for_github(input_shape: Tuple[int, int],
 
 
 # ------------------------------------------------------------
+# Função helper para extrair valores float de previsões
+# ------------------------------------------------------------
+def extract_prediction_values(predictions: np.ndarray) -> List[float]:
+    """
+    Extrai valores float de um array numpy de previsões.
+    
+    Args:
+        predictions: Array numpy de previsões do modelo
+        
+    Returns:
+        Lista de valores float
+    """
+    if predictions.ndim == 2:
+        return [float(predictions[0, i]) for i in range(predictions.shape[1])]
+    elif predictions.ndim == 1:
+        return [float(predictions[i]) for i in range(predictions.shape[0])]
+    else:
+        # Para outros formatos, flatten e converter
+        return [float(v) for v in predictions.flatten()[:3]]
+
+
+# ------------------------------------------------------------
 # Execução direta para testes
 # ------------------------------------------------------------
 if __name__ == "__main__":
@@ -637,6 +644,14 @@ if __name__ == "__main__":
         print(f"   Output shape: {test_model.output_shape}")
         print(f"   Total de parâmetros: {test_model.count_params():,}")
         
+        # Testar função de extração
+        print(f"\n{'='*40}")
+        print("Testando função de extração de valores...")
+        dummy_test = np.random.randn(1, 3).astype(np.float32)
+        extracted = extract_prediction_values(dummy_test)
+        print(f"   Array: {dummy_test}")
+        print(f"   Valores extraídos: {[f'{v:.4f}' for v in extracted]}")
+        
         # Testar modelo otimizado para GitHub
         print(f"\n{'='*40}")
         print("Testando modelo GitHub Free...")
@@ -647,6 +662,16 @@ if __name__ == "__main__":
         
         print(f"✅ Modelo GitHub Free criado: {github_model.name}")
         print(f"   Parâmetros: {github_model.count_params():,} (reduzido em {(1 - github_model.count_params()/test_model.count_params())*100:.1f}%)")
+        
+        # Fazer uma previsão com o modelo GitHub Free
+        dummy_github_input = np.random.randn(1, 12, 15).astype(np.float32)
+        github_preds = github_model.predict(dummy_github_input, verbose=0)
+        github_vals = extract_prediction_values(github_preds)
+        
+        print(f"\n📊 Previsão modelo GitHub Free:")
+        print(f"   V: {github_vals[0]:.2f} km/s")
+        print(f"   Bz: {github_vals[1]:.2f} nT")
+        print(f"   n: {github_vals[2]:.2f} cm⁻³")
         
         print("\n🎯 TESTES CONCLUÍDOS COM SUCESSO!")
         print("=" * 60)
