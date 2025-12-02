@@ -2,6 +2,8 @@
 """
 hac_v6_train.py - CORRIGIDO E ADAPTADO
 Training pipeline para HAC v6 com nomes de variáveis corretos.
+
+CORREÇÃO: Removidos parâmetros obsoletos workers e use_multiprocessing do model.fit()
 """
 
 import os
@@ -242,7 +244,7 @@ class HACTrainer:
             # Criar callbacks
             callbacks = self._create_callbacks_for_horizon(horizon)
             
-            # Treinar modelo
+            # Treinar modelo - CORREÇÃO APLICADA AQUI
             print(f"\n🔥 Training model for horizon {horizon}h...")
             history = model.fit(
                 X_train, y_train_scaled,
@@ -250,9 +252,9 @@ class HACTrainer:
                 epochs=max_epochs,
                 batch_size=batch_size,
                 callbacks=callbacks,
-                verbose=1,
-                workers=1,
-                use_multiprocessing=False
+                verbose=1
+                # CORREÇÃO: Removidos workers=1 e use_multiprocessing=False
+                # Estes parâmetros não são mais suportados em versões recentes do TensorFlow
             )
             
             # Avaliar modelo
@@ -647,7 +649,7 @@ class HACTrainer:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🧪 HAC v6 TRAINING SCRIPT - READY TO RUN")
+    print("🧪 HAC v6 TRAINING SCRIPT - CORRIGIDO E PRONTO PARA EXECUTAR")
     print("=" * 60)
     
     try:
