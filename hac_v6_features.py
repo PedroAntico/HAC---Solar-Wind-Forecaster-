@@ -139,7 +139,7 @@ class HACFeatureBuilder:
             print("    Criando features físicas do Bz...")
             
             # 1. Componente SUL do Bz (fisicamente relevante para reconexão)
-            #    Bz_sul = min(Bz, 0) → apenas valores negativos, zero se positivo
+            #    Bz_sul = min(Bz, 0) → apenas valores negativas, zero se positivo
             df['Bz_sul'] = df['Bz'].clip(upper=0)
             
             # 2. Valor absoluto do Bz sul (para funções de acoplamento)
@@ -370,14 +370,13 @@ if __name__ == "__main__":
         
         # Salvar scalers Y (por horizonte e variável)
         y_scalers_info = {}
-
-for h, scaler_dict in builder.scalers_y.items():
-    y_scalers_info[str(h)] = {}
-    for var_name, scaler in scaler_dict.items():
-        y_scalers_info[str(h)][var_name] = {
-            "mean": [float(v) for v in scaler.mean_],
-            "scale": [float(v) for v in scaler.scale_]
-            "n_samples": scaler.n_samples_seen_
+        for h, scaler_dict in builder.scalers_y.items():
+            y_scalers_info[str(h)] = {}
+            for var_name, scaler in scaler_dict.items():
+                y_scalers_info[str(h)][var_name] = {
+                    "mean": scaler.mean_.tolist(),
+                    "scale": scaler.scale_.tolist(),
+                    "n_samples": int(scaler.n_samples_seen_)
                 }
         
         scalers_y_path = os.path.join(out_dir, "y_scalers_info.json")
