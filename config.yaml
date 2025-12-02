@@ -1,5 +1,7 @@
 # ============================================================
-# HAC v6 - Master Configuration File
+# HAC v6 - Master Configuration File (CORRECTED)
+# ============================================================
+# Versão compatível com scripts físicos corrigidos
 # ============================================================
 
 # ------------------------------------------------------------
@@ -7,62 +9,152 @@
 # (todos obrigatórios — pipelines quebram sem eles)
 # ------------------------------------------------------------
 paths:
-  data_dir: "data_real"
-  model_dir: "models/hac_v6"
-  results_dir: "results"
-  logs_dir: "logs"
+  data_dir: "data_real"            # Diretório dos dados brutos
+  model_dir: "models/hac_v6"       # Modelos treinados
+  results_dir: "results"           # Relatórios e métricas
+  logs_dir: "logs"                 # Logs de treino
 
 # ------------------------------------------------------------
-# PERFORMANCE OPTIONS
+# PERFORMANCE OPTIONS (GitHub Free)
 # ------------------------------------------------------------
 performance:
-  low_memory_mode: true   # ativa processos seguros para codespaces
+  low_memory_mode: true            # ativa processos seguros para codespaces
+  max_samples_per_horizon: 50000   # limite para GitHub Free
+  max_horizons: 3                  # limita horizontes simultâneos
 
 # ------------------------------------------------------------
-# TRAINING PARAMETERS
+# TRAINING PARAMETERS (Otimizado para GitHub Free)
 # ------------------------------------------------------------
 training:
-  main_lookback: 48       # janela de entrada
-  batch_size: 16
-  max_epochs: 50
-  val_split: 0.15
-  test_split: 0.15
+  main_lookback: 48                # janela histórica (ajustável)
+  batch_size: 16                   # reduzido para GitHub Free
+  max_epochs: 50                   # reduzido para GitHub Free
+  val_split: 0.15                  # validação (15%)
+  test_split: 0.15                 # teste (15%)
+  
+  # Otimizações específicas
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  min_learning_rate: 1e-6
 
 # ------------------------------------------------------------
-# HORIZONS TO TRAIN
+# HORIZONS TO TRAIN (Otimizado para GitHub Free)
 # ------------------------------------------------------------
-horizons: [1, 3, 6, 12, 24, 48]
+horizons: [1, 3, 6]  # Reduzido: apenas 3 horizontes para GitHub Free
+# horizons: [1, 3, 6, 12, 24, 48]  # Versão completa (comente linha acima)
 
 # ------------------------------------------------------------
-# TARGET VARIABLES
+# TARGET VARIABLES (CORRIGIDO - compatível com física)
 # ------------------------------------------------------------
 targets:
-  primary: ["speed", "bz_gsm", "density"]
+  # ⚠️  IMPORTANTE: Nomes devem corresponder EXATAMENTE às colunas no CSV
+  primary: ["speed", "bz_gsm", "density"]  # Variáveis PRINCIPAIS (o modelo prevê estas)
+  
+  # Variáveis SECUNDÁRIAS (usadas apenas para feature engineering)
+  secondary: []  # Deixe vazio ou adicione outras colunas numéricas do CSV
+  
+  # ⚠️  SE SEU CSV TEM OUTROS NOMES, AJUSTE AQUI:
+  # Exemplo se seu CSV tem: "V" em vez de "speed", "Bz" em vez de "bz_gsm", etc.
+  # primary: ["V", "Bz", "n"]  # Use esta linha se seus dados usam nomes padrão OMNI
 
 # ------------------------------------------------------------
-# MODEL DEFINITIONS
-# (compatível com hac_v6_models)
+# MODEL DEFINITIONS (Corrigido para física)
 # ------------------------------------------------------------
 model:
-  type: "hybrid"   # único modelo suportado no HAC v6
-
-models:
-  default: ["hybrid"]
+  type: "hybrid"                   # "hybrid", "lstm", ou "lightweight" (para GitHub Free)
+  
+  # Arquitetura do modelo (ajustável)
+  lstm_units: [64, 32]             # Unidades LSTM (reduzido para GitHub Free)
+  dense_units: [32, 16]            # Camadas densas
+  dropout_rate: 0.2                # Dropout para regularização
+  
+  # Configurações físicas (CRÍTICO - não altere sem motivo)
+  physical_head: true              # Head físico com limites (OBRIGATÓRIO)
+  separate_scalers_per_target: true  # Escalonamento por variável (OBRIGATÓRIO)
 
 # ------------------------------------------------------------
-# ALERT SYSTEM (usado por dashboard e save_report)
+# PHYSICAL CONSTRAINTS (NOVO - limites físicos realistas)
+# ------------------------------------------------------------
+physical_constraints:
+  # ⚠️  AJUSTE ESTES VALORES CONFORME SEUS DADOS REAIS
+  speed:                            # Velocidade do vento solar (km/s)
+    min: 250                        # Mínimo físico
+    max: 1650                       # Máximo físico (CMEs extremas)
+    unit: "km/s"
+    
+  bz_gsm:                           # Componente Bz GSM (nT)
+    min: -40                        # Limite sul extremo
+    max: 40                         # Limite norte extremo
+    unit: "nT"
+    
+  density:                          # Densidade de prótons (cm⁻³)
+    min: 0                          # Não pode ser negativo
+    max: 100                        # Limite extremo raro
+    unit: "cm⁻³"
+  
+  # Features físicas derivadas (geradas automaticamente)
+  derived_features:
+    bz_sul: true                    # Gera Bz_sul = min(Bz, 0)
+    bz_neg_accumulated: true        # Gera Bz negativo acumulado
+    newell_coupling: true           # Gera função de acoplamento de Newell
+
+# ------------------------------------------------------------
+# FEATURE ENGINEERING (NOVO)
+# ------------------------------------------------------------
+feature_engineering:
+  # Lags (deslocamentos temporais)
+  lags: [1, 3, 6]                   # Lags a serem criados
+  
+  # Janelas móveis (médias e desvios)
+  rolling_windows: [6, 12, 24]      # Janelas para estatísticas móveis
+  
+  # Transformações físicas
+  create_physical_features: true    # Gera features físicas do Bz
+  normalize_per_variable: true      # Normaliza cada variável separadamente
+
+# ------------------------------------------------------------
+# ALERT SYSTEM (ajustado para nomes corretos)
 # ------------------------------------------------------------
 alerts:
   thresholds:
-    speed_high: 650
-    speed_low: 300
-    density_high: 20
-    bz_extreme: 10
+    speed_high: 650                 # Velocidade alta (km/s)
+    speed_low: 300                  # Velocidade baixa (km/s)
+    density_high: 20                # Densidade alta (cm⁻³)
+    bz_extreme: 10                  # |Bz| extremo (nT)
+    
+  # Nomes corrigidos para corresponder às variáveis
+  variable_mapping:
+    speed: "speed"
+    bz: "bz_gsm"
+    density: "density"
 
 # ------------------------------------------------------------
-# REALTIME SECTION
-# (para futura automação)
+# REALTIME SECTION (para futura automação)
 # ------------------------------------------------------------
 realtime:
   enabled: false
   update_interval_minutes: 60
+  min_data_points: 1000             # Mínimo de dados para treinar
+
+# ------------------------------------------------------------
+# GITHUB FREE OPTIMIZATIONS (NOVO)
+# ------------------------------------------------------------
+github_free:
+  enabled: true                     # Ativa otimizações específicas
+  memory_safety: true               # Limita uso de memória
+  max_batch_size: 32                # Batch máximo
+  max_total_samples: 150000         # Total máximo de amostras
+  cleanup_between_horizons: true    # Limpa memória entre horizontes
+  
+# ------------------------------------------------------------
+# DEBUG AND LOGGING
+# ------------------------------------------------------------
+debug:
+  verbose: true                     # Logs detalhados
+  save_intermediate: false          # Salva dados intermediários
+  validate_physical_limits: true    # Valida limites físicos
+  
+logging:
+  level: "INFO"
+  save_training_history: true
+  save_model_summary: true
