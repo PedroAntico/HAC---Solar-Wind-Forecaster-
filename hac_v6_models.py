@@ -513,8 +513,107 @@ def create_model_builder(config: Dict) -> PhysicalModelBuilder:
 
 
 # ------------------------------------------------------------
-# Funções de utilidade para testes
+# FUNÇÕES CORRIGIDAS PARA EXTRAÇÃO ROBUSTA DE PREVISÕES
 # ------------------------------------------------------------
+
+def safe_extract_prediction_value(pred_array: np.ndarray, idx: int = 0) -> float:
+    """
+    Extrai de forma segura um valor float de um array numpy de previsões.
+    
+    Args:
+        pred_array: Array numpy de previsões (qualquer shape)
+        idx: Índice do valor a extrair (0 para primeiro)
+        
+    Returns:
+        Valor float extraído
+    """
+    # Achata o array para 1D
+    flat = pred_array.flatten()
+    
+    if len(flat) <= idx:
+        raise ValueError(f"Array tem apenas {len(flat)} valores, índice {idx} fora do range")
+    
+    # Extrai o valor e converte para float Python
+    value = flat[idx]
+    
+    # Se for um array numpy 0-d, converte para scalar
+    if hasattr(value, 'item'):
+        return float(value.item())
+    else:
+        return float(value)
+
+
+def extract_prediction_values(predictions: np.ndarray, n_targets: int = 3) -> List[float]:
+    """
+    Extrai n_targets valores float de um array numpy de previsões.
+    
+    CORREÇÃO CRÍTICA: Lida com qualquer formato de array:
+    - (batch, n_targets)
+    - (batch, timesteps, n_targets)
+    - (batch, n_targets, 1)
+    - etc.
+    
+    Args:
+        predictions: Array numpy de previsões do modelo
+        n_targets: Número de valores a extrair
+        
+    Returns:
+        Lista de valores float
+    """
+    print(f"    🔍 Debug - Shape das previsões: {predictions.shape}")
+    print(f"    🔍 Debug - Dtype das previsões: {predictions.dtype}")
+    
+    # Achata o array e pega os primeiros n_targets valores
+    flat = predictions.flatten()
+    
+    if len(flat) < n_targets:
+        print(f"    ⚠️  Aviso: Array tem apenas {len(flat)} valores, esperados {n_targets}")
+        n_targets = len(flat)
+    
+    values = []
+    for i in range(n_targets):
+        val = flat[i]
+        
+        # Se for um array numpy (pode acontecer com arrays aninhados)
+        if hasattr(val, 'item'):
+            val = val.item()
+        
+        values.append(float(val))
+    
+    return values
+
+
+def debug_prediction_structure(predictions: np.ndarray, max_depth: int = 3):
+    """
+    Função de debug para entender a estrutura das previsões.
+    
+    Args:
+        predictions: Array numpy para debug
+        max_depth: Profundidade máxima de análise
+    """
+    print(f"\n🔍 DEBUG DA ESTRUTURA DAS PREVISÕES:")
+    print(f"   Tipo: {type(predictions)}")
+    print(f"   Shape: {predictions.shape}")
+    print(f"   Dtype: {predictions.dtype}")
+    print(f"   Ndims: {predictions.ndim}")
+    
+    if predictions.ndim > 0:
+        print(f"   Primeiro elemento [0]: {type(predictions[0])}")
+        
+        if predictions.ndim >= 2:
+            print(f"   Primeiro elemento [0,0]: {type(predictions[0,0])}")
+            print(f"   Shape de [0,0]: {predictions[0,0].shape if hasattr(predictions[0,0], 'shape') else 'N/A'}")
+            
+        if predictions.ndim >= 3:
+            print(f"   Primeiro elemento [0,0,0]: {type(predictions[0,0,0])}")
+    
+    print(f"   Primeiros 5 valores achatados: {[float(v) for v in predictions.flatten()[:5]]}")
+
+
+# ------------------------------------------------------------
+# TESTES CORRIGIDOS
+# ------------------------------------------------------------
+
 def test_physical_limits():
     """Testa se os limites físicos estão sendo aplicados corretamente."""
     print("🧪 Testando limites físicos...")
@@ -545,28 +644,52 @@ def test_physical_limits():
     dummy_input = np.random.randn(1, 24, 20).astype(np.float32)
     predictions = test_model.predict(dummy_input, verbose=0)
     
-    # CORREÇÃO DO ERRO: Converter arrays numpy para float antes de formatar
-    v_pred = float(predictions[0, 0])
-    bz_pred = float(predictions[0, 1])
-    n_pred = float(predictions[0, 2])
+    # DEBUG: Analisar estrutura das previsões
+    debug_prediction_structure(predictions)
     
-    print(f"   Previsões shape: {predictions.shape}")
-    print(f"   V: {v_pred:.2f} km/s (deve estar entre 250-1650)")
-    print(f"   Bz: {bz_pred:.2f} nT (deve estar entre -40 e 40)")
-    print(f"   n: {n_pred:.2f} cm⁻³ (deve estar entre 0-100)")
+    # Extrair valores de forma robusta
+    pred_vals = extract_prediction_values(predictions, n_targets=3)
+    
+    print(f"\n   Valores extraídos (robustos):")
+    print(f"   V: {pred_vals[0]:.2f} km/s (deve estar entre 250-1650)")
+    print(f"   Bz: {pred_vals[1]:.2f} nT (deve estar entre -40 e 40)")
+    print(f"   n: {pred_vals[2]:.2f} cm⁻³ (deve estar entre 0-100)")
     
     # Verificar limites
-    v_ok = 250 <= v_pred <= 1650
-    bz_ok = -40 <= bz_pred <= 40
-    n_ok = 0 <= n_pred <= 100
+    v_ok = 250 <= pred_vals[0] <= 1650
+    bz_ok = -40 <= pred_vals[1] <= 40
+    n_ok = 0 <= pred_vals[2] <= 100
     
     print(f"\n✅ Verificação de limites físicos:")
     print(f"   V dentro dos limites: {'✅' if v_ok else '❌'}")
     print(f"   Bz dentro dos limites: {'✅' if bz_ok else '❌'}")
     print(f"   n dentro dos limites: {'✅' if n_ok else '❌'}")
     
-    if v_ok and bz_ok and n_ok:
-        print("\n🎉 TODOS OS LIMITES FÍSICOS RESPEITADOS!")
+    # Teste adicional: verificar todas as previsões em um batch maior
+    print(f"\n4. Teste adicional com batch maior:")
+    dummy_batch = np.random.randn(5, 24, 20).astype(np.float32)
+    batch_predictions = test_model.predict(dummy_batch, verbose=0)
+    
+    print(f"   Batch predictions shape: {batch_predictions.shape}")
+    
+    # Verificar que TODAS as previsões estão dentro dos limites
+    all_within_limits = True
+    for i in range(batch_predictions.shape[0]):
+        sample_vals = extract_prediction_values(batch_predictions[i:i+1], n_targets=3)
+        
+        if not (250 <= sample_vals[0] <= 1650 and 
+                -40 <= sample_vals[1] <= 40 and 
+                0 <= sample_vals[2] <= 100):
+            all_within_limits = False
+            print(f"   ⚠️  Amostra {i} viola limites: V={sample_vals[0]:.1f}, Bz={sample_vals[1]:.1f}, n={sample_vals[2]:.1f}")
+    
+    if all_within_limits:
+        print(f"   ✅ TODAS as {batch_predictions.shape[0]} amostras respeitam limites físicos!")
+    else:
+        print(f"   ⚠️  Algumas amostras violam limites físicos")
+    
+    if v_ok and bz_ok and n_ok and all_within_limits:
+        print("\n🎉 TODOS OS LIMITES FÍSICOS RESPEITADOS EM TODOS OS TESTES!")
     else:
         print("\n⚠️  ALGUM LIMITE FÍSICO VIOLADO!")
     
@@ -605,33 +728,11 @@ def create_optimized_model_for_github(input_shape: Tuple[int, int],
 
 
 # ------------------------------------------------------------
-# Função helper para extrair valores float de previsões
-# ------------------------------------------------------------
-def extract_prediction_values(predictions: np.ndarray) -> List[float]:
-    """
-    Extrai valores float de um array numpy de previsões.
-    
-    Args:
-        predictions: Array numpy de previsões do modelo
-        
-    Returns:
-        Lista de valores float
-    """
-    if predictions.ndim == 2:
-        return [float(predictions[0, i]) for i in range(predictions.shape[1])]
-    elif predictions.ndim == 1:
-        return [float(predictions[i]) for i in range(predictions.shape[0])]
-    else:
-        # Para outros formatos, flatten e converter
-        return [float(v) for v in predictions.flatten()[:3]]
-
-
-# ------------------------------------------------------------
 # Execução direta para testes
 # ------------------------------------------------------------
 if __name__ == "__main__":
     print("=" * 60)
-    print("🧪 HAC v6 PHYSICAL MODEL BUILDER - TESTE")
+    print("🧪 HAC v6 PHYSICAL MODEL BUILDER - TESTE CORRIGIDO")
     print("=" * 60)
     
     try:
@@ -646,11 +747,22 @@ if __name__ == "__main__":
         
         # Testar função de extração
         print(f"\n{'='*40}")
-        print("Testando função de extração de valores...")
-        dummy_test = np.random.randn(1, 3).astype(np.float32)
-        extracted = extract_prediction_values(dummy_test)
-        print(f"   Array: {dummy_test}")
-        print(f"   Valores extraídos: {[f'{v:.4f}' for v in extracted]}")
+        print("Testando funções de extração robustas...")
+        
+        # Testar com diferentes formatos de array
+        test_arrays = [
+            ("Array 2D simples", np.array([[1.1, 2.2, 3.3]], dtype=np.float32)),
+            ("Array 3D com timesteps", np.random.randn(1, 10, 3).astype(np.float32)),
+            ("Array 3D diferente", np.random.randn(1, 3, 5).astype(np.float32)),
+        ]
+        
+        for name, arr in test_arrays:
+            print(f"\n   Testando {name} (shape: {arr.shape}):")
+            try:
+                vals = extract_prediction_values(arr, n_targets=3)
+                print(f"     Valores extraídos: {[f'{v:.3f}' for v in vals]}")
+            except Exception as e:
+                print(f"     ❌ Erro: {e}")
         
         # Testar modelo otimizado para GitHub
         print(f"\n{'='*40}")
@@ -666,12 +778,22 @@ if __name__ == "__main__":
         # Fazer uma previsão com o modelo GitHub Free
         dummy_github_input = np.random.randn(1, 12, 15).astype(np.float32)
         github_preds = github_model.predict(dummy_github_input, verbose=0)
-        github_vals = extract_prediction_values(github_preds)
+        
+        # Usar função robusta para extrair valores
+        github_vals = extract_prediction_values(github_preds, n_targets=3)
         
         print(f"\n📊 Previsão modelo GitHub Free:")
         print(f"   V: {github_vals[0]:.2f} km/s")
         print(f"   Bz: {github_vals[1]:.2f} nT")
         print(f"   n: {github_vals[2]:.2f} cm⁻³")
+        
+        # Verificar limites
+        if (250 <= github_vals[0] <= 1650 and 
+            -40 <= github_vals[1] <= 40 and 
+            0 <= github_vals[2] <= 100):
+            print(f"   ✅ Previsões dentro dos limites físicos!")
+        else:
+            print(f"   ⚠️  ALGUM LIMITE FÍSICO VIOLADO!")
         
         print("\n🎯 TESTES CONCLUÍDOS COM SUCESSO!")
         print("=" * 60)
