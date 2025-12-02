@@ -566,7 +566,7 @@ def test_physical_limits():
     predictions = test_model.predict(dummy_input, verbose=0)
     
     print(f"   Previsões shape: {predictions.shape}")
-    print(f"   V: {predictions[0, 0]:.2f} km/s (deve estar entre 250-1650)")
+    print(f"   V: {predictions[0, 0].item():.2f} km/s (deve estar entre 250-1650)")
     print(f"   Bz: {predictions[0, 1]:.2f} nT (deve estar entre -40 e 40)")
     print(f"   n: {predictions[0, 2]:.2f} cm⁻³ (deve estar entre 0-100)")
     
