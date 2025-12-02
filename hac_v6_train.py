@@ -47,7 +47,7 @@ class HACTrainer:
         self.feature_builder = HACFeatureBuilder(self.config)
         
         print("🧠 Initializing model builder...")
-        self.model_builder = create_model_builder(self.config.get_all())
+        self.model_builder = create_model_builder(self.config)
         
         # 5. Configurar diretórios
         self._setup_directories()
