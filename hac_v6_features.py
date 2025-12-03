@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-hac_v6_features.py - CORREÇÃO DEFINITIVA DOS NOMES DE VARIÁVEIS
+hac_v6_features.py - COM DENSIDADE RECUPERADA E NORMALIZADA
 Feature Engineering & Dataset Builder para HAC v6.
 
-CORREÇÕES CRÍTICAS APLICADAS:
-1. Usa nomes CORRETOS das variáveis do CSV: 'speed', 'bz_gsm', 'density'
-2. Trata densidade constante removendo-a ANTES do escalonamento
-3. Engineering de features físicas baseado nos nomes reais
-4. Escalonamento Y por variável com tratamento de constantes
+RECUPERAÇÃO DE DENSIDADE:
+1. Densidade foi recuperada dos dados OMNI originais e normalizada
+2. Agora usa variáveis: 'speed', 'bz_gsm', 'density' (todas presentes)
+3. Densidade NÃO é mais constante - foi normalizada corretamente
 """
 
 import os
@@ -75,6 +74,14 @@ class HACFeatureBuilder:
             )
         
         print(f"✅ Targets validados: {targets}")
+        
+        # Verificar especificamente a densidade
+        if 'density' in targets:
+            print(f"   ✅ Densidade presente e será usada como target")
+            print(f"   📊 Estatísticas da densidade:")
+            print(f"      • Média: {self.raw_df['density'].mean():.2f}")
+            print(f"      • Std: {self.raw_df['density'].std():.2f}")
+            print(f"      • Min-Max: {self.raw_df['density'].min():.1f}-{self.raw_df['density'].max():.1f}")
 
     # ------------------------------------------------------------
     def _analyze_variables(self):
@@ -91,12 +98,14 @@ class HACFeatureBuilder:
                 min_val = values.min()
                 max_val = values.max()
                 unique_count = values.nunique()
+                nan_count = self.raw_df[target].isna().sum()
                 
                 print(f"   {target}:")
                 print(f"     • Média: {mean_val:.2f}")
                 print(f"     • Desvio padrão: {std_val:.2f}")
                 print(f"     • Range: {min_val:.1f} - {max_val:.1f}")
                 print(f"     • Valores únicos: {unique_count}")
+                print(f"     • NaNs: {nan_count} ({nan_count/len(self.raw_df)*100:.1f}%)")
                 
                 if std_val < 0.1:
                     print(f"     ⚠️  VARIÁVEL QUASE CONSTANTE (std={std_val:.3f})")
@@ -145,9 +154,9 @@ class HACFeatureBuilder:
         Cria features: físicas + lags + estatísticas móveis.
         
         USA OS NOMES CORRETOS DO CSV:
-        - 'speed' (não 'V')
-        - 'bz_gsm' (não 'Bz')
-        - 'density' (não 'n')
+        - 'speed' (velocidade do vento solar)
+        - 'bz_gsm' (componente Bz)
+        - 'density' (densidade do vento solar - RECUPERADA E NORMALIZADA)
         """
         print(f"    Formato inicial: {df.shape}")
         
@@ -158,14 +167,13 @@ class HACFeatureBuilder:
                 df = df.drop(columns=[col])
         
         # -----------------------------------------------------------------
-        # ENGINEERING FÍSICO DO Bz (usando 'bz_gsm' que existe no CSV)
+        # ENGINEERING FÍSICO DO Bz (usando 'bz_gsm')
         # -----------------------------------------------------------------
-        if 'bz_gsm' in df.columns:  # ✅ CORREÇÃO: 'bz_gsm' não 'Bz'
+        if 'bz_gsm' in df.columns:
             print("    Criando features físicas do Bz...")
             
             # 1. Componente SUL do Bz (fisicamente relevante para reconexão)
-            #    Bz_sul = min(bz_gsm, 0) → apenas valores negativas, zero se positivo
-            df['bz_sul'] = df['bz_gsm'].clip(upper=0)  # ✅ CORREÇÃO: coluna 'bz_gsm'
+            df['bz_sul'] = df['bz_gsm'].clip(upper=0)
             
             # 2. Valor absoluto do Bz sul (para funções de acoplamento)
             df['bz_sul_abs'] = np.abs(df['bz_sul'])
@@ -177,12 +185,65 @@ class HACFeatureBuilder:
             df['bz_neg_acum_1h'] = df['bz_sul'].rolling(window=window_1h, min_periods=1).sum()
             df['bz_neg_acum_3h'] = df['bz_sul'].rolling(window=window_3h, min_periods=1).sum()
             
-            # 4. Função de acoplamento de Newell (aproximada)
-            if 'speed' in df.columns:  # ✅ CORREÇÃO: 'speed' não 'V'
-                df['newell_coupling'] = df['speed'] * (df['bz_sul_abs'] ** 2)
-                print(f"      ✅ Função de acoplamento de Newell criada")
+            print(f"      ✅ Features físicas do Bz criadas: bz_sul, acumulados")
+        
+        # -----------------------------------------------------------------
+        # ENGINEERING FÍSICO DA DENSIDADE (agora NORMALIZADA)
+        # -----------------------------------------------------------------
+        if 'density' in df.columns:
+            print("    Criando features físicas da densidade...")
             
-            print(f"      ✅ Features físicas do Bz criadas: bz_sul, acumulados, newell")
+            # 1. Logaritmo da densidade (comum em física de plasma)
+            df['density_log'] = np.log1p(df['density'])
+            
+            # 2. Variação percentual da densidade
+            df['density_pct_change'] = df['density'].pct_change().fillna(0)
+            
+            # 3. Média móvel da densidade (para suavizar)
+            df['density_smoothed_1h'] = df['density'].rolling(window=12, min_periods=6).mean()
+            df['density_smoothed_3h'] = df['density'].rolling(window=36, min_periods=18).mean()
+            
+            print(f"      ✅ Features físicas da densidade criadas: log, pct_change, smoothed")
+        
+        # -----------------------------------------------------------------
+        # ENGINEERING FÍSICO DA VELOCIDADE (speed)
+        # -----------------------------------------------------------------
+        if 'speed' in df.columns:
+            print("    Criando features físicas da velocidade...")
+            
+            # 1. Aceleração (derivada da velocidade)
+            df['speed_acceleration'] = df['speed'].diff().fillna(0)
+            
+            # 2. Média móvel da velocidade
+            df['speed_smoothed_1h'] = df['speed'].rolling(window=12, min_periods=6).mean()
+            df['speed_smoothed_3h'] = df['speed'].rolling(window=36, min_periods=18).mean()
+            
+            print(f"      ✅ Features físicas da velocidade criadas: acceleration, smoothed")
+        
+        # -----------------------------------------------------------------
+        # INTERAÇÕES FÍSICAS ENTRE VARIÁVEIS
+        # -----------------------------------------------------------------
+        print("    Criando interações físicas entre variáveis...")
+        
+        # 1. Pressão dinâmica: P_dyn = density * speed^2 (proxy para pressão solar)
+        if 'density' in df.columns and 'speed' in df.columns:
+            df['pressure_dynamic'] = df['density'] * (df['speed'] ** 2)
+            print(f"      ✅ Pressão dinâmica criada: P_dyn = density * speed^2")
+        
+        # 2. Fluxo de momento: n * V
+        if 'density' in df.columns and 'speed' in df.columns:
+            df['momentum_flux'] = df['density'] * df['speed']
+            print(f"      ✅ Fluxo de momento criado: n * V")
+        
+        # 3. Função de acoplamento de Newell: V * |Bz_sul|^2
+        if 'speed' in df.columns and 'bz_sul_abs' in df.columns:
+            df['newell_coupling'] = df['speed'] * (df['bz_sul_abs'] ** 2)
+            print(f"      ✅ Função de acoplamento de Newell criada: V * |Bz_sul|^2")
+        
+        # 4. Interação Bz-densidade (para eventos de CME com alta densidade)
+        if 'bz_gsm' in df.columns and 'density' in df.columns:
+            df['bz_density_interaction'] = df['bz_gsm'] * df['density']
+            print(f"      ✅ Interação Bz-densidade criada: Bz * n")
         
         # -----------------------------------------------------------------
         # Features base para engenharia (targets primários + secundários)
@@ -191,14 +252,19 @@ class HACFeatureBuilder:
         primary = targets_cfg.get("primary", [])
         secondary = targets_cfg.get("secondary", [])
         
-        # Incluir as features físicas do Bz nas secundárias para criar lags
-        bz_physical_features = ['bz_sul', 'bz_sul_abs', 'bz_neg_acum_1h', 'bz_neg_acum_3h']
-        if 'newell_coupling' in df.columns:
-            bz_physical_features.append('newell_coupling')
+        # Incluir todas as features físicas criadas nas secundárias
+        physical_features = [
+            'bz_sul', 'bz_sul_abs', 'bz_neg_acum_1h', 'bz_neg_acum_3h',
+            'density_log', 'density_pct_change', 'density_smoothed_1h', 'density_smoothed_3h',
+            'speed_acceleration', 'speed_smoothed_1h', 'speed_smoothed_3h',
+            'pressure_dynamic', 'momentum_flux', 'newell_coupling', 'bz_density_interaction'
+        ]
         
         # Combinar todas as colunas base para criar lags
         base_cols = []
-        for col in primary + secondary + bz_physical_features:
+        all_potential_cols = primary + secondary + physical_features
+        
+        for col in all_potential_cols:
             if col in df.columns and col not in base_cols:
                 base_cols.append(col)
         
@@ -208,16 +274,23 @@ class HACFeatureBuilder:
         # Lags e estatísticas móveis (para todas as colunas base)
         # -----------------------------------------------------------------
         for col in base_cols:
-            # Lags (1 e 3 passos atrás)
+            # Lags (1, 3, 6 passos atrás - 5, 15, 30 minutos)
             df[f"{col}_lag1"] = df[col].shift(1)
             df[f"{col}_lag3"] = df[col].shift(3)
+            df[f"{col}_lag6"] = df[col].shift(6)
             
-            # Médias móveis (6 e 12 passos)
+            # Médias móveis (6, 12, 24 passos - 30 min, 1h, 2h)
             df[f"{col}_rm6"] = df[col].rolling(window=6, min_periods=3).mean()
             df[f"{col}_rm12"] = df[col].rolling(window=12, min_periods=6).mean()
+            df[f"{col}_rm24"] = df[col].rolling(window=24, min_periods=12).mean()
             
-            # Desvio padrão móvel
+            # Desvio padrão móvel (para variabilidade)
             df[f"{col}_std6"] = df[col].rolling(window=6, min_periods=3).std()
+            df[f"{col}_std12"] = df[col].rolling(window=12, min_periods=6).std()
+            
+            # Range móvel (max-min)
+            df[f"{col}_range12"] = df[col].rolling(window=12, min_periods=6).max() - \
+                                 df[col].rolling(window=12, min_periods=6).min()
         
         # -----------------------------------------------------------------
         # Limpar NaNs e retornar
@@ -226,8 +299,13 @@ class HACFeatureBuilder:
         df = df.dropna().reset_index(drop=True)
         final_len = len(df)
         
-        print(f"    Removidos {initial_len - final_len} NaNs")
+        removed = initial_len - final_len
+        print(f"    Removidos {removed} NaNs ({removed/initial_len*100:.1f}% dos dados)")
         print(f"    Formato final: {df.shape}")
+        print(f"    Total de features criadas: {len(df.columns)}")
+        
+        # Mostrar algumas features criadas
+        print(f"    Exemplos de features criadas: {list(df.columns[:15])}...")
         
         return df
 
@@ -237,8 +315,7 @@ class HACFeatureBuilder:
         """
         Cria janelas temporais para todos os horizontes.
         
-        IMPORTANTE: DETECTA E REMOVE VARIÁVEIS CONSTANTES ANTES DO ESCALONAMENTO!
-        Se 'density' for constante (sempre 50), será removida automaticamente.
+        IMPORTANTE: Densidade NÃO é mais constante - foi normalizada corretamente
         """
         lookback = self.config.get("training")["main_lookback"]
         horizons = self.config.get("horizons")
@@ -255,41 +332,21 @@ class HACFeatureBuilder:
         print(f"    X shape: {X_data.shape}, y shape: {y_data_raw.shape}")
         print(f"    Feature columns: {len(feature_data_cols)}")
         
-        # ✅ CORREÇÃO CRÍTICA: Verificar quais targets são constantes
-        constant_vars = []
-        valid_target_indices = []
-        valid_target_names = []
-        
-        print(f"\n    🔍 Verificando variáveis constantes nos targets...")
+        # ✅ VERIFICAÇÃO DE VARIÁVEIS CONSTANTES (para debug)
+        print(f"\n    🔍 Verificando variáveis nos targets...")
         for idx, var_name in enumerate(target_cols):
             var_data = y_data_raw[:, idx]
             std_val = np.std(var_data)
-            range_val = np.ptp(var_data)  # peak-to-peak (max-min)
+            range_val = np.ptp(var_data)
+            nan_count = np.isnan(var_data).sum()
             
-            print(f"      {var_name}: std={std_val:.6f}, range={range_val:.2f}")
+            print(f"      {var_name}:")
+            print(f"        • std={std_val:.4f}, range={range_val:.2f}, NaNs={nan_count}")
             
-            if std_val < 0.1 or range_val < 1.0:  # Threshold para constante
-                constant_vars.append(var_name)
-                print(f"      ⚠️  VARIÁVEL CONSTANTE: {var_name} (std={std_val:.3f}, range={range_val:.1f})")
+            if std_val < 0.01:  # Threshold muito baixo para constante
+                print(f"        ⚠️  VARIÁVEL QUASE CONSTANTE: {var_name} (std={std_val:.6f})")
             else:
-                valid_target_indices.append(idx)
-                valid_target_names.append(var_name)
-                print(f"      ✅ {var_name} OK para treinamento")
-        
-        # ✅ Se houver variáveis constantes, criar dataset apenas com as variáveis válidas
-        if constant_vars:
-            print(f"\n    🛠️  Removendo variáveis constantes: {constant_vars}")
-            print(f"    ✅ Targets válidos para treinamento: {valid_target_names}")
-            
-            if not valid_target_names:
-                raise ValueError(f"❌ TODAS as variáveis target são constantes! Verifique o dataset.")
-            
-            # Manter apenas as colunas válidas
-            y_data_raw = y_data_raw[:, valid_target_indices]
-            target_cols = valid_target_names
-            print(f"    ✅ Novo shape de y: {y_data_raw.shape}")
-        else:
-            print(f"    ✅ Nenhuma variável constante detectada")
+                print(f"        ✅ OK para treinamento (std={std_val:.4f})")
         
         datasets: Dict[int, Dict[str, Any]] = {}
         
@@ -332,10 +389,16 @@ class HACFeatureBuilder:
                 
                 # Verificar se ainda é constante (por segurança)
                 var_std = np.std(y_single_var)
+                
                 if var_std < 1e-6:  # Ainda constante mesmo após filtro
-                    print(f"      ⚠️  ATENÇÃO: {var_name} ainda constante após filtro")
+                    print(f"      ⚠️  ATENÇÃO: {var_name} ainda constante (std={var_std:.6f})")
                     print(f"        Usando StandardScaler(with_std=False)")
                     scaler = StandardScaler(with_std=False)
+                elif var_std < 0.1:  # Baixa variância
+                    print(f"      ℹ️  {var_name} tem baixa variância (std={var_std:.4f})")
+                    scaler = StandardScaler()
+                else:
+                    scaler = StandardScaler()
                 
                 # Escalonar APENAS esta variável
                 y_scaled_single = scaler.fit_transform(y_single_var)
@@ -346,10 +409,9 @@ class HACFeatureBuilder:
                 # Salvar scaler para esta variável
                 self.scalers_y[horizon][var_name] = scaler
                 
-                # Log para debug (apenas primeira variável)
-                if idx == 0 and len(target_cols) > 0:
-                    print(f"      Scalers Y criados para {len(target_cols)} variáveis")
-                    print(f"        {var_name}: mean={scaler.mean_[0]:.2f}, scale={scaler.scale_[0]:.2f}")
+                # Log para debug (apenas primeira variável e densidade)
+                if idx == 0 or var_name == 'density':
+                    print(f"      {var_name}: mean={scaler.mean_[0]:.4f}, scale={scaler.scale_[0]:.4f}")
             
             # -----------------------------------------------------------------
             # Montar dataset para este horizonte
@@ -358,11 +420,10 @@ class HACFeatureBuilder:
                 "X": X_arr,                    # Features escalonadas
                 "y_scaled": y_arr_scaled,      # Targets escalonados (PARA TREINO)
                 "y_raw": y_arr_raw,            # Targets originais (PARA MÉTRICAS)
-                "target_names": target_cols,   # Nomes DAS VARIÁVEIS VÁLIDAS
+                "target_names": target_cols,   # Nomes das variáveis
                 "feature_names": feature_data_cols,
                 "horizon": horizon,
-                "lookback": lookback,
-                "constant_variables_removed": constant_vars  # Para debug
+                "lookback": lookback
             }
             
             # Limpar memória entre horizontes
@@ -382,7 +443,7 @@ class HACFeatureBuilder:
 # ------------------------------------------------------------
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 HAC v6 FEATURE BUILDER - CORREÇÃO DEFINITIVA DOS NOMES")
+    print("🚀 HAC v6 FEATURE BUILDER - COM DENSIDADE RECUPERADA")
     print("=" * 70)
     
     try:
@@ -412,13 +473,13 @@ if __name__ == "__main__":
                 target_names=data["target_names"],
                 feature_names=data["feature_names"],
                 horizon=data["horizon"],
-                lookback=data["lookback"],
-                constant_variables_removed=data.get("constant_variables_removed", [])
+                lookback=data["lookback"]
             )
             print(f"   ✅ Horizonte {horizon}h: {npz_path}")
             print(f"      • Amostras: {data['X'].shape[0]}")
+            print(f"      • Lookback: {data['lookback']}")
+            print(f"      • Features: {data['X'].shape[2]}")
             print(f"      • Targets: {data['target_names']}")
-            print(f"      • Variáveis constantes removidas: {data.get('constant_variables_removed', [])}")
         
         # Salvar scalers X
         scaler_x_path = os.path.join(out_dir, "scaler_X.pkl")
@@ -454,19 +515,23 @@ if __name__ == "__main__":
             print(f"   • Amostras: {data['X'].shape[0]}")
             print(f"   • Lookback: {data['lookback']}")
             print(f"   • Features: {data['X'].shape[2]} colunas")
-            print(f"   • Targets válidos: {', '.join(data['target_names'])}")
-            
-            if data.get("constant_variables_removed"):
-                print(f"   • Removidos (constantes): {', '.join(data['constant_variables_removed'])}")
+            print(f"   • Targets: {', '.join(data['target_names'])}")
             
             # Estatísticas dos targets originais
             y_raw = data["y_raw"]
             for idx, name in enumerate(data["target_names"]):
-                print(f"     - {name}: média={y_raw[:, idx].mean():.2f}, "
-                      f"std={y_raw[:, idx].std():.2f}, "
-                      f"range={y_raw[:, idx].min():.1f}-{y_raw[:, idx].max():.1f}")
+                print(f"     - {name}:")
+                print(f"       • média={y_raw[:, idx].mean():.4f}")
+                print(f"       • std={y_raw[:, idx].std():.4f}")
+                print(f"       • min={y_raw[:, idx].min():.4f}")
+                print(f"       • max={y_raw[:, idx].max():.4f}")
+                
+                # Obter scaler para esta variável
+                scaler = builder.scalers_y[horizon][name]
+                print(f"       • escalonado: mean={scaler.mean_[0]:.4f}, scale={scaler.scale_[0]:.4f}")
         
-        print("\n🎯 Pronto para treino com VARIÁVEIS CORRETAS!")
+        print("\n🎯 DENSIDADE RECUPERADA E INCLUÍDA NO MODELO!")
+        print("📈 Pronto para treinar HAC v6 com features físicas completas!")
         
     except FileNotFoundError as e:
         print(f"\n❌ ERRO: {e}")
