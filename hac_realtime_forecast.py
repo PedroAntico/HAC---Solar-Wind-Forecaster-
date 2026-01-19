@@ -1,73 +1,87 @@
 # ============================================================
-# HAC REAL-TIME SOLAR WIND FORECASTER
+# HAC REAL-TIME SOLAR WIND FORECASTER (ROBUST VERSION)
 # Author: Pedro Antico
-# Version: Stable / GitHub Ready
 # ============================================================
 
 import numpy as np
 import pandas as pd
 import requests
-from datetime import datetime
+import time
 
 # ============================================================
-# 1. DOWNLOAD DOS DADOS DSCOVR (NOAA)
+# UTIL
 # ============================================================
 
-def load_dscovr_plasma():
-    url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-1-hour.json"
-    data = requests.get(url).json()
-
-    df = pd.DataFrame(data[1:], columns=data[0])
-    df["time_tag"] = pd.to_datetime(df["time_tag"])
-
-    df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
-    df["density"] = pd.to_numeric(df["density"], errors="coerce")
-
-    return df[["time_tag", "speed", "density"]]
-
-
-def load_dscovr_mag():
-    url = "https://services.swpc.noaa.gov/products/solar-wind/mag-1-hour.json"
-    data = requests.get(url).json()
-
-    df = pd.DataFrame(data[1:], columns=data[0])
-    df["time_tag"] = pd.to_datetime(df["time_tag"])
-
-    df["bz_gsm"] = pd.to_numeric(df["bz_gsm"], errors="coerce")
-    df["bt"] = pd.to_numeric(df["bt"], errors="coerce")
-
-    return df[["time_tag", "bz_gsm", "bt"]]
+def safe_get_json(url, retries=3):
+    for i in range(retries):
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200 and r.text.strip().startswith("["):
+                return r.json()
+            else:
+                print(f"⚠️ Tentativa {i+1}: resposta inválida")
+        except Exception as e:
+            print(f"⚠️ Erro tentativa {i+1}: {e}")
+        time.sleep(2)
+    raise RuntimeError("❌ Falha ao obter dados da NOAA")
 
 
 # ============================================================
-# 2. MODELO HAC (VERSÃO FINAL DO PAPER)
+# DOWNLOAD DADOS DSCOVR (ROBUSTO)
+# ============================================================
+
+def load_dscovr():
+    plasma_url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-1-hour.json"
+    mag_url    = "https://services.swpc.noaa.gov/products/solar-wind/mag-1-hour.json"
+
+    plasma = safe_get_json(plasma_url)
+    mag    = safe_get_json(mag_url)
+
+    df_p = pd.DataFrame(plasma[1:], columns=plasma[0])
+    df_m = pd.DataFrame(mag[1:], columns=mag[0])
+
+    df_p["time_tag"] = pd.to_datetime(df_p["time_tag"])
+    df_m["time_tag"] = pd.to_datetime(df_m["time_tag"])
+
+    df = pd.merge(df_p, df_m, on="time_tag", how="inner")
+
+    df = df.rename(columns={
+        "speed": "V",
+        "density": "N",
+        "bz_gsm": "Bz",
+        "bt": "Bt"
+    })
+
+    df = df[["time_tag", "V", "N", "Bz", "Bt"]]
+    df = df.apply(pd.to_numeric, errors="ignore")
+
+    return df.dropna()
+
+
+# ============================================================
+# HAC MODEL
 # ============================================================
 
 class HAC:
     def __init__(self):
-        self.alpha_L = 1.5e-5
-        self.beta_L = 0.12
-        self.alpha_R = 0.10
-        self.beta_R = 0.20
+        self.alpha = 1.5e-5
+        self.beta = 0.12
         self.gamma = 0.8
         self.delta = 1.2
         self.theta = 2.8
         self.sigma = 0.4
-        self.v0 = 400
-        self.n0 = 5
 
-    def phi(self, Bz, Bt, v, n):
-        Bz_south = np.maximum(-Bz, 0)
-        return n * v**2 * Bt**2 + v * Bt**2 * (Bz_south > 0)
+    def phi(self, v, n, bz, bt):
+        bz_s = np.maximum(-bz, 0)
+        return n * v**2 * bt**2 + v * bt**2 * (bz_s > 0)
 
     def step(self, H, phi):
-        sat = 1 / (1 + np.exp(-(H - self.theta) / self.sigma))
-        dH = self.alpha_L * phi * (1 - sat) - self.beta_L * H
-        return np.clip(H + dH, 0, 10)
+        sat = 1 / (1 + np.exp(-(H - self.theta)/self.sigma))
+        return H + self.alpha * phi * (1 - sat) - self.beta * H
 
     def run(self, df):
         H = np.zeros(len(df))
-        phi = self.phi(df.bz_gsm, df.bt, df.speed, df.density)
+        phi = self.phi(df.V, df.N, df.Bz, df.Bt)
 
         for i in range(1, len(df)):
             H[i] = self.step(H[i-1], phi[i])
@@ -77,59 +91,46 @@ class HAC:
 
 
 # ============================================================
-# 3. CLASSIFICAÇÃO DE TEMPESTADE
+# CLASSIFICAÇÃO
 # ============================================================
 
-def classify_storm(HCI):
-    if HCI > 1.2e7:
+def classify(hci):
+    if hci > 1.2e7:
         return "G5 EXTREMA"
-    elif HCI > 7e6:
+    elif hci > 7e6:
         return "G4 SEVERA"
-    elif HCI > 4e6:
+    elif hci > 4e6:
         return "G3 FORTE"
-    elif HCI > 2e6:
+    elif hci > 2e6:
         return "G2 MODERADA"
-    elif HCI > 1e6:
+    elif hci > 1e6:
         return "G1 FRACA"
     else:
         return "CALMO"
 
 
 # ============================================================
-# 4. EXECUÇÃO PRINCIPAL
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
 
     print("\n📡 Baixando dados DSCOVR...")
-    plasma = load_dscovr_plasma()
-    mag = load_dscovr_mag()
+    df = load_dscovr()
 
-    df = pd.merge(plasma, mag, on="time_tag", how="inner")
-    df = df.dropna()
+    print(f"✔ Dados recebidos: {len(df)} pontos")
+    print(f"🕒 Último dado: {df.time_tag.iloc[-1]}")
 
-    print(f"✅ Dados carregados: {len(df)} pontos")
-    print(f"🕒 Última medição: {df.time_tag.iloc[-1]}")
+    model = HAC()
+    H, HCI = model.run(df)
 
-    hac = HAC()
-    H, HCI = hac.run(df)
+    current = HCI[-1]
 
-    current_HCI = HCI[-1]
-    level = classify_storm(current_HCI)
-
-    print("\n===============================")
+    print("\n==============================")
     print("🌎 HAC — ESTADO ATUAL")
-    print("===============================")
-    print(f"HCI atual : {current_HCI:,.2e}")
-    print(f"Nível     : {level}")
-    print(f"Bz atual  : {df.bz_gsm.iloc[-1]:.2f} nT")
-    print(f"Vento     : {df.speed.iloc[-1]:.1f} km/s")
-    print(f"Densidade : {df.density.iloc[-1]:.2f} cm⁻³")
-
-    print("\n📌 Interpretação:")
-    if "G4" in level or "G5" in level:
-        print("⚠️ Condições severas — risco alto de tempestade geomagnética.")
-    elif "G3" in level:
-        print("⚠️ Tempestade significativa em curso.")
-    else:
-        print("🟢 Condições moderadas / estáveis.")
+    print("==============================")
+    print(f"HCI: {current:,.2e}")
+    print(f"Nível: {classify(current)}")
+    print(f"Bz: {df.Bz.iloc[-1]:.2f} nT")
+    print(f"Vento: {df.V.iloc[-1]:.1f} km/s")
+    print(f"Densidade: {df.N.iloc[-1]:.2f} cm⁻³")
