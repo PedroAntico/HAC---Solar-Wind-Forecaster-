@@ -1,144 +1,135 @@
+# ============================================================
+# HAC REAL-TIME SOLAR WIND FORECASTER
+# Author: Pedro Antico
+# Version: Stable / GitHub Ready
+# ============================================================
+
 import numpy as np
 import pandas as pd
 import requests
-import matplotlib.pyplot as plt
 from datetime import datetime
 
 # ============================================================
 # 1. DOWNLOAD DOS DADOS DSCOVR (NOAA)
 # ============================================================
 
-PLASMA_URL = "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json"
-MAG_URL = "https://services.swpc.noaa.gov/products/solar-wind/mag-7-day.json"
+def load_dscovr_plasma():
+    url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-1-hour.json"
+    data = requests.get(url).json()
 
-def load_dscovr():
-    plasma = pd.DataFrame(
-        requests.get(PLASMA_URL).json()[1:],
-        columns=["time", "density", "speed", "temperature"]
-    )
+    df = pd.DataFrame(data[1:], columns=data[0])
+    df["time_tag"] = pd.to_datetime(df["time_tag"])
 
-    mag = pd.DataFrame(
-        requests.get(MAG_URL).json()[1:],
-        columns=["time", "bx", "by", "bz", "bt"]
-    )
+    df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
+    df["density"] = pd.to_numeric(df["density"], errors="coerce")
 
-    plasma["time"] = pd.to_datetime(plasma["time"])
-    mag["time"] = pd.to_datetime(mag["time"])
+    return df[["time_tag", "speed", "density"]]
 
-    df = pd.merge(plasma, mag, on="time", how="inner")
 
-    for col in ["density", "speed", "temperature", "bx", "by", "bz", "bt"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+def load_dscovr_mag():
+    url = "https://services.swpc.noaa.gov/products/solar-wind/mag-1-hour.json"
+    data = requests.get(url).json()
 
-    df = df.dropna().reset_index(drop=True)
-    return df
+    df = pd.DataFrame(data[1:], columns=data[0])
+    df["time_tag"] = pd.to_datetime(df["time_tag"])
+
+    df["bz_gsm"] = pd.to_numeric(df["bz_gsm"], errors="coerce")
+    df["bt"] = pd.to_numeric(df["bt"], errors="coerce")
+
+    return df[["time_tag", "bz_gsm", "bt"]]
 
 
 # ============================================================
-# 2. MODELO HAC (IGUAL AO DO PAPER)
+# 2. MODELO HAC (VERSÃO FINAL DO PAPER)
 # ============================================================
 
-class HACModel:
+class HAC:
     def __init__(self):
         self.alpha_L = 1.5e-5
         self.beta_L = 0.12
-        self.alpha_R = 0.1
-        self.beta_R = 0.2
-        self.eta = 0.35
-        self.theta = 2.8
-        self.sigma = 0.4
-
+        self.alpha_R = 0.10
+        self.beta_R = 0.20
         self.gamma = 0.8
         self.delta = 1.2
-
+        self.theta = 2.8
+        self.sigma = 0.4
         self.v0 = 400
         self.n0 = 5
 
     def phi(self, Bz, Bt, v, n):
-        return n * v**2 * Bt**2 + v * Bt**2 * (Bz < 0)
+        Bz_south = np.maximum(-Bz, 0)
+        return n * v**2 * Bt**2 + v * Bt**2 * (Bz_south > 0)
+
+    def step(self, H, phi):
+        sat = 1 / (1 + np.exp(-(H - self.theta) / self.sigma))
+        dH = self.alpha_L * phi * (1 - sat) - self.beta_L * H
+        return np.clip(H + dH, 0, 10)
 
     def run(self, df):
-        N = len(df)
-        H_load = np.zeros(N)
-        H_rel = np.zeros(N)
-        HCI = np.zeros(N)
+        H = np.zeros(len(df))
+        phi = self.phi(df.bz_gsm, df.bt, df.speed, df.density)
 
-        phi = self.phi(df["bz"], df["bt"], df["speed"], df["density"])
+        for i in range(1, len(df)):
+            H[i] = self.step(H[i-1], phi[i])
 
-        for i in range(1, N):
-            Hsat = 1 / (1 + np.exp(-(H_load[i-1] - self.theta) / self.sigma))
-
-            dH_load = self.alpha_L * phi[i] * (1 - Hsat) - self.beta_L * H_load[i-1]
-            dH_rel = self.alpha_R * H_load[i-1] - self.beta_R * H_rel[i-1] + self.eta * Hsat
-
-            H_load[i] = np.clip(H_load[i-1] + dH_load, 0, 5)
-            H_rel[i] = np.clip(H_rel[i-1] + dH_rel, 0, 3)
-
-            C = (np.maximum(-df["bz"][i], 0) / (df["bt"][i] + 1e-6)) \
-                * (df["speed"][i] / self.v0) \
-                * (df["density"][i] / self.n0)
-
-            HCI[i] = self.gamma * C + self.delta * H_load[i]
-
-        df["H_load"] = H_load
-        df["H_rel"] = H_rel
-        df["HCI"] = HCI
-
-        return df
+        HCI = self.gamma * phi + self.delta * H
+        return H, HCI
 
 
 # ============================================================
-# 3. CLASSIFICAÇÃO DE REGIME
+# 3. CLASSIFICAÇÃO DE TEMPESTADE
 # ============================================================
 
-def classify_hac(hci):
-    if hci < 1.2:
-        return "Quiet"
-    elif hci < 2.0:
-        return "Active"
-    elif hci < 2.8:
-        return "Storm"
+def classify_storm(HCI):
+    if HCI > 1.2e7:
+        return "G5 EXTREMA"
+    elif HCI > 7e6:
+        return "G4 SEVERA"
+    elif HCI > 4e6:
+        return "G3 FORTE"
+    elif HCI > 2e6:
+        return "G2 MODERADA"
+    elif HCI > 1e6:
+        return "G1 FRACA"
     else:
-        return "Severe (G4–G5)"
+        return "CALMO"
 
 
 # ============================================================
-# 4. EXECUÇÃO
+# 4. EXECUÇÃO PRINCIPAL
 # ============================================================
 
 if __name__ == "__main__":
 
     print("\n📡 Baixando dados DSCOVR...")
-    df = load_dscovr()
+    plasma = load_dscovr_plasma()
+    mag = load_dscovr_mag()
 
-    print("Último registro:", df.iloc[-1]["time"])
+    df = pd.merge(plasma, mag, on="time_tag", how="inner")
+    df = df.dropna()
 
-    hac = HACModel()
-    df = hac.run(df)
+    print(f"✅ Dados carregados: {len(df)} pontos")
+    print(f"🕒 Última medição: {df.time_tag.iloc[-1]}")
 
-    last = df.iloc[-1]
+    hac = HAC()
+    H, HCI = hac.run(df)
 
-    regime = classify_hac(last["HCI"])
+    current_HCI = HCI[-1]
+    level = classify_storm(current_HCI)
 
-    print("\n========== HAC FORECAST ==========")
-    print(f"Tempo: {last['time']}")
-    print(f"Velocidade: {last['speed']:.1f} km/s")
-    print(f"Bz: {last['bz']:.1f} nT")
-    print(f"Bt: {last['bt']:.1f} nT")
-    print(f"Densidade: {last['density']:.1f} cm⁻³")
-    print(f"HCI: {last['HCI']:.2f}")
-    print(f"⚠️ REGIME: {regime}")
-    print("=================================")
+    print("\n===============================")
+    print("🌎 HAC — ESTADO ATUAL")
+    print("===============================")
+    print(f"HCI atual : {current_HCI:,.2e}")
+    print(f"Nível     : {level}")
+    print(f"Bz atual  : {df.bz_gsm.iloc[-1]:.2f} nT")
+    print(f"Vento     : {df.speed.iloc[-1]:.1f} km/s")
+    print(f"Densidade : {df.density.iloc[-1]:.2f} cm⁻³")
 
-    # Plot
-    plt.figure(figsize=(12,6))
-    plt.plot(df["time"], df["HCI"], label="HCI")
-    plt.axhline(2.8, color="r", linestyle="--", label="Severe Threshold")
-    plt.axhline(2.0, color="orange", linestyle="--", label="Storm")
-    plt.legend()
-    plt.title("HAC – Estado Magnetosférico (Tempo Real)")
-    plt.xlabel("Time")
-    plt.ylabel("HCI")
-    plt.grid()
-    plt.tight_layout()
-    plt.show()
+    print("\n📌 Interpretação:")
+    if "G4" in level or "G5" in level:
+        print("⚠️ Condições severas — risco alto de tempestade geomagnética.")
+    elif "G3" in level:
+        print("⚠️ Tempestade significativa em curso.")
+    else:
+        print("🟢 Condições moderadas / estáveis.")
