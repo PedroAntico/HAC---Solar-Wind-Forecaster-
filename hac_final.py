@@ -15,30 +15,69 @@ warnings.filterwarnings('ignore')
 # 0. NORMALIZAÇÃO DE NOMES OMNI (CRÍTICO)
 # ============================
 def normalize_omni_columns(df):
-    """Normalização robusta de nomes OMNI"""
+    """Normalização robusta e tolerante para dados OMNI reais"""
+
+    # Padronização ampla (cobre OMNI, CDAWeb, JSONs e CSVs)
     column_map = {
-        'flow_speed': 'speed', 'V': 'speed', 'vx': 'speed', 'proton_speed': 'speed',
-        'velocity': 'speed', 'bz': 'bz_gsm', 'bz_gsm': 'bz_gsm', 'bz_gse': 'bz_gsm',
-        'Bz_GSM': 'bz_gsm', 'Bz_GSE': 'bz_gsm', 'IMF_Bz': 'bz_gsm', 'density': 'density',
-        'np': 'density', 'proton_density': 'density', 'Np': 'density', 'bx': 'bx_gsm',
-        'bx_gsm': 'bx_gsm', 'by': 'by_gsm', 'by_gsm': 'by_gsm', 'bt': 'bt', 'B': 'bt',
-        'B_total': 'bt', 'IMF_B': 'bt', 'time_tag': 'time_tag', 'Time': 'time_tag',
-        'timestamp': 'time_tag'
+        # Tempo
+        'time': 'time_tag',
+        'Time': 'time_tag',
+        'Epoch': 'time_tag',
+        'timestamp': 'time_tag',
+        'datetime': 'time_tag',
+
+        # Velocidade solar
+        'V': 'speed',
+        'Vsw': 'speed',
+        'speed': 'speed',
+        'flow_speed': 'speed',
+        'proton_speed': 'speed',
+
+        # Densidade
+        'N': 'density',
+        'Np': 'density',
+        'density': 'density',
+        'proton_density': 'density',
+
+        # Campo magnético
+        'Bz': 'bz_gsm',
+        'Bz_GSM': 'bz_gsm',
+        'bz_gsm': 'bz_gsm',
+        'bz_gse': 'bz_gsm',
+
+        'Bx': 'bx_gsm',
+        'By': 'by_gsm',
+        'Bt': 'bt',
+        'B_total': 'bt'
     }
-    
-    normalized_df = pd.DataFrame()
+
+    df = df.copy()
+    new_cols = {}
+
     for col in df.columns:
-        if col in column_map:
-            normalized_df[column_map[col]] = df[col]
+        key = col.strip()
+        if key in column_map:
+            new_cols[col] = column_map[key]
         else:
-            normalized_df[col] = df[col]
-    
-    required = ['speed', 'bz_gsm', 'density', 'time_tag']
-    missing = [c for c in required if c not in normalized_df.columns]
+            new_cols[col] = col
+
+    df.rename(columns=new_cols, inplace=True)
+
+    # 🔍 DEBUG AUTOMÁTICO
+    print("\n🔍 Colunas detectadas:")
+    print(list(df.columns))
+
+    # Verificação mínima obrigatória
+    required = ['time_tag', 'speed', 'density', 'bz_gsm']
+    missing = [c for c in required if c not in df.columns]
+
     if missing:
-        raise ValueError(f"❌ COLUNAS OBRIGATÓRIAS AUSENTES: {missing}")
-    
-    return normalized_df
+        raise ValueError(
+            f"❌ COLUNAS OBRIGATÓRIAS AUSENTES: {missing}\n"
+            f"➡️ Colunas disponíveis: {list(df.columns)}"
+        )
+
+    return df
 
 # ============================
 # CONFIGURAÇÃO FÍSICA CALIBRADA
