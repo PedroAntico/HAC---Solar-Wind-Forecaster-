@@ -154,23 +154,27 @@ class RobustOMNIProcessor:
                     limit_direction='both'
                 )
         
-        # Detectar tipo de arquivo automaticamente
-has_speed = 'speed' in df.columns
-has_density = 'density' in df.columns
-has_bz = 'bz_gsm' in df.columns
+        # ==============================
+        # DETECÇÃO AUTOMÁTICA DO TIPO
+        # ==============================
+        has_speed = 'speed' in df.columns
+        has_density = 'density' in df.columns
+        has_bz = 'bz_gsm' in df.columns
 
-if has_speed and has_density:
-    # Plasma file
-    required = ['speed', 'density']
-elif has_bz:
-    # Magnetômetro
-    required = ['bz_gsm']
-else:
-    required = []
+        if has_speed and has_density:
+            # Arquivo PLASMA
+            required = ['speed', 'density']
+        elif has_bz:
+            # Arquivo MAG
+            required = ['bz_gsm']
+        else:
+            raise ValueError(
+                f"❌ Arquivo inválido. Colunas encontradas: {list(df.columns)}"
+            )
 
-df_clean = df.dropna(subset=required).copy()
-        
-        print(f"   ✅ {len(df_clean)} pontos limpos")
+        df_clean = df.dropna(subset=required).copy()
+
+        print(f"   ✅ {len(df_clean)} pontos válidos")
         return df_clean
     
     @staticmethod
