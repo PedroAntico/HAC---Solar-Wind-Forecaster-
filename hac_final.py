@@ -218,27 +218,49 @@ class RobustOMNIProcessor:
         return df_clean
     
     @staticmethod
+class RobustOMNIProcessor:
+    """Processador robusto para dados OMNI reais"""
+
     @staticmethod
-def merge_datasets(mag_df, plasma_df):
-    print("🔗 Fazendo merge MAG + PLASMA...")
+    def load_and_clean(filepath, max_interpolation=3):
+        print(f"📥 Carregando {filepath}...")
 
-    df = pd.merge(
-        mag_df,
-        plasma_df,
-        on="time_tag",
-        how="outer"
-    ).sort_values("time_tag")
+        with open(filepath, 'r') as f:
+            data = json.load(f)
 
-    # 🔥 AGORA SIM NORMALIZA
-    df = normalize_omni_columns(df)
+        headers = data[0]
+        df = pd.DataFrame(data[1:], columns=headers)
 
-    # Preencher valores mínimos seguros
-    df['speed']   = df['speed'].fillna(400)
-    df['density'] = df['density'].fillna(5)
-    df['bz_gsm']  = df['bz_gsm'].fillna(0)
+        df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
+        df = df.sort_values('time_tag').reset_index(drop=True)
 
-    print("✅ Merge completo")
-    return df
+        for col in df.columns:
+            if col != 'time_tag':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        return df
+
+    @staticmethod
+    def merge_datasets(mag_df, plasma_df):
+        print("🔗 Fazendo merge MAG + PLASMA...")
+
+        df = pd.merge(
+            mag_df,
+            plasma_df,
+            on="time_tag",
+            how="outer"
+        ).sort_values("time_tag")
+
+        # NORMALIZAÇÃO SÓ AQUI
+        df = normalize_omni_columns(df)
+
+        # Valores seguros
+        df['speed']   = df['speed'].fillna(400)
+        df['density'] = df['density'].fillna(5)
+        df['bz_gsm']  = df['bz_gsm'].fillna(0)
+
+        print("✅ Merge completo")
+        return df
 
 # ============================
 # 2. CÁLCULO DE CAMPOS FÍSICOS (SEMPRE SEGURO)
