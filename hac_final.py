@@ -356,19 +356,37 @@ class ProductionHACModel:
         
         return normalized
     
-    def _compute_robust_derivative(self, hac_total, times):
-    """Derivada robusta HAC com suporte real a numpy.datetime64"""
+    
+    
+    def _compute_nowcast_growth(self, hac_total, coupling):
+        """Calcula crescimento pelo modelo Nowcast + Inércia"""
+        # HAC_nowcast é proporcional ao coupling_signal normalizado
+        hac_nowcast = (coupling / self.config.E_FIELD_SATURATION) * self.config.HAC_SCALE_MAX
+        growth = (1.0 / self.config.TAU_EFFECTIVE) * (hac_nowcast - hac_total)
+        return growth
+    
+    def _detect_escalation_triggers(self, hac_total, dHAC_dt, Bz, Vsw, times):
+        """Detecta triggers de escalação usando regra de decisão"""
+        print("   • Monitorando triggers de escalação...")
+        
+        n = len(hac_total)
+        escalation_flags = np.zeros(n, dtype=bodef _compute_robust_derivative(self, hac_total, times):
+    """
+    Derivada robusta HAC compatível com numpy.datetime64
+    (VERSÃO FINAL CORRIGIDA)
+    """
 
     print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
 
-    # Converter tempo para horas (forma segura)
+    # Converter tempo corretamente
     times_np = np.array(times, dtype='datetime64[s]')
+
+    # Δt em horas
     dt_hours = np.diff(times_np).astype('timedelta64[s]').astype(float) / 3600.0
-
-    # Proteção
-    dt_hours = np.where(dt_hours <= 0, 1.0, dt_hours)
     dt_hours = np.insert(dt_hours, 0, dt_hours[0])
+    dt_hours[dt_hours <= 0] = 1.0
 
+    # Derivada
     if len(hac_total) < 7:
         dHAC_dt = np.gradient(hac_total) / dt_hours
     else:
@@ -388,27 +406,13 @@ class ProductionHACModel:
             print(f"⚠️ Fallback derivada simples: {e}")
             dHAC_dt = np.gradient(hac_total) / dt_hours
 
-    # Segurança numérica
-    dHAC_dt = np.clip(dHAC_dt, -200, 200)
+    # Segurança
     dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
+    dHAC_dt = np.clip(dHAC_dt, -200, 200)
 
     print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
-    return dHAC_dt
-    
-    def _compute_nowcast_growth(self, hac_total, coupling):
-        """Calcula crescimento pelo modelo Nowcast + Inércia"""
-        # HAC_nowcast é proporcional ao coupling_signal normalizado
-        hac_nowcast = (coupling / self.config.E_FIELD_SATURATION) * self.config.HAC_SCALE_MAX
-        growth = (1.0 / self.config.TAU_EFFECTIVE) * (hac_nowcast - hac_total)
-        return growth
-    
-    def _detect_escalation_triggers(self, hac_total, dHAC_dt, Bz, Vsw, times):
-        """Detecta triggers de escalação usando regra de decisão"""
-        print("   • Monitorando triggers de escalação...")
-        
-        n = len(hac_total)
-        escalation_flags = np.zeros(n, dtype=bool)
+    return dHAC_dtol)
         
         # Parâmetros críticos
         theta = self.config.THETA_CRITICAL
