@@ -14,71 +14,55 @@ warnings.filterwarnings('ignore')
 # ============================
 # 0. NORMALIZAÇÃO DE NOMES OMNI (CRÍTICO)
 # ============================
-def normalize_omni_columns(df):
-    """Normalização robusta e tolerante para dados OMNI reais"""
+def normalize_omni_columns(df, allow_partial=False):
+    """Normalização robusta para OMNI (suporta MAG e PLASMA separados)"""
 
-    # Padronização ampla (cobre OMNI, CDAWeb, JSONs e CSVs)
     column_map = {
         # Tempo
         'time': 'time_tag',
         'Time': 'time_tag',
         'Epoch': 'time_tag',
         'timestamp': 'time_tag',
-        'datetime': 'time_tag',
 
-        # Velocidade solar
+        # Velocidade
         'V': 'speed',
         'Vsw': 'speed',
         'speed': 'speed',
-        'flow_speed': 'speed',
-        'proton_speed': 'speed',
 
         # Densidade
         'N': 'density',
         'Np': 'density',
         'density': 'density',
-        'proton_density': 'density',
 
         # Campo magnético
         'Bz': 'bz_gsm',
         'Bz_GSM': 'bz_gsm',
         'bz_gsm': 'bz_gsm',
-        'bz_gse': 'bz_gsm',
-
         'Bx': 'bx_gsm',
         'By': 'by_gsm',
-        'Bt': 'bt',
-        'B_total': 'bt'
+        'Bt': 'bt'
     }
 
     df = df.copy()
-    new_cols = {}
 
     for col in df.columns:
-        key = col.strip()
-        if key in column_map:
-            new_cols[col] = column_map[key]
-        else:
-            new_cols[col] = col
+        if col in column_map:
+            df.rename(columns={col: column_map[col]}, inplace=True)
 
-    df.rename(columns=new_cols, inplace=True)
+    print("\n🔍 Colunas detectadas:", list(df.columns))
 
-    # 🔍 DEBUG AUTOMÁTICO
-    print("\n🔍 Colunas detectadas:")
-    print(list(df.columns))
+    # 🔴 Só valida tudo se NÃO for parcial
+    if not allow_partial:
+        required = ['time_tag', 'speed', 'density', 'bz_gsm']
+        missing = [c for c in required if c not in df.columns]
 
-    # Verificação mínima obrigatória
-    required = ['time_tag', 'speed', 'density', 'bz_gsm']
-    missing = [c for c in required if c not in df.columns]
-
-    if missing:
-        raise ValueError(
-            f"❌ COLUNAS OBRIGATÓRIAS AUSENTES: {missing}\n"
-            f"➡️ Colunas disponíveis: {list(df.columns)}"
-        )
+        if missing:
+            raise ValueError(
+                f"❌ COLUNAS OBRIGATÓRIAS AUSENTES: {missing}\n"
+                f"➡️ Colunas disponíveis: {list(df.columns)}"
+            )
 
     return df
-
 # ============================
 # CONFIGURAÇÃO FÍSICA CALIBRADA
 # ============================
@@ -143,7 +127,7 @@ class RobustOMNIProcessor:
         
         headers = data[0]
         df = pd.DataFrame(data[1:], columns=headers)
-        df = normalize_omni_columns(df)
+        df = normalize_omni_columns(df, allow_partial=True)
         df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
         df = df.sort_values('time_tag').reset_index(drop=True)
         
