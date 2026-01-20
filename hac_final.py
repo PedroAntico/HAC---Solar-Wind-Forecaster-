@@ -371,20 +371,20 @@ class ProductionHACModel:
         
         n = len(hac_total)
         escalation_flags = np.zeros(n, dtype=bodef _compute_robust_derivative(self, hac_total, times):
+                                    
+    def _compute_robust_derivative(self, hac_total, times):
     """
-    Derivada robusta HAC compatível com numpy.datetime64
-    (VERSÃO FINAL CORRIGIDA)
+    Derivada robusta HAC (100% compatível com numpy.datetime64)
     """
 
     print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
 
-    # Converter tempo corretamente
-    times_np = np.array(times, dtype='datetime64[s]')
-
-    # Δt em horas
-    dt_hours = np.diff(times_np).astype('timedelta64[s]').astype(float) / 3600.0
-    dt_hours = np.insert(dt_hours, 0, dt_hours[0])
-    dt_hours[dt_hours <= 0] = 1.0
+    # Converter tempo para segundos
+    times = np.array(times, dtype="datetime64[s]")
+    dt = np.diff(times).astype("timedelta64[s]").astype(float)
+    dt = np.insert(dt, 0, dt[0])
+    dt[dt <= 0] = 1.0
+    dt_hours = dt / 3600.0
 
     # Derivada
     if len(hac_total) < 7:
@@ -406,13 +406,12 @@ class ProductionHACModel:
             print(f"⚠️ Fallback derivada simples: {e}")
             dHAC_dt = np.gradient(hac_total) / dt_hours
 
-    # Segurança
     dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
     dHAC_dt = np.clip(dHAC_dt, -200, 200)
 
     print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
-    return dHAC_dtol)
+    return dHAC_dt
         
         # Parâmetros críticos
         theta = self.config.THETA_CRITICAL
