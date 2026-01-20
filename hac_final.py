@@ -136,90 +136,6 @@ class HACPhysicsConfig:
 # ============================
 class RobustOMNIProcessor:
     """Processador robusto para dados OMNI reais"""
-    
-    @staticmethod
-    def load_and_clean(filepath, max_interpolation=3):
-        """
-        Carrega, normaliza e limpa dados OMNI
-        """
-        print(f"📥 Carregando {filepath}...")
-        
-        try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            print(f"❌ Arquivo não encontrado: {filepath}")
-            return None
-        except json.JSONDecodeError as e:
-            print(f"❌ Erro JSON: {e}")
-            return None
-        
-        # Criar DataFrame
-        headers = data[0]
-        df = pd.DataFrame(data[1:], columns=headers)
-        
-        # NORMALIZAÇÃO CRÍTICA DE NOMES (antes de qualquer coisa)
-        df = pd.DataFrame(data[1:], columns=headers)
-        df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
-        
-        # Converter timestamp
-        df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
-        df = df.sort_values('time_tag').reset_index(drop=True)
-        
-        # Converter para numérico
-        numeric_cols = [col for col in df.columns if col != 'time_tag']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # LIMPEZA EM 4 ETAPAS
-        df = RobustOMNIProcessor._clean_dataframe(df, max_interpolation)
-        
-        print(f"   ✅ {len(df)} pontos limpos")
-        return df
-    
-    @staticmethod
-    def _clean_dataframe(df, max_interpolation):
-        """Pipeline completo de limpeza"""
-        # 1. REMOVER INF/NAN EXPLÍCITOS
-        df = df.replace([np.inf, -np.inf], np.nan)
-        
-        # 2. APLICAR LIMITES FÍSICOS
-        config = HACPhysicsConfig()
-        if 'speed' in df.columns:
-            df['speed'] = df['speed'].clip(lower=config.VSW_MIN, upper=config.VSW_MAX)
-        if 'density' in df.columns:
-            df['density'] = df['density'].clip(lower=config.DENSITY_MIN, upper=config.DENSITY_MAX)
-        if 'bz_gsm' in df.columns:
-            df['bz_gsm'] = df['bz_gsm'].clip(lower=config.BZ_MIN, upper=config.BZ_MAX)
-        
-        # 3. INTERPOLAÇÃO INTELIGENTE
-        cols_to_interpolate = ['bz_gsm', 'speed', 'density']
-        for col in cols_to_interpolate:
-            if col in df.columns:
-                # Interpolar gaps pequenos
-                df[col] = df[col].interpolate(
-                    method='linear', 
-                    limit=max_interpolation,
-                    limit_direction='both'
-                )
-        
-        # 4. REMOÇÃO FINAL DE NaN
-        critical_cols = ['speed', 'bz_gsm', 'density']
-        df_clean = df.dropna(subset=critical_cols).copy()
-        
-        # Estatísticas
-        original_len = len(df)
-        clean_len = len(df_clean)
-        retention = clean_len / original_len * 100 if original_len > 0 else 0
-        
-        if retention < 80:
-            print(f"⚠️  Retenção baixa: {retention:.1f}% ({clean_len}/{original_len})")
-        
-        return df_clean
-    
-    @staticmethod
-class RobustOMNIProcessor:
-    """Processador robusto para dados OMNI reais"""
 
     @staticmethod
     def load_and_clean(filepath, max_interpolation=3):
@@ -251,13 +167,13 @@ class RobustOMNIProcessor:
             how="outer"
         ).sort_values("time_tag")
 
-        # NORMALIZAÇÃO SÓ AQUI
+        # Normalização FINAL
         df = normalize_omni_columns(df)
 
         # Valores seguros
-        df['speed']   = df['speed'].fillna(400)
+        df['speed'] = df['speed'].fillna(400)
         df['density'] = df['density'].fillna(5)
-        df['bz_gsm']  = df['bz_gsm'].fillna(0)
+        df['bz_gsm'] = df['bz_gsm'].fillna(0)
 
         print("✅ Merge completo")
         return df
