@@ -159,7 +159,8 @@ class RobustOMNIProcessor:
         df = pd.DataFrame(data[1:], columns=headers)
         
         # NORMALIZAÇÃO CRÍTICA DE NOMES (antes de qualquer coisa)
-        df = normalize_omni_columns(df)
+        df = pd.DataFrame(data[1:], columns=headers)
+        df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
         
         # Converter timestamp
         df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
