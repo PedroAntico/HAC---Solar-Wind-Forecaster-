@@ -136,74 +136,32 @@ def prepare_data(mag_df, plasma_df):
     return df
 
 def calculate_hac(df):
-    """
-    Calcula o índice HAC conforme definido no artigo.
-    HAC(t) = ∫ [(n·V²)^β · B² · Θ(-Bz)] dt
-    """
-    print("\n⚡ Calculando HAC...")
-    
-    # Extrair dados com tipo float64 para precisão
-    Bz = df['mag_bz_gsm'].values.astype(np.float64) * 1e-9  # nT → T
-    V = df['plasma_speed'].values.astype(np.float64) * 1e3  # km/s → m/s
-    n = df['plasma_density'].values.astype(np.float64) * 1e6  # cm⁻³ → m⁻³
-    
-    # Calcular magnitude total do campo B (B² conforme artigo)
-    if 'mag_bt' in df.columns:
-        # Usar bt se disponível
-        B = df['mag_bt'].values.astype(np.float64) * 1e-9
-    else:
-        # Calcular a partir dos componentes
-        Bx = df.get('mag_bx_gsm', pd.Series(0)).values.astype(np.float64) * 1e-9
-        By = df.get('mag_by_gsm', pd.Series(0)).values.astype(np.float64) * 1e-9
-        B = np.sqrt(Bx**2 + By**2 + Bz**2)
-    
-    # Condição de IMF sul (Bz < 0)
-    southward = np.where(Bz < 0, 1.0, 0.0)
-    
-    # Termo de pressão dinâmica: n·V²
-    dynamic_pressure = n * V**2
-    
-    # Adicionar epsilon para evitar problemas numéricos
-    eps = 1e-10
-    
-    # Termo de acoplamento: (n·V²)^β · B²
-    coupling = (np.abs(dynamic_pressure + eps)**BETA) * (B**2 + eps)
-    
-    # Aplicar condição de IMF sul
-    integrand = coupling * southward
-    
-    # Calcular delta_t real entre medições
-    times = pd.to_datetime(df['time_tag']).values
-    delta_t = np.zeros(len(times))
-    
-    if len(times) > 1:
-        # Converter diferenças de tempo para segundos
-        time_diffs = np.diff(times)
-        delta_t[1:] = time_diffs.astype('timedelta64[s]').astype(np.float64)
-        delta_t[0] = delta_t[1] if len(delta_t) > 1 else DT
-    else:
-        delta_t[:] = DT
-    
-    # Garantir que não há intervalos negativos ou zero
-    delta_t = np.maximum(delta_t, 1.0)
-    
-    # Calcular integral cumulativa
-    hac_raw = np.cumsum(integrand * delta_t)
-    
-    # Normalizar
-    hac_normalized = hac_raw * NORMALIZATION
-    
-    # Adicionar ao DataFrame
-    df['HAC'] = hac_normalized
-    df['HAC_raw'] = hac_raw
-    
-    # Calcular derivada (taxa de mudança)
-    df['HAC_rate'] = np.gradient(hac_normalized, delta_t)
-    
-    print(f"   HAC mínimo: {df['HAC'].min():.2f}")
-    print(f"   HAC máximo: {df['HAC'].max():.2f}")
-    print(f"   HAC final: {df['HAC'].iloc[-1]:.2f}")
-    
+
+    Bz = df['mag_bz_gsm'].values * 1e-9
+    V  = df['plasma_speed'].values * 1e3
+    n  = df['plasma_density'].values * 1e6
+
+    Bx = df.get('mag_bx_gsm', 0).values * 1e-9
+    By = df.get('mag_by_gsm', 0).values * 1e-9
+    B  = np.sqrt(Bx**2 + By**2 + Bz**2)
+
+    south = (Bz < 0).astype(float)
+
+    coupling = (n * V**2)**BETA * B**2
+
+    dt = np.diff(df['time_tag']).astype('timedelta64[s]').astype(float)
+    dt = np.insert(dt, 0, 60)
+
+    hac_raw = np.cumsum(coupling * south * dt)
+
+    # 🔥 ESCALA CORRETA
+    GAIN = 5e13
+    hac = hac_raw * GAIN
+
+    # Saturação física
+    hac = np.clip(hac, 0, 300)
+
+    df["HAC"] = hac
     return df
 
 def classify_storm_level(hac_value):
