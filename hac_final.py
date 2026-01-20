@@ -372,9 +372,7 @@ class ProductionHACModel:
         n = len(hac_total)
 
     def _compute_robust_derivative(self, hac_total, times):
-    """
-    Derivada robusta HAC (compatível com numpy.datetime64)
-    """
+    """Derivada robusta HAC (compatível com numpy.datetime64)"""
 
     print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
 
