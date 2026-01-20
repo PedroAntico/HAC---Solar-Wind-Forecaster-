@@ -370,11 +370,45 @@ class ProductionHACModel:
         print("   • Monitorando triggers de escalação...")
         
         n = len(hac_total)
-        escalation_flags = np.zeros(n, dtype=bodef _compute_robust_derivative(self, hac_total, times):                              
+
     def _compute_robust_derivative(self, hac_total, times):
     """
-    Derivada robusta HAC (100% compatível com numpy.datetime64)
+    Derivada robusta HAC (compatível com numpy.datetime64)
     """
+
+    print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
+
+    times = np.array(times, dtype="datetime64[s]")
+    dt = np.diff(times).astype("timedelta64[s]").astype(float)
+    dt = np.insert(dt, 0, dt[0])
+    dt[dt <= 0] = 1.0
+    dt_hours = dt / 3600.0
+
+    if len(hac_total) < 7:
+        dHAC_dt = np.gradient(hac_total) / dt_hours
+    else:
+        try:
+            window = min(7, len(hac_total))
+            if window % 2 == 0:
+                window -= 1
+
+            dHAC_dt = savgol_filter(
+                hac_total,
+                window_length=window,
+                polyorder=2,
+                deriv=1
+            ) / np.median(dt_hours)
+
+        except Exception as e:
+            print(f"⚠️ Fallback derivada simples: {e}")
+            dHAC_dt = np.gradient(hac_total) / dt_hours
+
+    dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
+    dHAC_dt = np.clip(dHAC_dt, -200, 200)
+
+    print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
+
+    return dHAC_dt
 
     print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
 
