@@ -370,8 +370,7 @@ class ProductionHACModel:
         print("   • Monitorando triggers de escalação...")
         
         n = len(hac_total)
-        escalation_flags = np.zeros(n, dtype=bodef _compute_robust_derivative(self, hac_total, times):
-                                    
+        escalation_flags = np.zeros(n, dtype=bodef _compute_robust_derivative(self, hac_total, times):                              
     def _compute_robust_derivative(self, hac_total, times):
     """
     Derivada robusta HAC (100% compatível com numpy.datetime64)
