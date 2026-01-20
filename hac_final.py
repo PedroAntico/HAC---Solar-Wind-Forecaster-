@@ -218,28 +218,27 @@ class RobustOMNIProcessor:
         return df_clean
     
     @staticmethod
-    def merge_datasets(mag_df, plasma_df):
-        """Fusão robusta de datasets"""
-        if mag_df is None or plasma_df is None:
-            return None
-        
-        # Fusão por tempo
-        df = pd.merge(mag_df, plasma_df, on='time_tag', how='outer')
-        df = df.sort_values('time_tag').reset_index(drop=True)
-        
-        # Garantir colunas críticas
-        critical_cols = ['speed', 'bz_gsm', 'density']
-        for col in critical_cols:
-            if col in df.columns:
-                # Preencher NaN com valores seguros
-                if col == 'speed':
-                    df[col] = df[col].fillna(400)  # km/s default
-                elif col == 'bz_gsm':
-                    df[col] = df[col].fillna(0)    # nT default
-                elif col == 'density':
-                    df[col] = df[col].fillna(5)    # cm⁻³ default
-        
-        return df
+    @staticmethod
+def merge_datasets(mag_df, plasma_df):
+    print("🔗 Fazendo merge MAG + PLASMA...")
+
+    df = pd.merge(
+        mag_df,
+        plasma_df,
+        on="time_tag",
+        how="outer"
+    ).sort_values("time_tag")
+
+    # 🔥 AGORA SIM NORMALIZA
+    df = normalize_omni_columns(df)
+
+    # Preencher valores mínimos seguros
+    df['speed']   = df['speed'].fillna(400)
+    df['density'] = df['density'].fillna(5)
+    df['bz_gsm']  = df['bz_gsm'].fillna(0)
+
+    print("✅ Merge completo")
+    return df
 
 # ============================
 # 2. CÁLCULO DE CAMPOS FÍSICOS (SEMPRE SEGURO)
