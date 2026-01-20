@@ -357,51 +357,44 @@ class ProductionHACModel:
         return normalized
     
     def _compute_robust_derivative(self, hac_total, times):
-        """Calcula dHAC/dt usando Savitzky-Golay filter (suavizado)"""
-        print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
-        
-        if len(hac_total) < 7:
-            # Se dados insuficientes, usar diferença simples
-            dt_hours = np.diff([t.timestamp() for t in times]) / 3600.0
-            dt_hours = np.concatenate([[dt_hours[0]], dt_hours])
+    """Derivada robusta HAC com suporte real a numpy.datetime64"""
+
+    print("   • Calculando dHAC/dt (Nowcast + Inércia)...")
+
+    # Converter tempo para horas (forma segura)
+    times_np = np.array(times, dtype='datetime64[s]')
+    dt_hours = np.diff(times_np).astype('timedelta64[s]').astype(float) / 3600.0
+
+    # Proteção
+    dt_hours = np.where(dt_hours <= 0, 1.0, dt_hours)
+    dt_hours = np.insert(dt_hours, 0, dt_hours[0])
+
+    if len(hac_total) < 7:
+        dHAC_dt = np.gradient(hac_total) / dt_hours
+    else:
+        try:
+            window = min(7, len(hac_total))
+            if window % 2 == 0:
+                window -= 1
+
+            dHAC_dt = savgol_filter(
+                hac_total,
+                window_length=window,
+                polyorder=2,
+                deriv=1
+            ) / np.median(dt_hours)
+
+        except Exception as e:
+            print(f"⚠️ Fallback derivada simples: {e}")
             dHAC_dt = np.gradient(hac_total) / dt_hours
-        else:
-            try:
-                # Usar Savitzky-Golay para derivada suavizada
-                window_length = min(7, len(hac_total))
-                if window_length % 2 == 0:  # Garantir ímpar
-                    window_length -= 1
-                if window_length < 3:
-                    window_length = 3
-                
-                # Converter tempos para horas desde o início
-                times_h = np.array([(t - times[0]).total_seconds() / 3600.0 for t in times])
-                dt_median = np.median(np.diff(times_h))
-                
-                # Calcular derivada suavizada
-                dHAC_dt_smoothed = savgol_filter(
-                    hac_total, 
-                    window_length=window_length, 
-                    polyorder=2, 
-                    deriv=1
-                ) / dt_median
-                
-                dHAC_dt = dHAC_dt_smoothed
-                
-                print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
-                
-            except Exception as e:
-                print(f"⚠️  Erro no filtro Savitzky-Golay: {e}")
-                # Fallback para np.gradient
-                dt_hours = np.diff(times_h)
-                dt_hours = np.concatenate([[dt_hours[0]], dt_hours])
-                dHAC_dt = np.gradient(hac_total) / dt_hours
-        
-        # Proteção contra valores extremos
-        dHAC_dt = np.clip(dHAC_dt, -200, 200)
-        dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
-        
-        return dHAC_dt
+
+    # Segurança numérica
+    dHAC_dt = np.clip(dHAC_dt, -200, 200)
+    dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
+
+    print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
+
+    return dHAC_dt
     
     def _compute_nowcast_growth(self, hac_total, coupling):
         """Calcula crescimento pelo modelo Nowcast + Inércia"""
