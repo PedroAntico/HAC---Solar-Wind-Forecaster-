@@ -1,6 +1,6 @@
 """
 HAC++ Model: Heliospheric Accumulated Coupling - PRODUÇÃO FINAL
-COM NOWCAST + INÉRCIA (Previsão de Escalação)
+COM NOWCAST + INÉRCIA (Previsão de Escalação Híbrida)
 """
 import json
 import numpy as np
@@ -103,6 +103,17 @@ class HACPhysicsConfig:
     HG3_THRESHOLD = 150.0      # Limiar G3
     VSW_CRITICAL = 700.0       # km/s
     BZ_CRITICAL = -8.0         # nT
+    
+    # PARÂMETROS CLASSIFICAÇÃO HÍBRIDA
+    DHDT_G5_THRESHOLD = 200.0   # nT/h para G5
+    DHDT_G4_THRESHOLD = 150.0   # nT/h para G4
+    DHDT_G3_THRESHOLD = 100.0   # nT/h para G3
+    BZ_G5_THRESHOLD = -15.0     # nT para G5
+    BZ_G4_THRESHOLD = -10.0     # nT para G4
+    BZ_G3_THRESHOLD = -8.0      # nT para G3
+    V_G5_THRESHOLD = 700.0      # km/s para G5
+    V_G4_THRESHOLD = 650.0      # km/s para G4
+    V_G3_THRESHOLD = 600.0      # km/s para G3
 
 # ============================
 # 1. CARREGAMENTO ROBUSTO DE DADOS OMNI
@@ -256,6 +267,7 @@ class ProductionHACModel:
         self.results = {}
         self.nowcast_alerts = []
         self.escalation_triggers = []
+        self.classification_logs = []
     
     def compute_hac_system(self, df):
         """Sistema HAC+ completo com tratamento numérico robusto"""
@@ -305,6 +317,9 @@ class ProductionHACModel:
             hac_total, dHAC_dt, Bz, Vsw, times
         )
         
+        # Calcular crescimento Nowcast + Inércia
+        nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
+        
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
@@ -316,7 +331,7 @@ class ProductionHACModel:
             'coupling_signal': coupling,
             'dHAC_dt': dHAC_dt,
             'escalation_alert': escalation_flags,
-            'nowcast_inertia_growth': self._compute_nowcast_growth(hac_total, coupling)
+            'nowcast_inertia_growth': nowcast_growth
         })
         
         self._validate_output(hac_total)
@@ -460,9 +475,146 @@ class ProductionHACModel:
         
         return escalation_flags
     
+    def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
+        """Classificação híbrida: combina HAC estático com dinâmica Nowcast"""
+        
+        # CLASSIFICAÇÃO BASE (tradicional - baseada apenas no HAC)
+        if hac < 50:
+            base_level = "Quiet"
+            base_severity = 0
+        elif hac < 100:
+            base_level = "G1"
+            base_severity = 1
+        elif hac < 150:
+            base_level = "G2"
+            base_severity = 2
+        elif hac < 200:
+            base_level = "G3"
+            base_severity = 3
+        elif hac < 250:
+            base_level = "G4"
+            base_severity = 4
+        else:
+            base_level = "G5"
+            base_severity = 5
+        
+        # PESAGEM DINÂMICA: Calcula score Nowcast
+        nowcast_score = 0
+        
+        # Componente taxa de crescimento (peso maior)
+        if dhdt > 50: nowcast_score += 1
+        if dhdt > 100: nowcast_score += 1
+        if dhdt > 150: nowcast_score += 2
+        if dhdt > 200: nowcast_score += 3
+        
+        # Componente Bz
+        if bz < -5: nowcast_score += 1
+        if bz < -10: nowcast_score += 2
+        if bz < -15: nowcast_score += 3
+        if bz < -20: nowcast_score += 4
+        
+        # Componente velocidade
+        if v > 500: nowcast_score += 1
+        if v > 600: nowcast_score += 1
+        if v > 700: nowcast_score += 2
+        if v > 800: nowcast_score += 3
+        
+        # Componente HAC (energia acumulada)
+        if hac > 50: nowcast_score += 1
+        if hac > 100: nowcast_score += 1
+        if hac > 150: nowcast_score += 2
+        if hac > 200: nowcast_score += 2
+        
+        # DECISÃO FINAL HÍBRIDA
+        final_level = base_level
+        final_severity = base_severity
+        
+        # Escalação baseada no score Nowcast
+        if nowcast_score >= 10:
+            # Condições extremas - forçar G5
+            if base_severity < 5:
+                final_level = "G5 (Nowcast Override)"
+                final_severity = 5
+        elif nowcast_score >= 8:
+            # Condições muito fortes - forçar G4
+            if base_severity < 4:
+                final_level = "G4 (Nowcast Override)"
+                final_severity = 4
+        elif nowcast_score >= 6:
+            # Condições fortes - forçar G3
+            if base_severity < 3:
+                final_level = "G3 (Nowcast Override)"
+                final_severity = 3
+        elif nowcast_score >= 4:
+            # Condições moderadas - forçar G2
+            if base_severity < 2:
+                final_level = "G2 (Nowcast Enhancement)"
+                final_severity = 2
+        
+        # REGRAS ESPECIAIS PARA CONDIÇÕES EXTREMAS
+        # Mesmo com HAC baixo, se crescimento for extremo e condições favoráveis
+        if dhdt > 200 and bz < -15 and v > 700:
+            if base_severity < 5:
+                final_level = "G5 (Extreme Nowcast)"
+                final_severity = 5
+        elif dhdt > 150 and bz < -10 and v > 650:
+            if base_severity < 4:
+                final_level = "G4 (Strong Nowcast)"
+                final_severity = 4
+        elif dhdt > 100 and bz < -8 and v > 600 and hac > 50:
+            if base_severity < 3:
+                final_level = "G3 (Nowcast Trigger)"
+                final_severity = 3
+        
+        # Log de decisão
+        decision_info = {
+            'hac': hac,
+            'dhdt': dhdt,
+            'bz': bz,
+            'v': v,
+            'base_level': base_level,
+            'nowcast_score': nowcast_score,
+            'final_level': final_level,
+            'escalation': final_severity > base_severity,
+            'severity': final_severity
+        }
+        
+        return final_level, decision_info
+    
+    def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
+        """Aplica boost adicional baseado em tendência de crescimento"""
+        enhanced_levels = storm_levels.copy()
+        n = len(storm_levels)
+        
+        # Janela de análise de tendência (1 hora)
+        window = 60  # 60 pontos se dados são minuto a minuto
+        
+        for i in range(window, n):
+            # Calcular tendência recente
+            recent_hac = hac_values[i-window:i]
+            recent_dhdt = dHAC_dt[i-window:i]
+            
+            # Critérios para boost
+            mean_dhdt = np.mean(recent_dhdt)
+            max_dhdt = np.max(recent_dhdt)
+            hac_increase = hac_values[i] - hac_values[i-window]
+            
+            # Boost para G5 se crescimento extremo
+            if max_dhdt > 200 and mean_dhdt > 50 and hac_increase > 100:
+                current = storm_levels[i]
+                if "G5" not in current:
+                    enhanced_levels[i] = "G5 (Trend Boost)"
+            
+            # Boost para G4 se crescimento forte
+            elif max_dhdt > 150 and mean_dhdt > 30 and hac_increase > 50:
+                current = storm_levels[i]
+                if "G4" not in current and "G5" not in current:
+                    enhanced_levels[i] = "G4 (Trend Boost)"
+        
+        return enhanced_levels
+    
     def _validate_output(self, hac_values):
         """Validação rigorosa dos resultados"""
-        # Verificar NaN
         nan_count = np.sum(np.isnan(hac_values))
         if nan_count > 0:
             print(f"❌ ERRO CRÍTICO: {nan_count} NaN em HAC")
@@ -475,57 +627,114 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-        """Predição robusta de indicadores de tempestade"""
-        print("\n🌍 Predizendo indicadores...")
+        """Predição robusta de indicadores de tempestade COM CLASSIFICAÇÃO HÍBRIDA"""
+        print("\n🌍 Predizendo indicadores (com Nowcast)...")
         
+        # 1. Kp COM SATURAÇÃO
         kp_pred = self.config.KP_SCALE * np.tanh(
             hac_values / self.config.HAC_SCALE_MAX * 2
         )
         
+        # 2. Dst EQUIVALENTE
         dst_pred = -self.config.RING_CURRENT_MAX * (
             hac_values / self.config.HAC_SCALE_MAX
         ) ** 1.3
         
+        # 3. CLASSIFICAÇÃO HÍBRIDA NOAA + NOWCAST
         storm_levels = []
-        for h in hac_values:
-            if h < 50:
-                level = "Quiet"
-            elif h < 100:
-                level = "G1"
-            elif h < 150:
-                level = "G2"
-            elif h < 200:
-                level = "G3"
-            elif h < 250:
-                level = "G4"
-            else:
-                level = "G5"
-            storm_levels.append(level)
+        decision_logs = []
         
+        # Obter arrays necessários
+        dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
+        Bz = self.results.get('Bz', np.zeros_like(hac_values))
+        Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
+        
+        escalation_count = 0
+        g4g5_nowcast_count = 0
+        
+        for i in range(len(hac_values)):
+            # Classificação híbrida
+            level, decision_info = self._classify_storm_with_nowcast(
+                hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
+            )
+            
+            storm_levels.append(level)
+            decision_logs.append(decision_info)
+            
+            if decision_info['escalation']:
+                escalation_count += 1
+            
+            if "G4" in level or "G5" in level:
+                g4g5_nowcast_count += 1
+        
+        # 4. ANÁLISE DE TENDÊNCIA (look-ahead de 3 horas)
+        # Se crescimento acelerado, aplicar boost adicional
+        enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
+        
+        # 5. ARMAZENAR
         self.results.update({
             'Kp_pred': kp_pred,
             'Dst_pred': dst_pred,
-            'Storm_level': storm_levels
+            'Storm_level': enhanced_levels,  # Usa níveis com boost de tendência
+            'Storm_level_base': storm_levels,  # Mantém versão base
+            'Decision_logs': decision_logs
         })
         
-        g4g5_count = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+        self.classification_logs = decision_logs
+        
+        # 6. ESTATÍSTICAS DETALHADAS
+        g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
+        g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+        g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+        
         print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
         print(f"   • Dst mínimo: {np.min(dst_pred):.1f} nT")
-        print(f"   • Eventos G4/G5: {g4g5_count}")
+        print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
+        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
+        print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
+        print(f"   • Escalações Nowcast: {escalation_count}")
         
-        return kp_pred, dst_pred, storm_levels
+        # Detectar picos de crescimento extremo
+        extreme_growth = np.where(dHAC_dt > 100)[0]
+        if len(extreme_growth) > 0:
+            print(f"   ⚠️  {len(extreme_growth)} pontos com dH/dt > 100 nT/h")
+            for idx in extreme_growth[-3:]:  # Últimos 3 picos
+                print(f"     → {self.results['time'][idx]}: "
+                      f"dH/dt={dHAC_dt[idx]:.0f} nT/h, "
+                      f"Bz={Bz[idx]:.1f} nT")
+        
+        return kp_pred, dst_pred, enhanced_levels
     
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
         if not self.nowcast_alerts:
-            return "Nenhum alerta de escalação detectado."
+            nowcast_summary = "Nenhum alerta de escalação detectado."
+        else:
+            nowcast_summary = f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
+            nowcast_summary += f"Triggers principais: {len(self.escalation_triggers)}\n\n"
+        
+        # Análise de classificação Nowcast
+        if self.classification_logs:
+            nowcast_escalations = sum(1 for log in self.classification_logs if log['escalation'])
+            nowcast_g4g5 = sum(1 for log in self.classification_logs if log['severity'] >= 4)
+            
+            nowcast_summary += f"CLASSIFICAÇÃO NOWCAST:\n"
+            nowcast_summary += f"• Escalações Nowcast: {nowcast_escalations}\n"
+            nowcast_summary += f"• Eventos G4/G5 Nowcast: {nowcast_g4g5}\n"
+            
+            # Últimas escalações
+            recent_escalations = [log for log in self.classification_logs[-10:] if log['escalation']]
+            if recent_escalations:
+                nowcast_summary += "\nÚLTIMAS ESCALAÇÕES:\n"
+                for log in recent_escalations[-3:]:
+                    nowcast_summary += (f"• HAC={log['hac']:.1f}, dH/dt={log['dhdt']:.1f} nT/h, "
+                                      f"Bz={log['bz']:.1f} nT: {log['base_level']} → {log['final_level']}\n")
         
         report = "="*70 + "\n"
         report += "🚨 RELATÓRIO NOWCAST + INÉRCIA (Escalação de Tempestades)\n"
         report += "="*70 + "\n\n"
         
-        report += f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
-        report += f"Triggers principais: {len(self.escalation_triggers)}\n\n"
+        report += nowcast_summary + "\n"
         
         report += "PARÂMETROS CRÍTICOS:\n"
         report += f"  • τ_eff (tempo de resposta): {self.config.TAU_EFFECTIVE} horas\n"
@@ -553,6 +762,36 @@ class ProductionHACModel:
         report += "="*70
         
         return report
+    
+    def get_current_assessment(self):
+        """Retorna avaliação detalhada do momento atual"""
+        if not self.results or 'Storm_level' not in self.results:
+            return None
+        
+        idx = -1  # Último ponto
+        assessment = {
+            'time': self.results['time'][idx],
+            'HAC': float(self.results['HAC_total'][idx]),
+            'dHAC_dt': float(self.results['dHAC_dt'][idx]),
+            'Bz': float(self.results['Bz'][idx]),
+            'Vsw': float(self.results['Vsw'][idx]),
+            'classification': self.results['Storm_level'][idx],
+            'base_classification': self.results['Storm_level_base'][idx] if 'Storm_level_base' in self.results else self.results['Storm_level'][idx],
+            'coupling': float(self.results['coupling_signal'][idx]),
+            'Kp_pred': float(self.results['Kp_pred'][idx]),
+            'Dst_pred': float(self.results['Dst_pred'][idx]),
+            'escalation_risk': 'HIGH' if self.results['escalation_alert'][idx] else 'LOW'
+        }
+        
+        # Adicionar explicação
+        if "Nowcast" in assessment['classification'] or "Boost" in assessment['classification']:
+            assessment['explanation'] = "Classificação elevada devido à dinâmica rápida de crescimento"
+        elif assessment['escalation_risk'] == 'HIGH':
+            assessment['explanation'] = "Condições favoráveis para escalação iminente"
+        else:
+            assessment['explanation'] = "Classificação baseada no estado atual do reservatório"
+        
+        return assessment
 
 # ============================
 # 4. VISUALIZAÇÃO COM NOWCAST + INÉRCIA
@@ -570,17 +809,43 @@ class ProductionVisualizer:
             return None
         
         plt.style.use('default')
-        fig, axes = plt.subplots(4, 2, figsize=(15, 12))
-        fig.suptitle('HAC+ Model - Sistema Completo de Previsão (Nowcast + Inércia)', 
-                    fontsize=14, fontweight='bold')
+        fig, axes = plt.subplots(4, 2, figsize=(16, 14))
+        fig.suptitle('HAC++ Model - Sistema Completo de Previsão (Nowcast + Inércia Híbrido)', 
+                    fontsize=16, fontweight='bold')
         
         times = results['time']
         
-        # ===== PAINEL 1: HAC TOTAL =====
+        # ===== PAINEL 1: HAC TOTAL COM CLASSIFICAÇÃO =====
         ax1 = axes[0, 0]
         if 'HAC_total' in results:
-            ax1.plot(times, results['HAC_total'], 
-                    color='#d62728', linewidth=2, label='HAC Total', zorder=3)
+            # Plotar HAC com cores baseadas na classificação
+            hac = results['HAC_total']
+            
+            # Definir cores baseadas na classificação final
+            colors = []
+            if 'Storm_level' in results:
+                for level in results['Storm_level']:
+                    if "G5" in level:
+                        colors.append('#8B0000')  # Vermelho escuro
+                    elif "G4" in level:
+                        colors.append('#FF4500')  # Laranja vermelho
+                    elif "G3" in level:
+                        colors.append('#FF8C00')  # Laranja escuro
+                    elif "G2" in level:
+                        colors.append('#FFD700')  # Amarelo ouro
+                    elif "G1" in level:
+                        colors.append('#ADFF2F')  # Verde amarelado
+                    elif "Nowcast" in level:
+                        colors.append('#9370DB')  # Roxo médio
+                    else:
+                        colors.append('#1E90FF')  # Azul dodger
+            else:
+                colors = ['#d62728'] * len(hac)
+            
+            # Plotar com cores variadas
+            for i in range(len(hac)-1):
+                ax1.plot(times[i:i+2], hac[i:i+2], 
+                        color=colors[i], linewidth=2, alpha=0.8)
             
             # Destacar alertas Nowcast
             if 'escalation_alert' in results:
@@ -589,16 +854,19 @@ class ProductionVisualizer:
                     alert_times = times[alert_mask]
                     alert_hac = results['HAC_total'][alert_mask]
                     ax1.scatter(alert_times, alert_hac, 
-                              color='red', s=50, zorder=5,
-                              label='Nowcast Alert')
+                              color='red', s=60, zorder=5,
+                              label='Nowcast Alert', marker='^')
         
-        colors = ['#2ecc71', '#f1c40f', '#e67e22', '#e74c3c', '#9b59b6']
+        # Thresholds NOAA
+        colors_thresh = ['#2ecc71', '#f1c40f', '#e67e22', '#e74c3c', '#9b59b6']
         levels = [50, 100, 150, 200, 250]
-        for lvl, col in zip(levels, colors):
-            ax1.axhline(y=lvl, color=col, linestyle=':', alpha=0.5)
+        labels = ['G1', 'G2', 'G3', 'G4', 'G5']
+        for lvl, col, lbl in zip(levels, colors_thresh, labels):
+            ax1.axhline(y=lvl, color=col, linestyle=':', alpha=0.7, 
+                       label=f'{lbl} ({lvl})')
         
-        ax1.set_ylabel('HAC Index', fontsize=10)
-        ax1.set_title('A. Estado do Reservatório + Nowcast Alerts', fontsize=11)
+        ax1.set_ylabel('HAC Index', fontsize=11)
+        ax1.set_title('A. Estado do Reservatório + Classificação Nowcast', fontsize=12)
         ax1.legend(loc='upper left', fontsize=8)
         ax1.grid(True, alpha=0.3)
         ax1.set_ylim(0, 320)
@@ -614,31 +882,62 @@ class ProductionVisualizer:
                         color='#e74c3c', linewidth=1.5, linestyle='--',
                         label='Nowcast + Inércia', alpha=0.9)
             
-            # Threshold crítico
+            # Thresholds de classificação
             config = HACPhysicsConfig()
-            ax2.axhline(y=config.THETA_CRITICAL, color='red', linestyle='--',
-                       alpha=0.6, label=f'Θ={config.THETA_CRITICAL} nT/h')
+            ax2.axhline(y=config.THETA_CRITICAL, color='orange', linestyle='--',
+                       alpha=0.8, label=f'Θ={config.THETA_CRITICAL} nT/h (G3)')
+            ax2.axhline(y=config.DHDT_G4_THRESHOLD, color='red', linestyle='--',
+                       alpha=0.8, label=f'G4={config.DHDT_G4_THRESHOLD} nT/h')
+            ax2.axhline(y=config.DHDT_G5_THRESHOLD, color='darkred', linestyle='--',
+                       alpha=0.8, label=f'G5={config.DHDT_G5_THRESHOLD} nT/h')
             ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
         
-        ax2.set_ylabel('dH/dt [nT/h]', fontsize=10)
-        ax2.set_title('B. Taxa de Crescimento (Nowcast + Inércia)', fontsize=11)
-        ax2.legend(loc='upper left', fontsize=8)
+        ax2.set_ylabel('dH/dt [nT/h]', fontsize=11)
+        ax2.set_title('B. Taxa de Crescimento (Nowcast + Inércia)', fontsize=12)
+        ax2.legend(loc='upper left', fontsize=7)
         ax2.grid(True, alpha=0.3)
         
-        # ===== PAINEL 3: Kp PREVISTO =====
+        # ===== PAINEL 3: CLASSIFICAÇÃO HÍBRIDA =====
         ax3 = axes[1, 0]
-        if 'Kp_pred' in results:
-            ax3.plot(times, results['Kp_pred'], 
-                    color='#e74c3c', linewidth=1.5, label='Kp previsto')
-            ax3.axhline(y=8, color='red', linestyle='--', alpha=0.5, label='Saturação')
+        if 'Storm_level' in results and 'Storm_level_base' in results:
+            # Converter classificações para valores numéricos
+            severity_map = {
+                'Quiet': 0, 'G1': 1, 'G2': 2, 'G3': 3, 'G4': 4, 'G5': 5,
+                'G2 (Nowcast Enhancement)': 2.5,
+                'G3 (Nowcast Trigger)': 3.3, 'G3 (Nowcast Override)': 3.7,
+                'G4 (Strong Nowcast)': 4.3, 'G4 (Nowcast Override)': 4.7,
+                'G4 (Trend Boost)': 4.5,
+                'G5 (Extreme Nowcast)': 5.3, 'G5 (Nowcast Override)': 5.7,
+                'G5 (Trend Boost)': 5.5
+            }
+            
+            base_severity = np.array([severity_map.get(l, 0) for l in results['Storm_level_base']])
+            final_severity = np.array([severity_map.get(l, 0) for l in results['Storm_level']])
+            
+            ax3.plot(times, base_severity, 
+                    color='#7f8c8d', linewidth=1, linestyle='--',
+                    label='Classificação Base', alpha=0.6)
+            ax3.plot(times, final_severity,
+                    color='#9b59b6', linewidth=2,
+                    label='Classificação Híbrida', alpha=0.9)
+            
+            # Sombrear áreas de escalação
+            escalation_mask = final_severity > base_severity
+            if np.any(escalation_mask):
+                ax3.fill_between(times, 0, final_severity,
+                               where=escalation_mask,
+                               color='#ff9999', alpha=0.4,
+                               label='Escalação Nowcast')
         
-        ax3.set_ylabel('Índice Kp', fontsize=10)
-        ax3.set_title('C. Atividade Geomagnética Prevista', fontsize=11)
-        ax3.legend(loc='upper left')
+        ax3.set_yticks([0, 1, 2, 3, 4, 5])
+        ax3.set_yticklabels(['Quiet', 'G1', 'G2', 'G3', 'G4', 'G5'])
+        ax3.set_ylabel('Classificação', fontsize=11)
+        ax3.set_title('C. Classificação Híbrida (Base vs Nowcast)', fontsize=12)
+        ax3.legend(loc='upper left', fontsize=7)
         ax3.grid(True, alpha=0.3)
-        ax3.set_ylim(0, 9.5)
+        ax3.set_ylim(-0.5, 5.5)
         
-        # ===== PAINEL 4: Bz =====
+        # ===== PAINEL 4: Bz COM THRESHOLDS =====
         ax4 = axes[1, 1]
         if 'Bz' in results:
             ax4.plot(times, results['Bz'], 
@@ -647,26 +946,38 @@ class ProductionVisualizer:
                             where=(results['Bz'] < 0),
                             color='red', alpha=0.3, label='IMF Sul')
             
-            # Threshold crítico para Nowcast
-            ax4.axhline(y=-8, color='orange', linestyle='--', alpha=0.7,
-                       label='Bz crítico = -8 nT')
+            # Thresholds de classificação
+            config = HACPhysicsConfig()
+            ax4.axhline(y=-5, color='yellow', linestyle=':', alpha=0.7)
+            ax4.axhline(y=config.BZ_G3_THRESHOLD, color='orange', linestyle='--',
+                       alpha=0.8, label=f'G3={config.BZ_G3_THRESHOLD} nT')
+            ax4.axhline(y=config.BZ_G4_THRESHOLD, color='red', linestyle='--',
+                       alpha=0.8, label=f'G4={config.BZ_G4_THRESHOLD} nT')
+            ax4.axhline(y=config.BZ_G5_THRESHOLD, color='darkred', linestyle='--',
+                       alpha=0.8, label=f'G5={config.BZ_G5_THRESHOLD} nT')
         
         ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        ax4.set_ylabel('Bz [nT]', fontsize=10)
-        ax4.set_title('D. Forçante do Vento Solar (Bz)', fontsize=11)
-        ax4.legend(loc='upper right', fontsize=8)
+        ax4.set_ylabel('Bz [nT]', fontsize=11)
+        ax4.set_title('D. Forçante do Vento Solar (Bz)', fontsize=12)
+        ax4.legend(loc='upper right', fontsize=7)
         ax4.grid(True, alpha=0.3)
         
-        # ===== PAINEL 5: ACOPLAMENTO =====
+        # ===== PAINEL 5: Kp PREVISTO =====
         ax5 = axes[2, 0]
-        if 'coupling_signal' in results:
-            ax5.plot(times, results['coupling_signal'],
-                    color='#9b59b6', linewidth=1, label='Acoplamento')
+        if 'Kp_pred' in results:
+            ax5.plot(times, results['Kp_pred'], 
+                    color='#e74c3c', linewidth=1.5, label='Kp previsto')
+            ax5.axhline(y=5, color='orange', linestyle=':', alpha=0.7, label='Kp=5 (G1)')
+            ax5.axhline(y=6, color='yellow', linestyle=':', alpha=0.7, label='Kp=6 (G2)')
+            ax5.axhline(y=7, color='red', linestyle=':', alpha=0.7, label='Kp=7 (G3)')
+            ax5.axhline(y=8, color='darkred', linestyle='--', alpha=0.8, label='Kp=8 (G4)')
+            ax5.axhline(y=9, color='purple', linestyle='--', alpha=0.8, label='Kp=9 (G5)')
         
-        ax5.set_ylabel('Acoplamento [mV/m]', fontsize=10)
-        ax5.set_title('E. Sinal de Acoplamento Efetivo', fontsize=11)
-        ax5.legend(loc='upper left')
+        ax5.set_ylabel('Índice Kp', fontsize=11)
+        ax5.set_title('E. Atividade Geomagnética Prevista', fontsize=12)
+        ax5.legend(loc='upper left', fontsize=7)
         ax5.grid(True, alpha=0.3)
+        ax5.set_ylim(0, 9.5)
         
         # ===== PAINEL 6: VELOCIDADE =====
         ax6 = axes[2, 1]
@@ -674,62 +985,51 @@ class ProductionVisualizer:
             ax6.plot(times, results['Vsw'],
                     color='#3498db', linewidth=1, label='Velocidade')
             
-            # Threshold crítico para Nowcast
-            ax6.axhline(y=700, color='orange', linestyle='--', alpha=0.7,
-                       label='V crítico = 700 km/s')
+            # Thresholds de classificação
+            config = HACPhysicsConfig()
+            ax6.axhline(y=500, color='lightblue', linestyle=':', alpha=0.7)
+            ax6.axhline(y=config.V_G3_THRESHOLD, color='orange', linestyle='--',
+                       alpha=0.8, label=f'G3={config.V_G3_THRESHOLD} km/s')
+            ax6.axhline(y=config.V_G4_THRESHOLD, color='red', linestyle='--',
+                       alpha=0.8, label=f'G4={config.V_G4_THRESHOLD} km/s')
+            ax6.axhline(y=config.V_G5_THRESHOLD, color='darkred', linestyle='--',
+                       alpha=0.8, label=f'G5={config.V_G5_THRESHOLD} km/s')
         
-        ax6.set_ylabel('V [km/s]', fontsize=10)
-        ax6.set_title('F. Velocidade do Vento Solar', fontsize=11)
-        ax6.legend(loc='upper left', fontsize=8)
+        ax6.set_ylabel('V [km/s]', fontsize=11)
+        ax6.set_title('F. Velocidade do Vento Solar', fontsize=12)
+        ax6.legend(loc='upper left', fontsize=7)
         ax6.grid(True, alpha=0.3)
         
-        # ===== PAINEL 7: COMPONENTES HAC =====
+        # ===== PAINEL 7: ACOPLAMENTO =====
         ax7 = axes[3, 0]
-        if all(k in results for k in ['HAC_ring', 'HAC_substorm', 'HAC_ionosphere']):
-            ax7.plot(times, results['HAC_ring'], label='Corrente de Anel', alpha=0.7)
-            ax7.plot(times, results['HAC_substorm'], label='Subtempestades', alpha=0.7)
-            ax7.plot(times, results['HAC_ionosphere'], label='Ionosfera', alpha=0.7)
+        if 'coupling_signal' in results:
+            ax7.plot(times, results['coupling_signal'],
+                    color='#9b59b6', linewidth=1, label='Acoplamento')
         
-        ax7.set_ylabel('Componentes HAC', fontsize=10)
-        ax7.set_xlabel('Tempo (UTC)', fontsize=10)
-        ax7.set_title('G. Particionamento de Energia', fontsize=11)
-        ax7.legend(loc='upper left', fontsize=7)
+        ax7.set_ylabel('Acoplamento [mV/m]', fontsize=11)
+        ax7.set_xlabel('Tempo (UTC)', fontsize=11)
+        ax7.set_title('G. Sinal de Acoplamento Efetivo', fontsize=12)
+        ax7.legend(loc='upper left')
         ax7.grid(True, alpha=0.3)
         
-        # ===== PAINEL 8: REGRA DE DECISÃO =====
+        # ===== PAINEL 8: Dst PREVISTO =====
         ax8 = axes[3, 1]
-        if 'HAC_total' in results and 'escalation_alert' in results:
-            # Plotar condição composta
-            condition_plot = np.zeros_like(results['HAC_total'])
+        if 'Dst_pred' in results:
+            ax8.plot(times, results['Dst_pred'],
+                    color='#e67e22', linewidth=1.5, label='Dst previsto')
             
-            for i in range(len(condition_plot)):
-                if results['HAC_total'][i] < 150:
-                    condition_plot[i] = 1  # Abaixo de G3
-                if results['dHAC_dt'][i] > 50:
-                    condition_plot[i] = 2  # Crescimento crítico
-            
-            ax8.plot(times, condition_plot, 
-                    color='#e67e22', linewidth=1.5, label='Regra de Decisão')
-            
-            ax8.axhline(y=1.5, color='red', linestyle='--', alpha=0.7,
-                       label='Trigger Threshold')
-            
-            # Marcar alertas
-            alert_mask = results['escalation_alert']
-            if np.any(alert_mask):
-                alert_y = [3] * np.sum(alert_mask)
-                ax8.scatter(times[alert_mask], alert_y,
-                          color='red', s=40, marker='^',
-                          label='Escalation Watch', zorder=5)
-            
-            ax8.set_yticks([0, 1, 2, 3])
-            ax8.set_yticklabels(['Normal', 'HAC<G3', 'dH/dt>Θ', 'ALERT'])
-            ax8.set_ylabel('Estado', fontsize=10)
-            ax8.set_xlabel('Tempo (UTC)', fontsize=10)
-            ax8.set_title('H. Regra de Decisão Nowcast + Inércia', fontsize=11)
-            ax8.legend(loc='upper left', fontsize=7)
-            ax8.grid(True, alpha=0.3)
-            ax8.set_ylim(-0.5, 3.5)
+            # Thresholds Dst
+            ax8.axhline(y=-50, color='lightgreen', linestyle=':', alpha=0.7)
+            ax8.axhline(y=-100, color='orange', linestyle=':', alpha=0.7)
+            ax8.axhline(y=-200, color='red', linestyle=':', alpha=0.7)
+            ax8.axhline(y=-350, color='darkred', linestyle=':', alpha=0.7)
+        
+        ax8.set_ylabel('Dst [nT]', fontsize=11)
+        ax8.set_xlabel('Tempo (UTC)', fontsize=11)
+        ax8.set_title('H. Dst Equivalente Previsto', fontsize=12)
+        ax8.legend(loc='lower left')
+        ax8.grid(True, alpha=0.3)
+        ax8.set_ylim(-550, 50)
         
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight')
@@ -748,23 +1048,24 @@ class FinalReport:
     def generate_report(results, df, model, filename="hac_final_report.txt"):
         """Relatório final do sistema com Nowcast + Inércia"""
         print("\n" + "="*70)
-        print("📊 RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA)")
+        print("📊 RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA HÍBRIDO)")
         print("="*70)
         
         with open(filename, 'w') as f:
-            f.write("="*70 + "\n")
-            f.write("RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA)\n")
-            f.write("="*70 + "\n\n")
+            f.write("="*80 + "\n")
+            f.write("RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA HÍBRIDO)\n")
+            f.write("="*80 + "\n\n")
             
-            # 1. INFORMAÇÕES BÁSICAS
+            # 1. INFORMAÇÕES DO DATASET
             f.write("1. INFORMAÇÕES DO DATASET\n")
-            f.write("-"*40 + "\n")
+            f.write("-"*50 + "\n")
             f.write(f"Período: {df['time_tag'].min()} a {df['time_tag'].max()}\n")
-            f.write(f"Pontos totais: {len(df)}\n\n")
+            f.write(f"Pontos totais: {len(df)}\n")
+            f.write(f"Duração: {(df['time_tag'].max() - df['time_tag'].min()).total_seconds()/3600:.1f} horas\n\n")
             
             # 2. PARÂMETROS NOWCAST + INÉRCIA
             f.write("2. PARÂMETROS NOWCAST + INÉRCIA\n")
-            f.write("-"*40 + "\n")
+            f.write("-"*50 + "\n")
             config = HACPhysicsConfig()
             f.write(f"τ_eff (tempo de resposta): {config.TAU_EFFECTIVE} horas\n")
             f.write(f"Θ (limiar crescimento crítico): {config.THETA_CRITICAL} nT/h\n")
@@ -774,7 +1075,7 @@ class FinalReport:
             
             # 3. RESULTADOS HAC
             f.write("3. RESULTADOS DO MODELO HAC+\n")
-            f.write("-"*40 + "\n")
+            f.write("-"*50 + "\n")
             
             if 'HAC_total' in results:
                 hac = results['HAC_total']
@@ -784,25 +1085,68 @@ class FinalReport:
                 
                 if 'dHAC_dt' in results:
                     f.write(f"dH/dt máximo: {np.max(results['dHAC_dt']):.1f} nT/h\n")
-                    f.write(f"dH/dt médio:  {np.mean(results['dHAC_dt']):.1f} nT/h\n\n")
+                    f.write(f"dH/dt médio:  {np.mean(results['dHAC_dt']):.1f} nT/h\n")
+                    f.write(f"dH/dt > 100 nT/h: {np.sum(results['dHAC_dt'] > 100)} pontos\n")
+                    f.write(f"dH/dt > 150 nT/h: {np.sum(results['dHAC_dt'] > 150)} pontos\n\n")
                 
-                # Distribuição de níveis
-                if 'Storm_level' in results:
-                    levels = results['Storm_level']
-                    total = len(levels)
-                    f.write("Distribuição de níveis de tempestade:\n")
+                # Distribuição de níveis TRADICIONAL
+                if 'Storm_level_base' in results:
+                    levels_base = results['Storm_level_base']
+                    total = len(levels_base)
+                    
+                    # Contagem tradicional (base)
+                    counts_base = {
+                        'Quiet': sum(1 for x in levels_base if 'Quiet' in x),
+                        'G1': sum(1 for x in levels_base if 'G1' in x and 'G2' not in x),
+                        'G2': sum(1 for x in levels_base if 'G2' in x and 'G3' not in x),
+                        'G3': sum(1 for x in levels_base if 'G3' in x and 'G4' not in x),
+                        'G4': sum(1 for x in levels_base if 'G4' in x and 'G5' not in x),
+                        'G5': sum(1 for x in levels_base if 'G5' in x)
+                    }
+                    
+                    # Contagem híbrida (final)
+                    if 'Storm_level' in results:
+                        levels_final = results['Storm_level']
+                        counts_final = {
+                            'Quiet': sum(1 for x in levels_final if 'Quiet' in x),
+                            'G1': sum(1 for x in levels_final if 'G1' in x and 'G2' not in x),
+                            'G2': sum(1 for x in levels_final if 'G2' in x and 'G3' not in x),
+                            'G3': sum(1 for x in levels_final if 'G3' in x and 'G4' not in x),
+                            'G4': sum(1 for x in levels_final if 'G4' in x and 'G5' not in x),
+                            'G5': sum(1 for x in levels_final if 'G5' in x),
+                            'Nowcast Override': sum(1 for x in levels_final if 'Nowcast' in x or 'Boost' in x)
+                        }
+                    
+                    f.write("Distribuição de níveis de tempestade (BASE):\n")
                     for lvl in ['Quiet', 'G1', 'G2', 'G3', 'G4', 'G5']:
-                        count = sum(1 for x in levels if x == lvl)
+                        count = counts_base[lvl]
                         pct = count/total*100 if total > 0 else 0
-                        f.write(f"  {lvl:6s}: {count:4d} pontos ({pct:5.1f}%)\n")
+                        f.write(f"  {lvl:6s}: {count:5d} pontos ({pct:5.1f}%)\n")
+                    
+                    f.write("\nDistribuição de níveis (HÍBRIDO):\n")
+                    for lvl in ['Quiet', 'G1', 'G2', 'G3', 'G4', 'G5']:
+                        count = counts_final[lvl]
+                        pct = count/total*100 if total > 0 else 0
+                        f.write(f"  {lvl:6s}: {count:5d} pontos ({pct:5.1f}%)\n")
+                    
+                    f.write(f"\n  Escalações Nowcast: {counts_final['Nowcast Override']} pontos\n")
             
             # 4. ALERTAS NOWCAST
             f.write("\n4. ALERTAS NOWCAST + INÉRCIA\n")
-            f.write("-"*40 + "\n")
+            f.write("-"*50 + "\n")
             
             if hasattr(model, 'escalation_triggers') and model.escalation_triggers:
-                f.write(f"Total de triggers de escalação: {len(model.escalation_triggers)}\n\n")
+                f.write(f"Total de triggers de escalação: {len(model.escalation_triggers)}\n")
                 
+                # Análise de classificação Nowcast
+                if hasattr(model, 'classification_logs') and model.classification_logs:
+                    nowcast_escalations = sum(1 for log in model.classification_logs if log['escalation'])
+                    nowcast_g4g5 = sum(1 for log in model.classification_logs if log['severity'] >= 4)
+                    f.write(f"Escalações Nowcast detectadas: {nowcast_escalations}\n")
+                    f.write(f"Eventos G4/G5 Nowcast: {nowcast_g4g5}\n\n")
+                
+                f.write("\nALERTAS PRINCIPAIS:\n")
+                f.write("-"*40 + "\n")
                 for i, alert in enumerate(model.escalation_triggers, 1):
                     f.write(f"{i}. {alert['time']}:\n")
                     f.write(f"   HAC = {alert['HAC']:.1f} (abaixo de G3)\n")
@@ -813,36 +1157,62 @@ class FinalReport:
             else:
                 f.write("Nenhum alerta de escalação detectado.\n\n")
             
-            # 5. STATUS FINAL
+            # 5. STATUS FINAL COM ANÁLISE HÍBRIDA
             f.write("5. STATUS FINAL DO SISTEMA\n")
-            f.write("-"*40 + "\n")
+            f.write("-"*50 + "\n")
             
             if 'Storm_level' in results and len(results['Storm_level']) > 0:
                 current_level = results['Storm_level'][-1]
+                current_level_base = results['Storm_level_base'][-1] if 'Storm_level_base' in results else current_level
                 current_hac = results['HAC_total'][-1] if 'HAC_total' in results else 0
+                current_dhdt = results['dHAC_dt'][-1] if 'dHAC_dt' in results else 0
+                current_bz = results['Bz'][-1] if 'Bz' in results else 0
+                current_v = results['Vsw'][-1] if 'Vsw' in results else 0
                 
-                f.write(f"Nível atual: {current_level}\n")
-                f.write(f"HAC atual: {current_hac:.1f}\n")
+                f.write(f"ESTADO ATUAL:\n")
+                f.write(f"  • HAC: {current_hac:.1f}\n")
+                f.write(f"  • dH/dt: {current_dhdt:.1f} nT/h\n")
+                f.write(f"  • Bz: {current_bz:.1f} nT\n")
+                f.write(f"  • V: {current_v:.1f} km/s\n")
+                f.write(f"  • Classificação Base: {current_level_base}\n")
+                f.write(f"  • Classificação Final: {current_level}\n")
                 
-                if current_level in ['G4', 'G5']:
-                    f.write("🚨 ALERTA: Condições de tempestade severa\n")
-                elif current_level == 'G3':
-                    f.write("⚠️  ALERTA: Tempestade forte\n")
-                elif current_level == 'G2':
-                    f.write("📢 ATENÇÃO: Tempestade moderada\n")
-                elif current_level == 'G1':
-                    f.write("📋 MONITORAMENTO: Tempestade menor\n")
+                if current_level in ['G4', 'G5', 'G4 (Nowcast Override)', 'G5 (Nowcast Override)', 
+                                   'G4 (Strong Nowcast)', 'G5 (Extreme Nowcast)',
+                                   'G4 (Trend Boost)', 'G5 (Trend Boost)']:
+                    f.write("\n🚨 ALERTA: Condições de tempestade severa\n")
+                elif "G3" in current_level:
+                    f.write("\n⚠️  ALERTA: Tempestade forte\n")
+                elif "G2" in current_level:
+                    f.write("\n📢 ATENÇÃO: Tempestade moderada\n")
+                elif "G1" in current_level:
+                    f.write("\n📋 MONITORAMENTO: Tempestade menor\n")
                 else:
-                    f.write("✅ Condições quietas\n")
+                    f.write("\n✅ Condições quietas\n")
                 
                 # Verificar se há alerta Nowcast ativo
                 if 'escalation_alert' in results and results['escalation_alert'][-1]:
                     f.write("\n🚨 NOWCAST ALERT: ESCALAÇÃO IMINENTE!\n")
                     f.write("   Condições favoráveis para evolução para G4/G5\n")
                     f.write(f"   Horizonte: {config.TAU_EFFECTIVE * 2} horas\n")
+                
+                # Análise de risco
+                f.write("\nANÁLISE DE RISCO:\n")
+                risk_factors = []
+                if current_dhdt > 100: risk_factors.append(f"Alta taxa de crescimento ({current_dhdt:.1f} nT/h)")
+                if current_bz < -10: risk_factors.append(f"Bz fortemente negativo ({current_bz:.1f} nT)")
+                if current_v > 700: risk_factors.append(f"Vento solar rápido ({current_v:.1f} km/s)")
+                if current_hac > 150: risk_factors.append(f"Energia acumulada elevada (HAC={current_hac:.1f})")
+                
+                if risk_factors:
+                    f.write("   Fatores de risco ativos:\n")
+                    for factor in risk_factors:
+                        f.write(f"   • {factor}\n")
+                else:
+                    f.write("   Nenhum fator de risco crítico ativo\n")
             
             f.write(f"\nRelatório gerado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("="*70 + "\n")
+            f.write("="*80 + "\n")
         
         print(f"📝 Relatório final salvo: {filename}")
         
@@ -850,19 +1220,24 @@ class FinalReport:
         if 'Storm_level' in results and len(results['Storm_level']) > 0:
             current_level = results['Storm_level'][-1]
             current_hac = results['HAC_total'][-1] if 'HAC_total' in results else 0
+            current_dhdt = results['dHAC_dt'][-1] if 'dHAC_dt' in results else 0
             
-            print(f"\n🎯 STATUS ATUAL: HAC = {current_hac:.1f} → {current_level}")
+            print(f"\n🎯 STATUS ATUAL: HAC = {current_hac:.1f}, dH/dt = {current_dhdt:.1f} nT/h → {current_level}")
             
             if 'escalation_alert' in results and results['escalation_alert'][-1]:
                 print("   🚨 NOWCAST ALERT: Condições para escalação detectadas!")
-                print(f"   • dH/dt = {results['dHAC_dt'][-1]:.1f} nT/h > Θ")
+                print(f"   • dH/dt = {current_dhdt:.1f} nT/h > Θ")
                 print(f"   • Bz = {results['Bz'][-1]:.1f} nT < -8 nT")
                 print(f"   • V = {results['Vsw'][-1]:.1f} km/s > 700 km/s")
             
-            if current_level in ['G4', 'G5']:
-                print("   🚨 ALERTA DE TEMPESTADE SEVERA")
-            elif current_level == 'G3':
-                print("   ⚠️  ALERTA DE TEMPESTADE FORTE")
+            if "G5" in current_level:
+                print("   🚨🚨 ALERTA DE TEMPESTADE G5 SEVERA")
+            elif "G4" in current_level:
+                print("   🚨 ALERTA DE TEMPESTADE G4 SEVERA")
+            elif "G3" in current_level:
+                print("   ⚠️  ALERTA DE TEMPESTADE G3 FORTE")
+            elif "G2" in current_level:
+                print("   📢 ATENÇÃO: TEMPESTADE G2 MODERADA")
         
         print("\n" + "="*70)
 
@@ -872,7 +1247,7 @@ class FinalReport:
 def main():
     """Pipeline principal - PRODUÇÃO FINAL COM NOWCAST + INÉRCIA"""
     print("\n" + "="*70)
-    print("🚀 HAC++ MODEL - SISTEMA DE PRODUÇÃO (NOWCAST + INÉRCIA)")
+    print("🚀 HAC++ MODEL - SISTEMA DE PRODUÇÃO (NOWCAST + INÉRCIA HÍBRIDO)")
     print("="*70)
     
     # Configurar caminhos
@@ -906,15 +1281,26 @@ def main():
     df = calculator.compute_all_fields(df)
     
     # 4. MODELO HAC+ COM NOWCAST
-    print("\n🧮 EXECUTANDO MODELO HAC+ (Nowcast + Inércia)...")
+    print("\n🧮 EXECUTANDO MODELO HAC+ (Nowcast + Inércia Híbrido)...")
     model = ProductionHACModel()
     hac_values = model.compute_hac_system(df)
     
-    # 5. PREDIÇÃO
-    print("\n🌍 GERANDO PREDIÇÕES...")
+    # 5. PREDIÇÃO COM CLASSIFICAÇÃO HÍBRIDA
+    print("\n🌍 GERANDO PREDIÇÕES (Classificação Híbrida)...")
     kp_pred, dst_pred, storm_levels = model.predict_storm_indicators(hac_values)
     
-    # 6. RELATÓRIO NOWCAST
+    # 6. OBTER AVALIAÇÃO ATUAL
+    print("\n🔍 AVALIAÇÃO DO ESTADO ATUAL:")
+    current_assessment = model.get_current_assessment()
+    if current_assessment:
+        print(f"   • Hora: {current_assessment['time']}")
+        print(f"   • HAC: {current_assessment['HAC']:.1f}")
+        print(f"   • dH/dt: {current_assessment['dHAC_dt']:.1f} nT/h")
+        print(f"   • Bz: {current_assessment['Bz']:.1f} nT")
+        print(f"   • Classificação: {current_assessment['classification']}")
+        print(f"   • Risco de Escalação: {current_assessment['escalation_risk']}")
+    
+    # 7. RELATÓRIO NOWCAST
     print("\n🚨 GERANDO RELATÓRIO NOWCAST + INÉRCIA...")
     nowcast_report = model.generate_nowcast_report()
     print(nowcast_report)
@@ -922,17 +1308,17 @@ def main():
     with open("nowcast_inertia_report.txt", "w") as f:
         f.write(nowcast_report)
     
-    # 7. VISUALIZAÇÃO
+    # 8. VISUALIZAÇÃO
     print("\n📈 CRIANDO VISUALIZAÇÕES...")
     visualizer = ProductionVisualizer()
     visualizer.create_final_dashboard(model.results, df, "hac_nowcast_final.png")
     
-    # 8. RELATÓRIO FINAL
+    # 9. RELATÓRIO FINAL
     print("\n📊 GERANDO RELATÓRIO FINAL...")
     reporter = FinalReport()
     reporter.generate_report(model.results, df, model)
     
-    # 9. SALVAR RESULTADOS
+    # 10. SALVAR RESULTADOS
     try:
         results_df = df.copy()
         for key, value in model.results.items():
@@ -946,9 +1332,9 @@ def main():
     except Exception as e:
         print(f"⚠️  Erro ao salvar: {e}")
     
-    # 10. STATUS FINAL
+    # 11. STATUS FINAL
     print("\n" + "="*70)
-    print("✅ SISTEMA HAC++ (NOWCAST + INÉRCIA) - EXECUÇÃO CONCLUÍDA")
+    print("✅ SISTEMA HAC++ (NOWCAST + INÉRCIA HÍBRIDO) - EXECUÇÃO CONCLUÍDA")
     print("="*70)
     
     if 'Storm_level' in model.results and len(model.results['Storm_level']) > 0:
@@ -957,6 +1343,7 @@ def main():
         
         print(f"\n🔴 STATUS OPERACIONAL:")
         print(f"   HAC: {current_hac:.1f}")
+        print(f"   dH/dt: {model.results['dHAC_dt'][-1]:.1f} nT/h")
         print(f"   Nível: {current_level}")
         
         if 'escalation_alert' in model.results and model.results['escalation_alert'][-1]:
