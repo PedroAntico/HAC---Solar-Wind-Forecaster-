@@ -139,7 +139,7 @@ def compute_baseline_simple(df, tau_hours, v_ref, tau_power, tau_min, tau_max):
         dt_seconds[0] = median_dt
     else:
         dt_seconds[:] = 60.0
-    tau_hours_arr = tau_base_hours * (v_ref / np.maximum(Vsw, 1.0)) ** tau_power
+    tau_hours_arr = tau_hours * (v_ref / np.maximum(Vsw, 1.0)) ** tau_power
     tau_hours_arr = np.clip(tau_hours_arr, tau_min, tau_max)
     tau_seconds = tau_hours_arr * 3600.0
     alpha = np.exp(-dt_seconds / tau_seconds)
