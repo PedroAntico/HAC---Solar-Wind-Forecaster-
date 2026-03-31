@@ -6,9 +6,7 @@ Modelo físico com:
 - Perda não linear via τ_eff = τ * (1 + (H/H₀)^{γ-1})
 - Calibração não linear (log ou sqrt) com predição no espaço original
 - Download automático de dados OMNI e validação com Dst
-
-Autor: Assistente IA
-Data: Março 2026
+- Correção de nomenclatura para evitar sobrescrita de funções
 """
 
 import requests
@@ -108,13 +106,11 @@ def download_omni(start_date, end_date, resolution="hour"):
         return None
 
     df = pd.read_csv(
-    StringIO("\n".join(data_lines)),
-    sep=r"\s+",
-    engine="python",
-    header=None,
-    na_values=[9999, 9999.99, 99999.0, 99999.99]    
+        StringIO("\n".join(data_lines)),
+        delim_whitespace=True,
+        header=None,
+        na_values=[9999, 9999.99, 99999.0, 99999.99]
     )
-    
     df.columns = [
         "year", "doy", "hour",
         "bx_gsm", "by_gsm", "bz_gsm",
@@ -526,13 +522,13 @@ def predict_from_calibration(hac, slope, intercept, transform):
 # ============================
 # FIGURA COMPARATIVA
 # ============================
-def create_figure(df, baseline_simple, baseline_akasofu, dst_df=None, filename="hac_comparison.png",
+def create_figure(df, baseline_simple_vals, baseline_akasofu_vals, dst_df=None, filename="hac_comparison.png",
                   delay=0, smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac'):
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
     axes[0].plot(df['time_tag'], df['HAC'], label='HAC (modelo)', color='#d62728', linewidth=2)
-    axes[0].plot(df['time_tag'], baseline_simple, label='Baseline (-Bz*V)', color='#1f77b4', linewidth=1.5, alpha=0.7)
-    axes[0].plot(df['time_tag'], baseline_akasofu, label='Baseline Akasofu ε', color='#ff7f0e', linewidth=1.5, alpha=0.7)
+    axes[0].plot(df['time_tag'], baseline_simple_vals, label='Baseline (-Bz*V)', color='#1f77b4', linewidth=1.5, alpha=0.7)
+    axes[0].plot(df['time_tag'], baseline_akasofu_vals, label='Baseline Akasofu ε', color='#ff7f0e', linewidth=1.5, alpha=0.7)
     if predictor == 'hac_ma' and 'HAC_ma' in df.columns:
         axes[0].plot(df['time_tag'], df['HAC_ma'], label='HAC médio (preditor)', color='green', linewidth=1.2, linestyle='--')
     axes[0].set_ylabel('Índice')
@@ -632,9 +628,9 @@ def main():
     # Calcula HAC (primeira passagem sem calibração)
     df = calculate_hac(df, norm_factor, calib_factor=1.0)
 
-    # Calcula baselines
-    baseline_simple = baseline_simple(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
-    baseline_akasofu = baseline_akasofu(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
+    # Calcula baselines (usando nomes diferentes das funções)
+    baseline_simple_vals = baseline_simple(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
+    baseline_akasofu_vals = baseline_akasofu(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
 
     # Prepara dados de Dst
     dst_df = df[['time_tag', 'dst']].copy()
@@ -685,16 +681,13 @@ def main():
 
     # Aplicar calibração para obter HAC calibrado (apenas para visualização e métricas)
     if calib_slope is not None and calib_intercept is not None:
-        # Recalcula HAC com fator linear aproximado (para manter compatibilidade com as funções)
-        # Mas a predição final é melhor feita com a função predict_from_calibration.
-        # Para simplificar, ajustamos o fator linear médio.
-        # Estimamos um fator linear médio a partir da regressão não linear (usando o valor médio de HAC)
+        # Estimar um fator linear médio para manter compatibilidade com as funções de validação
         hac_mean = df['HAC_raw'].mean()
         dst_pred_mean = predict_from_calibration(hac_mean, calib_slope, calib_intercept, CALIBRATION_TRANSFORM)
         linear_factor = dst_pred_mean / hac_mean if hac_mean > 0 else 1.0
         df = calculate_hac(df, norm_factor, calib_factor=linear_factor)
-        baseline_simple = baseline_simple * linear_factor
-        baseline_akasofu = baseline_akasofu * linear_factor
+        baseline_simple_vals = baseline_simple_vals * linear_factor
+        baseline_akasofu_vals = baseline_akasofu_vals * linear_factor
         df_hac = df[['time_tag', 'HAC', 'dHAC_dt']].copy()
         if PREDICTOR_TYPE == 'hac_ma':
             df['HAC_ma'] = df['HAC'].rolling(window=5, min_periods=1).mean()
@@ -731,7 +724,7 @@ def main():
             print(f"   POD: {metrics['pod']:.3f} | FAR: {metrics['far']:.3f} | CSI: {metrics['csi']:.3f}")
 
     # Baselines (com preditor HAC)
-    df_simple = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': baseline_simple})
+    df_simple = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': baseline_simple_vals})
     metrics_simple = compute_metrics(df_simple, shifted_dst, DST_THRESHOLD, threshold_hac=hac_threshold,
                                      smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac')
     if metrics_simple:
@@ -741,7 +734,7 @@ def main():
         if metrics_simple['pod'] is not None:
             print(f"   POD: {metrics_simple['pod']:.3f} | FAR: {metrics_simple['far']:.3f} | CSI: {metrics_simple['csi']:.3f}")
 
-    df_akasofu = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': baseline_akasofu})
+    df_akasofu = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': baseline_akasofu_vals})
     metrics_akasofu = compute_metrics(df_akasofu, shifted_dst, DST_THRESHOLD, threshold_hac=hac_threshold,
                                       smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac')
     if metrics_akasofu:
@@ -765,7 +758,7 @@ def main():
     print(f"\n📈 Análise preditiva (dHAC/dt > 5 antecede 3h): POD = {pod:.3f}, FAR = {far:.3f}")
 
     # Gráfico
-    create_figure(df, baseline_simple, baseline_akasofu, dst_df, "hac_comparison.png",
+    create_figure(df, baseline_simple_vals, baseline_akasofu_vals, dst_df, "hac_comparison.png",
                   delay=best_delay, smooth_dst_hours=DST_SMOOTH_HOURS, predictor=PREDICTOR_TYPE)
 
     # Salva resultados
@@ -790,4 +783,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
