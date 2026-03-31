@@ -108,10 +108,12 @@ def download_omni(start_date, end_date, resolution="hour"):
         return None
 
     df = pd.read_csv(
-        StringIO("\n".join(data_lines)),
-        delim_whitespace=True,
-        header=None,
-        na_values=[9999, 9999.99, 99999.0, 99999.99]
+    StringIO("\n".join(data_lines)),
+    sep=r"\s+",
+    engine="python",
+    header=None,
+    na_values=[9999, 9999.99, 99999.0, 99999.99]
+)
     )
     df.columns = [
         "year", "doy", "hour",
