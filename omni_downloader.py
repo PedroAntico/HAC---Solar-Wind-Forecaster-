@@ -55,13 +55,29 @@ def download_omni_month(year, month, resolution="hour"):
                 return None
     text = response.text
     lines = text.split("\n")
-    data_lines = [l for l in lines if l.strip() and l[0].isdigit()]
+    
+    # Filtragem robusta das linhas de dados
+    data_lines = []
+    for l in lines:
+        l = l.strip()
+        if not l:
+            continue
+        # A primeira coluna deve ser um dígito (ano)
+        if not l[0].isdigit():
+            continue
+        # Deve ter pelo menos 9 campos (ano, doy, hour, bx, by, bz, dens, vel, dst)
+        parts = l.split()
+        if len(parts) < 9:
+            continue
+        data_lines.append(l)
+    
     if not data_lines:
         print("   ⚠️ Nenhum dado encontrado.")
         return None
+    
     df = pd.read_csv(
         StringIO("\n".join(data_lines)),
-        delim_whitespace=True,
+        sep=r"\s+",                     # substitui delim_whitespace=True
         header=None,
         na_values=[9999, 9999.99, 99999.0, 99999.99]
     )
@@ -81,7 +97,7 @@ def download_omni_month(year, month, resolution="hour"):
 def download_omni_range(start_year, end_year):
     """
     Baixa dados de um intervalo de anos, mês a mês.
-    Retorna DataFrame concatenado.
+    Retorna DataFrame concatenado e deduplicado.
     """
     all_dfs = []
     for year in range(start_year, end_year + 1):
@@ -95,7 +111,10 @@ def download_omni_range(start_year, end_year):
                 print("   ⚠️ Sem dados para este mês")
     if not all_dfs:
         return None
-    return pd.concat(all_dfs, ignore_index=True)
+    df = pd.concat(all_dfs, ignore_index=True)
+    # Ordenar e remover duplicatas por timestamp (caso haja sobreposição)
+    df = df.sort_values("time_tag").drop_duplicates("time_tag")
+    return df
 
 def save_data(df, filename="data/omni_2000_2020.csv"):
     """Salva DataFrame em CSV, criando diretório se necessário."""
