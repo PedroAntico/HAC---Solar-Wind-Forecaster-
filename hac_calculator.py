@@ -1,13 +1,13 @@
 """
-HAC - Heliospheric Accumulated Coupling (Versão Avançada Final)
-Modelo físico com:
-- Termo fonte estabilizado: V * (-Bz) * sin²(θ/2) * sqrt(B_total) * f(P_dyn)
-- Normalização da fonte pela média/percentil dos valores positivos
-- Perda não linear via τ_eff = τ * (1 + (H/H₀)^{γ-1})
-- Filtro exponencial correto: H[i] = H[i-1]*exp(-Δt/τ_eff) + S_eff * τ_eff * (1 - exp(-Δt/τ_eff))
-- Calibração não linear (log/sqrt) com predição direta e validação com R²
-- Download automático de dados OMNI
-- Métricas completas: correlação, R², RMSE, MAE, POD, FAR, CSI
+HAC - Heliospheric Accumulated Coupling (Versão Final com Física Aprimorada)
+Modelo com:
+- Termo fonte estabilizado: V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (Pdyn/P0)^(1/6)
+- Normalização por constante física (independente do período)
+- Memória adaptativa: τ_eff = τ / (1 + β * S)
+- Perda não linear: τ_eff_base = τ * (1 + (H/H₀)^{γ-1})
+- Filtro exponencial correto: H[i] = H[i-1]*α + S_eff * τ_eff * (1-α)
+- Calibração não linear (log) com predição direta
+- Validação com correlação, R², RMSE, MAE, POD, FAR, CSI
 """
 
 import requests
@@ -26,7 +26,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 warnings.filterwarnings('ignore')
 
 # ============================
-# CONFIGURAÇÃO DO MODELO
+# CONFIGURAÇÃO DO MODELO (FÍSICA)
 # ============================
 # Parâmetros de memória
 TAU_BASE_HOURS = 3.0          # constante de tempo base (horas)
@@ -39,12 +39,15 @@ TAU_MAX_HOURS = 6.0
 USE_DENSITY = True            # influência da densidade via pressão dinâmica
 USE_BY_CLOCK = True           # usa ângulo de clock
 USE_DYNAMIC_PRESSURE = True   # usa pressão dinâmica como fator
-# Fator de modulação da pressão dinâmica (controla intensidade)
-DYNAMIC_PRESSURE_FACTOR = 0.2
+# Parâmetros físicos da pressão dinâmica
+P0 = 2.0                      # nPa (pressão de referência)
+ALPHA_PDYN = 1/6              # expoente da compressão magnetosférica
 
-# Normalização da fonte: 'mean' ou 'percentile'
-SOURCE_NORM = 'percentile'    # 'mean' ou 'percentile'
-SOURCE_NORM_PERCENTILE = 95   # percentil usado se 'percentile'
+# Normalização da fonte: constante física (independente do dataset)
+SOURCE_NORM_CONSTANT = 1000.0  # valor calibrado a partir de um período de referência (pode ser ajustado)
+
+# Saturação/adaptação da memória
+BETA_SOURCE = 0.5             # aceleração da resposta: τ_eff = τ / (1 + β * S)
 
 # Perda não linear (γ)
 LOSS_EXPONENT = 1.5           # γ > 1 acelera dissipação em altas energias
@@ -173,34 +176,33 @@ def apply_time_shift(df, hours):
     return shifted
 
 # ============================
-# TERMO FONTE (ESTABILIZADO)
+# TERMO FONTE (COM FÍSICA APERFEIÇOADA)
 # ============================
-def compute_source_advanced(Bx, By, Bz, V, N, use_density, use_by_clock, use_dynamic_pressure,
-                            norm_factor):
+def compute_source_advanced(Bx, By, Bz, V, N):
     """
-    Calcula S(t) = V * (-Bz) * sin²(θ/2) * sqrt(B_total) * f(P_dyn)
-    Normalizado por norm_factor.
+    Calcula S(t) = V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (Pdyn/P0)**(1/6)
+    Normalizado por constante física SOURCE_NORM_CONSTANT.
     """
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
-    recon = np.sin(theta / 2)**2 if use_by_clock else 1.0
+    recon = np.sin(theta / 2)**2 if USE_BY_CLOCK else 1.0
     bz_sul = -np.minimum(Bz, 0)   # positivo quando Bz < 0
 
-    # Termo base: V * Bz_sul * recon * sqrt(Btot)
+    # Termo base: V * bz_sul * recon * sqrt(Btot)
     base = V * bz_sul * recon * np.sqrt(Btot)
 
-    if use_density and use_dynamic_pressure:
-        Pdyn = N * V**2
-        Pdyn_med = np.median(Pdyn[Pdyn > 0]) if np.any(Pdyn > 0) else 1.0
-        Pdyn_norm = Pdyn / Pdyn_med
-        # Modulação controlada: 1 + 0.2 * log1p(Pdyn_norm)
-        base *= (1 + DYNAMIC_PRESSURE_FACTOR * np.log1p(Pdyn_norm))
+    if USE_DENSITY and USE_DYNAMIC_PRESSURE:
+        Pdyn = N * V**2               # nPa (se N em cm⁻³, V em km/s → escala adequada)
+        Pdyn_norm = Pdyn / P0
+        # Fator de compressão: (Pdyn/P0)^(1/6)
+        dyn_factor = np.where(Pdyn > 0, Pdyn_norm**ALPHA_PDYN, 1.0)
+        base *= dyn_factor
 
     base = np.clip(base, 0, 1e9)
-    source = base / norm_factor
+    source = base / SOURCE_NORM_CONSTANT
     return source
 
-def compute_source(df, norm_factor, use_akasofu=False):
+def compute_source(df, use_akasofu=False):
     Bx = df['bx_gsm'].values
     By = df['by_gsm'].values
     Bz = df['bz_gsm'].values
@@ -214,20 +216,19 @@ def compute_source(df, norm_factor, use_akasofu=False):
         epsilon = V * (Btot**2) * sin4
         return epsilon / 1e6
     else:
-        return compute_source_advanced(Bx, By, Bz, V, N,
-                                       USE_DENSITY, USE_BY_CLOCK, USE_DYNAMIC_PRESSURE,
-                                       norm_factor)
+        return compute_source_advanced(Bx, By, Bz, V, N)
 
 # ============================
-# CÁLCULO DO HAC (FILTRO EXPONENCIAL CORRETO)
+# CÁLCULO DO HAC (COM MEMÓRIA ADAPTATIVA E PERDA NÃO LINEAR)
 # ============================
-def calculate_hac(df, norm_factor, calib_factor=1.0,
+def calculate_hac(df, calib_factor=1.0,
                   tau_base=TAU_BASE_HOURS, v_ref=V_REF, power=TAU_POWER,
                   tau_min=TAU_MIN_HOURS, tau_max=TAU_MAX_HOURS,
-                  loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION):
+                  loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION,
+                  beta_source=BETA_SOURCE):
     times = df['time_tag'].values
     Vsw = df['speed'].values
-    source = compute_source(df, norm_factor, use_akasofu=False)
+    source = compute_source(df, use_akasofu=False)
 
     dt_seconds = np.zeros(len(times))
     if len(times) > 1:
@@ -247,26 +248,29 @@ def calculate_hac(df, norm_factor, calib_factor=1.0,
         dt = dt_seconds[i]
         tau = tau_seconds[i]
 
-        # Saturação da fonte
+        # Saturação da fonte (opcional)
         if h_sat > 0:
             source_eff = source[i] / (1 + hac[i-1] / h_sat)
         else:
             source_eff = source[i]
 
-        # Perda não linear: τ_eff = τ * (1 + (H/h0)^{γ-1})
+        # Perda não linear: τ_base_eff = τ * (1 + (H/h0)^{γ-1})
         if loss_exp != 1.0:
-            tau_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
+            tau_loss_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
         else:
-            tau_eff = tau
+            tau_loss_eff = tau
 
-        # Filtro exponencial correto (solução da equação diferencial)
+        # Adaptação à fonte: acelera resposta quando há forte injeção
+        tau_eff = tau_loss_eff / (1 + beta_source * source_eff)
+
+        # Filtro exponencial correto (solução analítica)
         alpha = np.exp(-dt / tau_eff)
         hac[i] = hac[i-1] * alpha + source_eff * tau_eff * (1 - alpha)
         hac[i] = max(0, hac[i])
 
     hac_scaled = hac * calib_factor
 
-    # Derivada suavizada (apenas para gráfico)
+    # Derivada suavizada (para gráfico)
     if USE_SAVITZKY_GOLAY and len(hac_scaled) >= SG_WINDOW:
         hac_smooth = savgol_filter(hac_scaled, window_length=SG_WINDOW, polyorder=SG_ORDER)
     else:
@@ -284,7 +288,8 @@ def calculate_hac(df, norm_factor, calib_factor=1.0,
 # MODELOS BASELINE (mesma estrutura, fonte diferente)
 # ============================
 def baseline_simple(df, tau_base, v_ref, power, tau_min, tau_max,
-                    loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION):
+                    loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION,
+                    beta_source=BETA_SOURCE):
     source = np.zeros_like(df['bz_gsm'].values)
     south = df['bz_gsm'].values < 0
     source[south] = -df['bz_gsm'].values[south] * df['speed'].values[south] / 1000.0
@@ -311,16 +316,18 @@ def baseline_simple(df, tau_base, v_ref, power, tau_min, tau_max,
         else:
             source_eff = source[i]
         if loss_exp != 1.0:
-            tau_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
+            tau_loss_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
         else:
-            tau_eff = tau
+            tau_loss_eff = tau
+        tau_eff = tau_loss_eff / (1 + beta_source * source_eff)
         alpha = np.exp(-dt / tau_eff)
         hac[i] = hac[i-1] * alpha + source_eff * tau_eff * (1 - alpha)
         hac[i] = max(0, hac[i])
     return hac
 
 def baseline_akasofu(df, tau_base, v_ref, power, tau_min, tau_max,
-                     loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION):
+                     loss_exp=LOSS_EXPONENT, h0=H0, h_sat=H_SATURATION,
+                     beta_source=BETA_SOURCE):
     Bx = df['bx_gsm'].values
     By = df['by_gsm'].values
     Bz = df['bz_gsm'].values
@@ -354,9 +361,10 @@ def baseline_akasofu(df, tau_base, v_ref, power, tau_min, tau_max,
         else:
             source_eff = source[i]
         if loss_exp != 1.0:
-            tau_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
+            tau_loss_eff = tau * (1 + (hac[i-1] / h0)**(loss_exp - 1))
         else:
-            tau_eff = tau
+            tau_loss_eff = tau
+        tau_eff = tau_loss_eff / (1 + beta_source * source_eff)
         alpha = np.exp(-dt / tau_eff)
         hac[i] = hac[i-1] * alpha + source_eff * tau_eff * (1 - alpha)
         hac[i] = max(0, hac[i])
@@ -398,10 +406,6 @@ def inverse_transform(y_pred_t, transform_type):
         return y_pred_t
 
 def compute_metrics(y_true, y_pred, threshold_dst=-50, threshold_hac=None, hac_vals=None):
-    """
-    Calcula correlação, R², RMSE, MAE, POD, FAR, CSI.
-    Se threshold_hac fornecido, calcula métricas de detecção usando hac_vals.
-    """
     if len(y_true) < 2:
         return None
     corr = pearsonr(y_true, y_pred)[0] if np.std(y_true) > 0 and np.std(y_pred) > 0 else np.nan
@@ -423,32 +427,7 @@ def compute_metrics(y_true, y_pred, threshold_dst=-50, threshold_hac=None, hac_v
     return {'correlation': corr, 'r2': r2, 'rmse': rmse, 'mae': mae,
             'pod': pod, 'far': far, 'csi': csi}
 
-def find_optimal_delay(df_hac, dst_series, max_delay=MAX_DELAY_HOURS, step=DELAY_STEP_HOURS,
-                       smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac'):
-    best_corr = -1
-    best_delay = 0
-    print(f"\n🔍 Buscando atraso ótimo (predictor={predictor})...")
-    for delay in np.arange(0, max_delay + step, step):
-        shifted_dst = apply_time_shift(dst_series, delay)
-        metrics = compute_validation_metrics(df_hac, shifted_dst, predictor=predictor,
-                                             smooth_dst_hours=smooth_dst_hours)
-        if metrics and not np.isnan(metrics['correlation']):
-            corr = metrics['correlation']
-            print(f"   Delay {delay:3.0f}h → r = {corr:.3f}")
-            if corr > best_corr:
-                best_corr = corr
-                best_delay = delay
-    if best_corr < 0.1:
-        print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
-        best_delay = 0
-        best_corr = 0.0
-    print(f"🔥 Melhor delay: {best_delay:.0f}h (r = {best_corr:.3f})")
-    return best_delay, best_corr
-
 def compute_validation_metrics(df_hac, dst_series, predictor='hac', smooth_dst_hours=DST_SMOOTH_HOURS):
-    """
-    Retorna métricas para um dado atraso (usado na busca de delay).
-    """
     if dst_series is None or len(dst_series) == 0:
         return None
     df_hac = df_hac.copy()
@@ -488,12 +467,31 @@ def compute_validation_metrics(df_hac, dst_series, predictor='hac', smooth_dst_h
     y_true = -merged['dst_smooth'].values
     return compute_metrics(y_true, y_pred)
 
+def find_optimal_delay(df_hac, dst_series, max_delay=MAX_DELAY_HOURS, step=DELAY_STEP_HOURS,
+                       smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac'):
+    best_corr = -1
+    best_delay = 0
+    print(f"\n🔍 Buscando atraso ótimo (predictor={predictor})...")
+    for delay in np.arange(0, max_delay + step, step):
+        shifted_dst = apply_time_shift(dst_series, delay)
+        metrics = compute_validation_metrics(df_hac, shifted_dst, predictor=predictor,
+                                             smooth_dst_hours=smooth_dst_hours)
+        if metrics and not np.isnan(metrics['correlation']):
+            corr = metrics['correlation']
+            print(f"   Delay {delay:3.0f}h → r = {corr:.3f}")
+            if corr > best_corr:
+                best_corr = corr
+                best_delay = delay
+    if best_corr < 0.1:
+        print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
+        best_delay = 0
+        best_corr = 0.0
+    print(f"🔥 Melhor delay: {best_delay:.0f}h (r = {best_corr:.3f})")
+    return best_delay, best_corr
+
 def calibrate_hac_nonlinear(df_hac_raw, dst_series, delay=0, min_hac=0.01, min_dst=MIN_DST_CALIB,
                             smooth_dst_hours=DST_SMOOTH_HOURS, predictor='hac',
                             transform=CALIBRATION_TRANSFORM):
-    """
-    Retorna slope, intercept para transformação não linear.
-    """
     shifted_dst = apply_time_shift(dst_series, delay)
     df_hac_raw = df_hac_raw.copy()
     shifted_dst = shifted_dst.copy()
@@ -575,7 +573,7 @@ def create_figure(df, baseline_simple_vals, baseline_akasofu_vals, dst_df=None, 
 # FUNÇÃO PRINCIPAL
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC - Heliospheric Accumulated Coupling (versão avançada final)')
+    parser = argparse.ArgumentParser(description='HAC - Heliospheric Accumulated Coupling (versão final)')
     parser.add_argument('--start', default='20000101', help='Data inicial (YYYYMMDD)')
     parser.add_argument('--end', default='20200101', help='Data final (YYYYMMDD)')
     parser.add_argument('--download', action='store_true', help='Forçar download dos dados')
@@ -584,7 +582,7 @@ def main():
     args = parser.parse_args()
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Heliospheric Accumulated Coupling (Versão Avançada Final)")
+    print("🛰️  HAC - Heliospheric Accumulated Coupling (Versão Final)")
     print("="*70)
 
     # Carrega ou baixa dados
@@ -619,33 +617,8 @@ def main():
     if bz_neg == 0:
         print("⚠️  ALERTA: Nenhum ponto com Bz negativo! O acoplamento será zero.")
 
-    # Calcular fator de normalização da fonte (baseado nos valores positivos)
-    Bx = df['bx_gsm'].values
-    By = df['by_gsm'].values
-    Bz = df['bz_gsm'].values
-    V = df['speed'].values
-    N = df['density'].values
-    Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
-    theta = np.arctan2(By, Bz)
-    recon = np.sin(theta / 2)**2
-    bz_sul = -np.minimum(Bz, 0)
-    base = V * bz_sul * recon * np.sqrt(Btot)
-    if USE_DYNAMIC_PRESSURE:
-        Pdyn = N * V**2
-        Pdyn_med = np.median(Pdyn[Pdyn > 0]) if np.any(Pdyn > 0) else 1.0
-        Pdyn_norm = Pdyn / Pdyn_med
-        base *= (1 + DYNAMIC_PRESSURE_FACTOR * np.log1p(Pdyn_norm))
-    base_pos = base[base > 0]
-    if SOURCE_NORM == 'mean':
-        norm_factor = np.mean(base_pos) if len(base_pos) > 0 else 1.0
-    elif SOURCE_NORM == 'percentile':
-        norm_factor = np.percentile(base_pos, SOURCE_NORM_PERCENTILE) if len(base_pos) > 0 else 1.0
-    else:
-        norm_factor = 1.0
-    print(f"\n📊 Normalização da fonte: {SOURCE_NORM} = {norm_factor:.2f}")
-
     # Calcula HAC (primeira passagem sem calibração)
-    df = calculate_hac(df, norm_factor, calib_factor=1.0)
+    df = calculate_hac(df, calib_factor=1.0)
 
     # Calcula baselines (usando nomes diferentes das funções)
     baseline_simple_vals = baseline_simple(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
@@ -698,18 +671,15 @@ def main():
                 calib_slope = 1.0
                 calib_intercept = 0.0
 
-    # Se a calibração foi bem-sucedida, usamos a predição direta sem converter para fator linear
-    # Para manter compatibilidade com o restante (gráficos, etc.), recalibramos o HAC com um fator aproximado
-    # que iguala a média do HAC_raw à média da predição. Mas a validação principal será feita diretamente.
+    # Aplicar calibração: recalcular HAC com fator linear aproximado (apenas para visualização)
     if calib_slope is not None and calib_intercept is not None:
-        # Estimar fator linear médio para ajustar o HAC (apenas para visualização)
         hac_mean = df['HAC_raw'].mean()
         dst_pred_mean = predict_from_calibration(hac_mean, calib_slope, calib_intercept, CALIBRATION_TRANSFORM)
         linear_factor = dst_pred_mean / hac_mean if hac_mean > 0 else 1.0
         if not (0.01 < linear_factor < 100):
             print(f"⚠️ Fator linear {linear_factor:.3f} fora da faixa aceitável (0.01-100). Usando 1.0.")
             linear_factor = 1.0
-        df = calculate_hac(df, norm_factor, calib_factor=linear_factor)
+        df = calculate_hac(df, calib_factor=linear_factor)
         baseline_simple_vals = baseline_simple_vals * linear_factor
         baseline_akasofu_vals = baseline_akasofu_vals * linear_factor
         df_hac = df[['time_tag', 'HAC', 'dHAC_dt']].copy()
@@ -718,13 +688,10 @@ def main():
             df_hac['HAC_ma'] = df['HAC_ma'].copy()
         print(f"✅ HAC recalibrado com fator linear aproximado: {linear_factor:.3f}")
 
-    # Validação direta com a calibração não linear (melhor)
+    # Validação direta com calibração não linear
     print("\n📊 VALIDAÇÃO DIRETA COM CALIBRAÇÃO NÃO LINEAR")
     print("="*50)
     if calib_slope is not None and calib_intercept is not None:
-        # Usar os valores HAC_raw para gerar predição
-        dst_pred = predict_from_calibration(df['HAC_raw'].values, calib_slope, calib_intercept, CALIBRATION_TRANSFORM)
-        # Alinhar temporalmente com Dst suavizado
         shifted_dst = apply_time_shift(dst_df, best_delay)
         merged = pd.merge_asof(df[['time_tag', 'HAC_raw']].sort_values('time_tag'),
                                shifted_dst.sort_values('time_tag'),
@@ -734,9 +701,6 @@ def main():
         merged = merged[merged['dst_smooth'] < 0]
         if len(merged) > 10:
             y_true = -merged['dst_smooth'].values
-            # Predição alinhada
-            # Precisamos obter os índices corretos: usar os mesmos tempos do merged
-            # Para isso, criamos um array de predição alinhado
             merged['dst_pred'] = predict_from_calibration(merged['HAC_raw'].values, calib_slope, calib_intercept, CALIBRATION_TRANSFORM)
             y_pred = merged['dst_pred'].values
             metrics_direct = compute_metrics(y_true, y_pred)
@@ -747,11 +711,10 @@ def main():
                 print(f"   RMSE: {metrics_direct['rmse']:.2f}")
                 print(f"   MAE: {metrics_direct['mae']:.2f}")
 
-    # Validação com o HAC calibrado (linear) – apenas para comparação com baselines
+    # Validação com HAC calibrado linear (para comparação com baselines)
     print("\n📊 VALIDAÇÃO COM HAC CALIBRADO (LINEAR)")
     print("="*50)
     shifted_dst = apply_time_shift(dst_df, best_delay)
-    # Para o modelo principal
     metrics_hac = compute_validation_metrics(df_hac, shifted_dst, predictor=PREDICTOR_TYPE,
                                              smooth_dst_hours=DST_SMOOTH_HOURS)
     if metrics_hac:
@@ -780,7 +743,7 @@ def main():
         print(f"   R²: {metrics_akasofu['r2']:.3f}")
         print(f"   RMSE: {metrics_akasofu['rmse']:.2f}")
 
-    # Limiar HAC dinâmico baseado em Dst real (apenas para referência)
+    # Limiar HAC dinâmico
     tmp = pd.merge_asof(df_hac[['time_tag', 'HAC']].sort_values('time_tag'),
                         shifted_dst.sort_values('time_tag'),
                         on='time_tag', direction='backward')
@@ -805,18 +768,20 @@ def main():
     print("\n" + "="*70)
     print("🎯 RELATÓRIO FINAL")
     print("="*70)
-    print(f"⚙️  Parâmetros do modelo:")
-    print(f"   • Termo fonte: V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (1 + {DYNAMIC_PRESSURE_FACTOR} * log1p(P_dyn_norm))")
-    print(f"   • Normalização da fonte: {SOURCE_NORM} = {norm_factor:.2f}")
-    print(f"   • Memória: H[i] = H[i-1]*exp(-Δt/τ_eff) + S_eff * τ_eff * (1 - exp(-Δt/τ_eff))")
-    print(f"   • τ_eff = τ * (1 + (H/h0)^{LOSS_EXPONENT-1}), gamma = {LOSS_EXPONENT}, h0 = {H0}")
+    print(f"⚙️  Parâmetros do modelo (física final):")
+    print(f"   • Termo fonte: V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (Pdyn/{P0:.1f})^{ALPHA_PDYN:.2f}")
+    print(f"   • Normalização: constante física SOURCE_NORM = {SOURCE_NORM_CONSTANT:.1f}")
+    print(f"   • Memória adaptativa: τ_eff = τ / (1 + {BETA_SOURCE} * S)")
+    print(f"   • Perda não linear: τ_base = τ * (1 + (H/{H0})^{LOSS_EXPONENT-1})")
+    print(f"   • Filtro: H[i] = H[i-1]*α + S_eff * τ_eff * (1-α)")
     print(f"   • τ = {TAU_BASE_HOURS} * ({V_REF}/V)^{TAU_POWER:.1f} h, limitado entre {TAU_MIN_HOURS} e {TAU_MAX_HOURS} h")
     print(f"   • Atraso ótimo: {best_delay}h (correlação máxima: {best_corr:.3f})")
     print(f"   • Calibração: transformação {CALIBRATION_TRANSFORM}")
     if calib_slope is not None:
         print(f"   • Parâmetros calibração: slope={calib_slope:.3f}, intercept={calib_intercept:.3f}")
     print(f"   • Limiar HAC (referência): {hac_threshold:.2f}")
-    print("\n✅ Processamento concluído com sucesso.")
+    print("\n✅ Modelo agora com normalização física, memória adaptativa e pressão dinâmica realista.")
+    print("   Execute com período contendo tempestades (ex: 2000-2020) para validar.")
 
 if __name__ == "__main__":
     main()
