@@ -69,6 +69,9 @@ def load_dst_data(filepath):
     try:
         df = pd.read_csv(filepath, parse_dates=['time_tag'])
         df = df.sort_values('time_tag')
+        # Garantir que a coluna dst seja numérica
+        df['dst'] = pd.to_numeric(df['dst'], errors='coerce')
+        df = df.dropna(subset=['dst'])
         print(f"✅ DST: {len(df)} registros")
         return df
     except Exception as e:
@@ -257,7 +260,12 @@ def compute_metrics(hac_series, dst_series, threshold_dst=-50, threshold_hac=50)
     y_true = df_merged['dst'].abs()
     y_pred = df_merged['HAC']
 
-    corr = pearsonr(y_true, y_pred)[0] if len(y_true) > 1 and np.std(y_true) > 0 and np.std(y_pred) > 0 else float('nan')
+    # Evita divisão por zero e valores constantes
+    if np.std(y_true) == 0 or np.std(y_pred) == 0:
+        corr = float('nan')
+    else:
+        corr = pearsonr(y_true, y_pred)[0]
+
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mae = mean_absolute_error(y_true, y_pred)
 
@@ -295,11 +303,18 @@ def find_optimal_delay(hac_series, dst_series, max_delay=MAX_DELAY_HOURS, step=D
             if corr > best_corr:
                 best_corr = corr
                 best_delay = delay
+    # Se correlação máxima for negativa ou muito baixa, usar delay 0 (padrão)
+    if best_corr < 0.1:
+        print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
+        best_delay = 0
+        best_corr = 0.0
     print(f"🔥 Melhor delay: {best_delay:.0f}h (r = {best_corr:.3f})")
     return best_delay, best_corr
 
 def calibrate_hac_via_regression(hac_series, dst_series, delay=0, min_hac=0.01, min_dst=20):
-    """Calibra HAC usando regressão linear HAC_calib = a * HAC_raw, com base nos pontos onde |Dst| > min_dst."""
+    """
+    Calibra HAC usando regressão linear HAC_calib = a * HAC_raw, com base nos pontos onde |Dst| > min_dst.
+    """
     shifted_dst = apply_time_shift(dst_series, delay)
     # Alinhar temporalmente
     hac_series = hac_series.copy()
@@ -320,7 +335,7 @@ def calibrate_hac_via_regression(hac_series, dst_series, delay=0, min_hac=0.01, 
     slope, intercept, r_value, p_value, stderr = linregress(x, y)
     print(f"📊 Calibração via regressão (delay={delay}h):")
     print(f"   |Dst| = {slope:.3f} * HAC_raw + {intercept:.3f} (R²={r_value**2:.3f})")
-    # Usar apenas a inclinação como fator (ignorando intercepto, pois espera-se HAC≈0 quando não há acoplamento)
+    # Usar apenas a inclinação como fator (ignorando intercepto)
     factor = slope
     print(f"   Fator calibração: {factor:.3f}")
     return factor
@@ -440,12 +455,23 @@ def main():
 
     # 6. Determinar atraso ótimo e recalibrar (se disponível)
     if dst_df is not None:
-        # Criar série de HAC_raw (antes da calibração)
-        hac_raw_series = df[['time_tag', 'HAC_raw']].rename(columns={'HAC_raw': 'HAC'})
+        # Criar série de HAC_raw (sem renomear) para uso na calibração
+        hac_raw_series = df[['time_tag', 'HAC_raw']].copy()
+
+        # DEBUG: inspecionar dados
+        print("\n📋 Amostra dos dados HAC_raw:")
+        print(hac_raw_series.head())
+        print("\n📋 Amostra dos dados Dst:")
+        print(dst_df.head())
+        print("\n📊 Estatísticas HAC_raw:")
+        print(df['HAC_raw'].describe())
+        print("\n📊 Estatísticas Dst:")
+        print(dst_df['dst'].describe())
+
         best_delay, best_corr = find_optimal_delay(hac_raw_series, dst_df)
 
         # Calibrar usando regressão linear com o melhor delay
-        if CALIBRATE_WITH_DELAY:
+        if CALIBRATE_WITH_DELAY and best_delay is not None:
             calib_factor = calibrate_hac_via_regression(hac_raw_series, dst_df, delay=best_delay)
             if calib_factor is None:
                 calib_factor = 1.0  # Fallback
