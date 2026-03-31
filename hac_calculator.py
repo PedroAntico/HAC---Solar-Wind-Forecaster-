@@ -17,7 +17,7 @@ PLASMA_FILE = "data/plasma-7-day.json"
 DST_FILE = "data/dst_data.csv"          # Opcional: colunas 'time_tag', 'dst'
 
 # ============================
-# PARÂMETROS DO MODELO FÍSICO (AJUSTÁVEIS)
+# PARÂMETROS DO MODELO FÍSICO (AJUSTADOS)
 # ============================
 # Memória (τ) e variação com velocidade
 TAU_BASE_HOURS = 2.0
@@ -31,26 +31,24 @@ USE_AKASOFU = False
 USE_DENSITY = True
 USE_BY_CLOCK = True
 
-# Escala do termo fonte (agora neutra; calibração fará o ajuste)
-SOURCE_SCALE_FACTOR = 1.0          # Deixe 1.0 para deixar a calibração fazer o ajuste
-MAX_SOURCE = 5000.0                # Clipping de segurança (ainda pode ser útil)
+# Escala do termo fonte (restaurada para o valor que funcionava)
+SOURCE_SCALE_FACTOR = 200.0          # ← voltou
+MAX_SOURCE = 5000.0                  # clipping de segurança (ainda pode ser útil)
 
-# Expoente de perda (1.0 = linear, >1.0 = supra-linear)
-LOSS_EXPONENT = 1.2                # Teste: 1.0, 1.2, 1.5
+# Expoente de perda (1.0 = linear, 1.2 = supra-linear)
+LOSS_EXPONENT = 1.2                  # pode testar 1.0, 1.2, 1.5
 
-# Saturação física: S_eff = S / (1 + H / H_sat)
-# Se H_SATURATION <= 0, a saturação é desativada.
-H_SATURATION = 1000.0              # Ajuste conforme necessário
+# Saturação física: desativada por enquanto
+H_SATURATION = 0                     # 0 = desligado
 
-# Suavização da derivada (para análise, não usado no núcleo)
+# Suavização da derivada (para análise)
 USE_SAVITZKY_GOLAY = True
 SG_WINDOW = 7
 SG_ORDER = 2
 
 # Limiares para validação de tempestade
-DST_THRESHOLD = -50                # nT – tempestade se Dst < -50
-# O limiar HAC será calculado dinamicamente como mediana dos HAC nos momentos de Dst < -50
-USE_DYNAMIC_HAC_THRESHOLD = True
+DST_THRESHOLD = -50                  # nT – tempestade se Dst < -50
+USE_DYNAMIC_HAC_THRESHOLD = True     # calcula limiar baseado em Dst real
 
 # Parâmetros de validação
 MAX_DELAY_HOURS = 12
@@ -60,7 +58,7 @@ CALIBRATE_WITH_DELAY = True
 # Suavização do Dst na validação (rolling window em horas)
 DST_SMOOTH_HOURS = 3
 
-# Min |Dst| para pontos de calibração (reduzido para capturar mais eventos)
+# Min |Dst| para pontos de calibração
 MIN_DST_CALIB = 5
 
 # ============================
@@ -154,7 +152,7 @@ def compute_source(df, use_akasofu=USE_AKASOFU, use_density=USE_DENSITY, use_by_
         return compute_source_simplified(Bx, By, Bz, V, N, use_density, use_by_clock)
 
 # ============================
-# MODELOS BASELINE (COM PERDA NÃO LINEAR E SATURAÇÃO)
+# MODELOS BASELINE (COM PERDA NÃO LINEAR)
 # ============================
 def compute_baseline_simple(df, tau_base, v_ref, power, tau_min, tau_max,
                             loss_exp=LOSS_EXPONENT, h_sat=H_SATURATION):
@@ -179,7 +177,7 @@ def compute_baseline_simple(df, tau_base, v_ref, power, tau_min, tau_max,
 
     hac = np.zeros(len(times))
     for i in range(1, len(hac)):
-        # Aplica saturação na fonte (se h_sat > 0)
+        # Saturação (desativada se h_sat <= 0)
         if h_sat > 0:
             source_eff = source[i] / (1 + hac[i-1] / h_sat)
         else:
@@ -230,7 +228,7 @@ def compute_baseline_akasofu(df, tau_base, v_ref, power, tau_min, tau_max,
     return hac
 
 # ============================
-# CÁLCULO DO HAC PRINCIPAL (COM PERDA NÃO LINEAR E SATURAÇÃO)
+# CÁLCULO DO HAC PRINCIPAL (COM PERDA NÃO LINEAR)
 # ============================
 def calculate_hac_physical(df, calib_factor=1.0, tau_base=TAU_BASE_HOURS, v_ref=V_REF,
                            power=TAU_POWER, tau_min=TAU_MIN_HOURS, tau_max=TAU_MAX_HOURS,
@@ -254,12 +252,10 @@ def calculate_hac_physical(df, calib_factor=1.0, tau_base=TAU_BASE_HOURS, v_ref=
 
     hac = np.zeros(len(times))
     for i in range(1, len(hac)):
-        # Saturação física
         if h_sat > 0:
             source_eff = source[i] / (1 + hac[i-1] / h_sat)
         else:
             source_eff = source[i]
-        # Perda não linear
         loss = (hac[i-1]**loss_exp) / (tau_seconds[i] + 1e-6)
         hac[i] = hac[i-1] + (source_eff - loss) * dt_seconds[i]
         hac[i] = max(0, hac[i])
@@ -300,14 +296,16 @@ def compute_metrics(df_hac, dst_series, threshold_dst=-50, threshold_hac=None,
     if len(df_hac) < 10 or len(dst_series) < 10:
         return None
 
+    # Merge asof com direction='backward' para garantir causalidade
     merged = pd.merge_asof(
         df_hac.sort_values('time_tag'),
         dst_series.sort_values('time_tag'),
         on='time_tag',
-        direction='nearest'
+        direction='backward'          # ← causalidade garantida
     )
     merged = merged.dropna(subset=['dst', 'HAC'])
 
+    # Suavização do Dst
     merged = merged.set_index('time_tag')
     if len(merged) > 1:
         median_dt = merged.index.to_series().diff().median().total_seconds()
@@ -320,6 +318,7 @@ def compute_metrics(df_hac, dst_series, threshold_dst=-50, threshold_hac=None,
     merged = merged.dropna(subset=['dst_smooth'])
     merged = merged.reset_index()
 
+    # Apenas Dst < 0
     merged = merged[merged['dst_smooth'] < 0]
     if len(merged) < 10:
         return None
@@ -388,9 +387,11 @@ def calibrate_hac_via_regression(df_hac_raw, dst_series, delay=0, min_hac=0.01, 
 
     merged = pd.merge_asof(df_hac_raw.sort_values('time_tag'),
                            shifted_dst.sort_values('time_tag'),
-                           on='time_tag', direction='nearest')
+                           on='time_tag',
+                           direction='backward')          # ← causalidade
     merged = merged.dropna(subset=['HAC_raw', 'dst'])
 
+    # Suavização do Dst
     merged = merged.set_index('time_tag')
     if len(merged) > 1:
         median_dt = merged.index.to_series().diff().median().total_seconds()
@@ -414,7 +415,11 @@ def calibrate_hac_via_regression(df_hac_raw, dst_series, delay=0, min_hac=0.01, 
     slope, intercept, r_value, p_value, stderr = linregress(x, y)
     print(f"📊 Calibração via regressão (delay={delay}h, min|Dst|={min_dst} nT):")
     print(f"   |Dst_smooth| = {slope:.3f} * HAC_raw + {intercept:.3f} (R²={r_value**2:.3f})")
-    factor = slope
+
+    # Proteção: só usa slope se for positivo e razoável
+    factor = slope if slope > 0.01 else 1.0
+    if factor != slope:
+        print(f"   ⚠️ slope muito pequeno ({slope:.3f}), usando fator=1.0")
     print(f"   Fator calibração: {factor:.3f}")
     return factor
 
@@ -426,7 +431,7 @@ def predictive_analysis(df, dH_threshold=5.0, lookahead_hours=3, dst_series=None
     dst_shifted = apply_time_shift(dst_series, -lookahead_hours)
     merged = pd.merge_asof(df[['time_tag', 'alert']].sort_values('time_tag'),
                            dst_shifted[['time_tag', 'dst']].sort_values('time_tag'),
-                           on='time_tag', direction='nearest')
+                           on='time_tag', direction='backward')
     merged = merged.dropna()
     true_storm = merged['dst'] < threshold_dst
     pred_alert = merged['alert']
@@ -449,7 +454,7 @@ def create_comparison_figure(df, baseline_simple, baseline_akasofu, dst_df=None,
     axes[0].set_ylabel('Índice')
     axes[0].legend(loc='upper left')
     axes[0].grid(True, alpha=0.3)
-    axes[0].set_title('Comparação dos Modelos de Acoplamento (perda não linear, saturação)')
+    axes[0].set_title('Comparação dos Modelos de Acoplamento')
 
     if dst_df is not None:
         if delay > 0:
@@ -489,7 +494,7 @@ def create_comparison_figure(df, baseline_simple, baseline_akasofu, dst_df=None,
 
 def main():
     print("\n" + "="*70)
-    print("🛰️  HAC - MODELO AVANÇADO: perda não linear + saturação + Dst baseado")
+    print("🛰️  HAC - MODELO FINAL: perda não linear, escala correta, causalidade garantida")
     print("="*70)
 
     # Carregar dados OMNI
@@ -575,14 +580,11 @@ def main():
             df_hac = df[['time_tag', 'HAC']].copy()
 
         # Calcular limiar HAC baseado em Dst real (somente nos momentos de tempestade)
-        # Primeiro, alinhar HAC com Dst (com delay ótimo) para extrair os valores nos tempos de tempestade
         shifted_dst = apply_time_shift(dst_df, best_delay)
-        # Suavizar Dst (como nas métricas) para obter os índices de tempestade
         tmp = pd.merge_asof(df_hac.sort_values('time_tag'),
                             shifted_dst.sort_values('time_tag'),
-                            on='time_tag', direction='nearest')
+                            on='time_tag', direction='backward')
         tmp = tmp.dropna(subset=['dst'])
-        # Suavização rápida para definir Dst suavizado
         tmp = tmp.set_index('time_tag')
         if len(tmp) > 1:
             median_dt = tmp.index.to_series().diff().median().total_seconds()
@@ -598,7 +600,6 @@ def main():
             hac_threshold = np.median(storm_hac_vals)
             print(f"\n📊 Limiar HAC baseado em tempestade real (Dst < {DST_THRESHOLD} nT): {hac_threshold:.2f}")
         else:
-            # fallback: percentil 90
             hac_threshold = np.percentile(df['HAC'], 90)
             print(f"\n⚠️ Nenhum ponto com Dst < {DST_THRESHOLD} nT. Usando percentil 90: {hac_threshold:.2f}")
 
@@ -655,10 +656,10 @@ def main():
     print("="*70)
     print(f"⚙️  Parâmetros do modelo (configuração final):")
     print(f"   • Perda: dH/dt = S_eff - H^{LOSS_EXPONENT}/τ")
-    print(f"   • Saturação: S_eff = S / (1 + H/{H_SATURATION})" if H_SATURATION > 0 else "   • Saturação: desativada")
+    print(f"   • Saturação: {'desativada' if H_SATURATION <= 0 else f'ativa (H_sat={H_SATURATION})'}")
     print(f"   • τ = {TAU_BASE_HOURS} * ({V_REF}/V)^{TAU_POWER:.1f} h, limitado entre {TAU_MIN_HOURS} e {TAU_MAX_HOURS} h")
     print(f"   • Termo fonte: (-Bz*V) * sqrt(N) * sin²(θ/2) (densidade e ângulo de clock ATIVOS)")
-    print(f"   • Escala do termo fonte: /{SOURCE_SCALE_FACTOR:.1f} (neutra, calibração ajusta)")
+    print(f"   • Escala do termo fonte: /{SOURCE_SCALE_FACTOR:.1f}")
     if dst_df is not None:
         print(f"   • Atraso ótimo: {best_delay}h (correlação máxima: {best_corr:.3f})")
         print(f"   • Calibração: fator multiplicativo {calib_factor:.3f}")
@@ -666,7 +667,7 @@ def main():
         print(f"   • Alvo de validação: -Dst suavizado (intensidade da tempestade)")
         print(f"   • Limiar HAC: mediana nos momentos de Dst < {DST_THRESHOLD} nT = {hac_threshold:.2f}")
     print(f"   • Derivada: {'suavizada (SG)' if USE_SAVITZKY_GOLAY else 'bruta'}")
-    print("\n✅ Modelo com todas as melhorias: perda não linear, saturação física e limiar baseado em Dst.")
+    print("\n✅ Modelo com escala corrigida, causalidade garantida e calibração protegida.")
     print("="*70)
 
 if __name__ == "__main__":
