@@ -20,28 +20,23 @@ CALIBRATION_FILE = "data/eventos_referencia.csv"  # Opcional: colunas 'data', 'h
 # ============================
 # PARÂMETROS DO MODELO FÍSICO
 # ============================
-# Constante de tempo base e variação contínua
 TAU_BASE_HOURS = 4.0        # Memória base (horas)
 V_REF = 400.0               # Velocidade de referência (km/s)
 TAU_POWER = 0.3             # Expoente para variação suave
 TAU_MIN_HOURS = 2.0
 TAU_MAX_HOURS = 8.0
 
-# Termo fonte
 USE_AKASOFU = False         # False usa versão simplificada com ângulo de clock
 USE_DENSITY = True          # Inclui sqrt(N) no termo fonte
 USE_BY_CLOCK = True         # Usa ângulo de clock (sin²(θ/2)) para modular
 
-# Suavização da derivada
 USE_SAVITZKY_GOLAY = True
 SG_WINDOW = 7
 SG_ORDER = 2
 
-# Limiares para validação de tempestade (Dst e HAC)
 DST_THRESHOLD = -50          # nT – tempestade se Dst < -50
-HAC_THRESHOLD = 50           # Valor correspondente de HAC (será ajustado dinamicamente)
+HAC_THRESHOLD = 50           # Valor correspondente de HAC (ajustável)
 
-# Parâmetros de validação
 MAX_DELAY_HOURS = 6          # Atraso máximo a testar (horas)
 DELAY_STEP_HOURS = 1         # Passo de atraso
 CALIBRATE_WITH_DELAY = True  # Se True, usa o delay ótimo para calibração
@@ -69,7 +64,6 @@ def load_dst_data(filepath):
     try:
         df = pd.read_csv(filepath, parse_dates=['time_tag'])
         df = df.sort_values('time_tag')
-        # Garantir que a coluna dst seja numérica
         df['dst'] = pd.to_numeric(df['dst'], errors='coerce')
         df = df.dropna(subset=['dst'])
         print(f"✅ DST: {len(df)} registros")
@@ -91,7 +85,6 @@ def prepare_merged_data(mag_df, plasma_df):
     return df
 
 def apply_time_shift(df, hours):
-    """Aplica deslocamento temporal (negativo = antecipa, positivo = atrasa)."""
     shifted = df.copy()
     shifted['time_tag'] = shifted['time_tag'] - pd.Timedelta(hours=hours)
     return shifted
@@ -105,7 +98,7 @@ def compute_source_akasofu(Bx, By, Bz, V, N):
     sin_theta2 = np.sqrt((1 - cos_theta) / 2)
     sin4 = sin_theta2**4
     epsilon = V * (Btot**2) * sin4
-    return epsilon / 1e6   # ajuste de escala
+    return epsilon / 1e6
 
 def compute_source_simplified(Bx, By, Bz, V, N, use_density=True, use_by_clock=True):
     source = np.zeros_like(Bz)
@@ -303,7 +296,6 @@ def find_optimal_delay(hac_series, dst_series, max_delay=MAX_DELAY_HOURS, step=D
             if corr > best_corr:
                 best_corr = corr
                 best_delay = delay
-    # Se correlação máxima for negativa ou muito baixa, usar delay 0 (padrão)
     if best_corr < 0.1:
         print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
         best_delay = 0
@@ -335,7 +327,6 @@ def calibrate_hac_via_regression(hac_series, dst_series, delay=0, min_hac=0.01, 
     slope, intercept, r_value, p_value, stderr = linregress(x, y)
     print(f"📊 Calibração via regressão (delay={delay}h):")
     print(f"   |Dst| = {slope:.3f} * HAC_raw + {intercept:.3f} (R²={r_value**2:.3f})")
-    # Usar apenas a inclinação como fator (ignorando intercepto)
     factor = slope
     print(f"   Fator calibração: {factor:.3f}")
     return factor
@@ -344,17 +335,11 @@ def calibrate_hac_via_regression(hac_series, dst_series, delay=0, min_hac=0.01, 
 # ANÁLISE PREDITIVA COM dHAC/dt
 # ============================
 def predictive_analysis(df, dH_threshold=5.0, lookahead_hours=3, dst_series=None, threshold_dst=-50):
-    """
-    Avalia se dHAC/dt > limiar precede tempestade.
-    Se dst_series fornecido, calcula POD/FAR para previsão.
-    """
     if dst_series is None:
         print("   Sem dados de Dst, não é possível avaliar predição.")
         return
-    # Criar sinal de alerta baseado em dHAC/dt
     df['alert'] = df['dHAC_dt'] > dH_threshold
-    # Deslocar Dst para frente (para verificar se ocorre tempestade após alerta)
-    dst_shifted = apply_time_shift(dst_series, -lookahead_hours)  # negativo = olhar para frente
+    dst_shifted = apply_time_shift(dst_series, -lookahead_hours)
     merged = pd.merge_asof(df[['time_tag', 'alert']].sort_values('time_tag'),
                            dst_shifted[['time_tag', 'dst']].sort_values('time_tag'),
                            on='time_tag', direction='nearest')
@@ -376,7 +361,6 @@ def create_comparison_figure(df, baseline_simple_calib, baseline_akasofu_calib, 
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
 
-    # Painel 1: HAC e baselines (ambos calibrados)
     axes[0].plot(df['time_tag'], df['HAC'], label='HAC (modelo principal)', color='#d62728', linewidth=2)
     axes[0].plot(df['time_tag'], baseline_simple_calib, label='Baseline: (-Bz*V) (calibrado)', color='#1f77b4', linewidth=1.5, alpha=0.7)
     axes[0].plot(df['time_tag'], baseline_akasofu_calib, label='Baseline: Akasofu ε (calibrado)', color='#ff7f0e', linewidth=1.5, alpha=0.7)
@@ -385,7 +369,6 @@ def create_comparison_figure(df, baseline_simple_calib, baseline_akasofu_calib, 
     axes[0].grid(True, alpha=0.3)
     axes[0].set_title('Comparação dos Modelos de Acoplamento Heliosférico')
 
-    # Painel 2: Dst (com delay aplicado se necessário)
     if dst_df is not None:
         if delay > 0:
             dst_shifted = apply_time_shift(dst_df, delay)
@@ -400,7 +383,6 @@ def create_comparison_figure(df, baseline_simple_calib, baseline_akasofu_calib, 
     else:
         axes[1].set_visible(False)
 
-    # Painel 3: dHAC/dt
     axes[2].plot(df['time_tag'], df['dHAC_dt'], color='#9b59b6', linewidth=1.5, label='dHAC/dt')
     axes[2].axhline(y=0, color='black', linestyle='--', alpha=0.5)
     axes[2].set_ylabel('dHAC/dt [1/h]')
@@ -421,7 +403,7 @@ def main():
     print("🛰️  HAC - HELIOSPHERIC ACCUMULATED COUPLING (MODELO FÍSICO VALIDADO)")
     print("="*70)
 
-    # 1. Carregar dados OMNI
+    # Carregar dados OMNI
     print("\n📥 Carregando dados OMNI...")
     mag_df = load_omni_data(MAG_FILE)
     plasma_df = load_omni_data(PLASMA_FILE)
@@ -429,7 +411,7 @@ def main():
         print("❌ Falha crítica no carregamento de dados.")
         return
 
-    # 2. Preparar dados
+    # Preparar dados
     print("\n🔧 Preparando e fundindo dados...")
     df = prepare_merged_data(mag_df, plasma_df)
     if len(df) < 10:
@@ -438,58 +420,74 @@ def main():
     print(f"   Dados válidos: {len(df)} pontos")
     print(f"   Período: {df['time_tag'].min()} a {df['time_tag'].max()}")
 
-    # 3. Calcular HAC_raw (sem calibração)
+    # Verificação rápida de Bz sul
+    bz_neg_count = (df['bz_gsm'] < 0).sum()
+    print(f"\n🔎 Bz sul: {bz_neg_count} pontos ({bz_neg_count/len(df)*100:.1f}%)")
+    if bz_neg_count == 0:
+        print("⚠️  ALERTA: Nenhum ponto com Bz negativo detectado! O acoplamento será zero.")
+        print("   Verifique os dados de IMF ou considere usar By/Bz combinados.")
+
+    # Calcular HAC_raw (sem calibração)
     df = calculate_hac_physical(df, calib_factor=1.0)
 
-    # 4. Calcular baselines (não calibrados)
+    # Calcular baselines (não calibrados)
     baseline_simple = compute_baseline_simple(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
     baseline_akasofu = compute_baseline_akasofu(df, TAU_BASE_HOURS, V_REF, TAU_POWER, TAU_MIN_HOURS, TAU_MAX_HOURS)
 
-    # 5. Carregar Dst se disponível
+    # Carregar Dst
     dst_df = load_dst_data(DST_FILE) if DST_FILE else None
 
-    # Inicializar variáveis para delay e calibração
+    # --- PERÍODO COMUM ---
+    if dst_df is not None:
+        start = df['time_tag'].min()
+        end = df['time_tag'].max()
+        original_len = len(dst_df)
+        dst_df = dst_df[(dst_df['time_tag'] >= start) & (dst_df['time_tag'] <= end)]
+        print(f"\n📅 Filtragem Dst: {original_len} → {len(dst_df)} pontos no período comum.")
+        if len(dst_df) == 0:
+            print("⚠️  Nenhum dado Dst no período dos dados OMNI. Validação impossível.")
+            dst_df = None
+
+    # Inicializar variáveis
     best_delay = 0
     best_corr = float('nan')
     calib_factor = 1.0
 
-    # 6. Determinar atraso ótimo e recalibrar (se disponível)
+    # Calibração e validação apenas se houver Dst no período comum
     if dst_df is not None:
-        # Criar série de HAC_raw (sem renomear) para uso na calibração
-        hac_raw_series = df[['time_tag', 'HAC_raw']].copy()
+        # Criar série para validação (renomeia HAC_raw para HAC)
+        hac_raw_series = df[['time_tag', 'HAC_raw']].rename(columns={'HAC_raw': 'HAC'})
 
-        # DEBUG: inspecionar dados
-        print("\n📋 Amostra dos dados HAC_raw:")
+        # Debug dos dados
+        print("\n📋 Amostra HAC (raw):")
         print(hac_raw_series.head())
-        print("\n📋 Amostra dos dados Dst:")
+        print("\n📋 Amostra Dst:")
         print(dst_df.head())
         print("\n📊 Estatísticas HAC_raw:")
         print(df['HAC_raw'].describe())
         print("\n📊 Estatísticas Dst:")
         print(dst_df['dst'].describe())
 
+        # Encontrar delay ótimo
         best_delay, best_corr = find_optimal_delay(hac_raw_series, dst_df)
 
-        # Calibrar usando regressão linear com o melhor delay
-        if CALIBRATE_WITH_DELAY and best_delay is not None:
-            calib_factor = calibrate_hac_via_regression(hac_raw_series, dst_df, delay=best_delay)
+        # Calibrar
+        if CALIBRATE_WITH_DELAY:
+            # Para calibração, precisamos da série com HAC_raw (não renomeada)
+            hac_raw_for_calib = df[['time_tag', 'HAC_raw']].copy()
+            calib_factor = calibrate_hac_via_regression(hac_raw_for_calib, dst_df, delay=best_delay)
             if calib_factor is None:
-                calib_factor = 1.0  # Fallback
-            else:
-                print(f"✅ HAC será recalibrado com fator {calib_factor:.3f} (delay={best_delay}h)")
-        else:
-            calib_factor = 1.0
+                calib_factor = 1.0
 
-    # 7. Aplicar calibração final ao HAC e aos baselines
+    # Aplicar calibração final
     df = calculate_hac_physical(df, calib_factor=calib_factor)
     baseline_simple_calib = baseline_simple * calib_factor
     baseline_akasofu_calib = baseline_akasofu * calib_factor
 
-    # 8. Validação final (com delay ótimo)
+    # Validação final
     print("\n📊 VALIDAÇÃO DO MODELO (com atraso ótimo)")
     print("="*50)
     if dst_df is not None:
-        # Aplicar delay ao Dst para validação
         shifted_dst = apply_time_shift(dst_df, best_delay)
         hac_series = df[['time_tag', 'HAC']].copy()
         metrics_hac = compute_metrics(hac_series, shifted_dst, DST_THRESHOLD, HAC_THRESHOLD)
@@ -500,7 +498,6 @@ def main():
             print(f"   MAE: {metrics_hac['mae']:.2f}")
             print(f"   POD: {metrics_hac['pod']:.3f} | FAR: {metrics_hac['far']:.3f} | CSI: {metrics_hac['csi']:.3f}")
 
-        # Avaliar baselines calibrados
         simple_series = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': baseline_simple_calib})
         metrics_simple = compute_metrics(simple_series, shifted_dst, DST_THRESHOLD, HAC_THRESHOLD)
         if metrics_simple:
@@ -517,20 +514,19 @@ def main():
             print(f"   RMSE: {metrics_akasofu['rmse']:.2f}")
             print(f"   POD: {metrics_akasofu['pod']:.3f} | FAR: {metrics_akasofu['far']:.3f} | CSI: {metrics_akasofu['csi']:.3f}")
 
-        # 9. Análise preditiva com dHAC/dt
         predictive_analysis(df, dH_threshold=5.0, lookahead_hours=3, dst_series=dst_df, threshold_dst=DST_THRESHOLD)
     else:
-        print("⚠️ Dados de Dst não disponíveis. Validação não realizada.")
+        print("⚠️ Dados de Dst não disponíveis no período comum. Validação não realizada.")
 
-    # 10. Gerar figura comparativa (com delay opcional para visualização)
+    # Gráfico
     create_comparison_figure(df, baseline_simple_calib, baseline_akasofu_calib, dst_df, "hac_comparison.png", delay=best_delay if dst_df is not None else 0)
 
-    # 11. Salvar dados
+    # Salvar dados
     csv_file = "hac_resultados_finais.csv"
     df.to_csv(csv_file, index=False, encoding='utf-8')
     print(f"\n💾 Dados processados salvos: {csv_file}")
 
-    # 12. Relatório final
+    # Relatório final
     print("\n" + "="*70)
     print("🎯 RELATÓRIO FINAL")
     print("="*70)
