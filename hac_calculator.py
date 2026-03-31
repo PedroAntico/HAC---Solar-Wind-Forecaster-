@@ -112,9 +112,9 @@ def download_omni(start_date, end_date, resolution="hour"):
     sep=r"\s+",
     engine="python",
     header=None,
-    na_values=[9999, 9999.99, 99999.0, 99999.99]
-)
+    na_values=[9999, 9999.99, 99999.0, 99999.99]    
     )
+    
     df.columns = [
         "year", "doy", "hour",
         "bx_gsm", "by_gsm", "bz_gsm",
