@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Burton Físico)
-
-Modelo HAC: acumulação de energia com perda adaptativa.
-Modelo Dst (Burton et al.): dDst/dt = Q(t) - (Dst - b*sqrt(Pdyn))/τ
-onde Q(t) é o termo fonte original (injeção de energia) e Pdyn a pressão dinâmica.
-
+HAC - Heliospheric Accumulated Coupling (Versão Final com Burton Corrigido)
+Modelo Dst baseado em Burton et al.:
+    Dst* = Dst - b * sqrt(Pdyn)
+    dDst/dt = -α * Ey - Dst*/τ
+    Ey = V * max(0, -Bz)   (campo elétrico de reconexão)
 Uso:
     python hac_calculator.py --omni data/omni_2000_2020.csv --dst data/dst_kyoto_2000_2020.csv
-    python hac_calculator.py --dst_model burton --tau_hours 7 --b 0.2 --scale_q 0.01
+    python hac_calculator.py --dst_model burton --tau_hours 7 --b 0.2 --alpha 0.001
 """
 
 import pandas as pd
@@ -92,7 +91,7 @@ def apply_time_shift(df, hours):
     return df
 
 # ============================
-# TERMOS FONTE
+# TERMOS FONTE (para HAC)
 # ============================
 def compute_source_simple(df, _config=None):
     Bz = df['bz_gsm'].values
@@ -175,22 +174,29 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     out['HAC_raw'] = H
     out['HAC_smooth'] = H_smooth
     out['dHAC_dt'] = dH_dt
-    out['source'] = source   # Salvar a fonte original (injeção de energia)
+    out['source'] = source   # fonte original (pode ser usada no Burton)
     return out
 
 # ============================
-# MODELO DST (BURTON FÍSICO)
+# MODELO DST (BURTON CORRIGIDO)
 # ============================
-def compute_dst_burton(df, tau_hours=7.0, b=0.2, scale_q=0.01):
+def compute_dst_burton(df, tau_hours=7.0, b=0.2, alpha=0.001):
     """
-    Modelo de Burton:
-        Dst* = Dst - b * sqrt(Pdyn)
-        dDst/dt = Q(t) - Dst*/τ
-    Onde Q(t) é a fonte (injeção de energia) e Pdyn a pressão dinâmica.
+    Modelo de Burton com correções:
+        - Usa Ey = V * max(0, -Bz) como fonte
+        - Unidade de tempo: dt_hours
+        - Sinal correto: injeção positiva causa Dst negativo
+        - Termo de perda: -Dst_star/tau
     """
-    times = df['time_tag'].values
-    Q = df['source'].values                     # injeção original
+    # Campo elétrico de reconexão (Ey)
+    Bz = df['bz_gsm'].values
+    V = df['speed'].values
+    Ey = V * np.maximum(0, -Bz)          # mV/m? unidade arbitrária, mas escalaremos
+
+    # Pressão dinâmica
     Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
+
+    times = df['time_tag'].values
     dt_sec = np.zeros(len(times))
     if len(times) > 1:
         diffs = np.diff(times).astype('timedelta64[s]').astype(float)
@@ -200,21 +206,21 @@ def compute_dst_burton(df, tau_hours=7.0, b=0.2, scale_q=0.01):
         dt_sec[:] = 60.0
 
     tau_sec = tau_hours * 3600.0
-    Dst_model = np.zeros(len(times))
+    Dst = np.zeros(len(times))
     for i in range(1, len(times)):
-        # Dst corrigido pela pressão dinâmica
-        Dst_star = Dst_model[i-1] - b * np.sqrt(Pdyn[i])
-        # Taxa de variação
-        dDst = scale_q * Q[i] - Dst_star / tau_sec
-        Dst_model[i] = Dst_model[i-1] + dDst * dt_sec[i]
-    return Dst_model
+        dt_hours = dt_sec[i] / 3600.0                # ← correção chave
+        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])   # Dst corrigido
+        # Equação de Burton: dDst/dt = -α * Ey - Dst*/τ
+        dDst = -alpha * Ey[i] - Dst_star / tau_sec   # nT/h
+        Dst[i] = Dst[i-1] + dDst * dt_hours
+        # Limites para estabilidade numérica
+        Dst[i] = max(-500, min(50, Dst[i]))
+    return Dst
 
 def compute_dst_direct(df):
-    """Modelo direto: Dst_model = -HAC (proxy simples)"""
     return -df['HAC'].values
 
 def compute_dst_deriv(df, k=0.5):
-    """Modelo derivativo: Dst_model = -HAC + k * dH/dt"""
     return -df['HAC'].values + k * df['dHAC_dt'].values
 
 # ============================
@@ -287,7 +293,7 @@ def find_optimal_delay(df_model, dst_series, max_delay, step, smooth_hours):
     return best_delay, best_corr
 
 def calibrate_dst_model(df_model, dst_series, delay, smooth_hours):
-    """Ajusta um fator linear para Dst_model se necessário (para direct/deriv)."""
+    """Ajusta um fator linear para Dst_model (para direct/deriv)."""
     shifted = apply_time_shift(dst_series, delay)
     merged = pd.merge_asof(df_model[['time_tag', 'Dst_model']].sort_values('time_tag'),
                            shifted.sort_values('time_tag'),
@@ -373,7 +379,7 @@ def main():
     parser.add_argument('--k', type=float, default=0.5, help='Coeficiente para modelo deriv')
     parser.add_argument('--tau_hours', type=float, default=7.0, help='Constante de tempo (Burton)')
     parser.add_argument('--b', type=float, default=0.2, help='Coeficiente da pressão dinâmica (Burton)')
-    parser.add_argument('--scale_q', type=float, default=0.01, help='Fator de escala para Q (Burton)')
+    parser.add_argument('--alpha', type=float, default=0.001, help='Fator de escala para Ey (Burton)')
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
     parser.add_argument('--no_calibrate', action='store_true', help='Não aplicar calibração linear')
@@ -387,7 +393,7 @@ def main():
     if args.dst_model == 'deriv':
         print(f"   Coeficiente k = {args.k}")
     elif args.dst_model == 'burton':
-        print(f"   τ = {args.tau_hours} h, b = {args.b}, scale_Q = {args.scale_q}")
+        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}")
     print("="*70)
 
     test_physics(config)
@@ -451,7 +457,7 @@ def main():
     elif args.dst_model == 'deriv':
         df['Dst_model'] = compute_dst_deriv(df, k=args.k)
     else:  # burton
-        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b, scale_q=args.scale_q)
+        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b, alpha=args.alpha)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
