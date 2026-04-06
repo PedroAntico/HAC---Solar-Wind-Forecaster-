@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Estável)
-Modelo corrigido: integração com ganho controlado, sem multiplicação por tau_eff,
-normalização fixa e limite superior físico.
-
-Uso:
-    python hac_calculator.py --omni data/omni_2000_2020.csv --dst data/dst_kyoto_2000_2020.csv
-    python hac_calculator.py --model simple   # baseline (-Bz*V)
-    python hac_calculator.py --model akasofu  # baseline Akasofu ε
-    python hac_calculator.py --simplify       # modelo simplificado (sem Pdyn, sem perda não linear)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Análise de Sinal e Derivada)
+Correções:
+- Teste de sinal invertido (correlação com -HAC)
+- Uso de derivada como preditor (mais físico para início de tempestade)
+- Redução da suavização do Dst (ou eliminação durante busca de delay)
+- Adição da coluna dHAC_dt nos DataFrames de baseline
+- Delay até 24h, com passos de 1h
 """
 
 import pandas as pd
@@ -30,6 +28,11 @@ M_P = 1.6726e-27      # kg
 CM3_TO_M3 = 1e6
 KMS_TO_MS = 1e3
 
+def compute_pdyn_nPa(N_cm3, V_kms):
+    N_m3 = N_cm3 * CM3_TO_M3
+    V_ms = V_kms * KMS_TO_MS
+    return M_P * N_m3 * V_ms**2 * 1e9
+
 # ============================
 # CLASSE DE CONFIGURAÇÃO
 # ============================
@@ -38,33 +41,31 @@ class Config:
         self.alpha_pdyn = alpha_pdyn
         self.simplify = simplify
         self.model = model
-
-        # Parâmetros de memória
         self.tau_base_hours = 3.0
         self.v_ref = 400.0
         self.tau_power = 0.3
         self.tau_min_hours = 1.0
         self.tau_max_hours = 6.0
-
-        # Termo fonte
         self.use_by_clock = True
         self.use_dynamic_pressure = not simplify
         self.p0 = 2.0
-
-        # Adaptação e perda (desligadas no modo simplify)
         self.beta_source = 0.0 if simplify else 0.5
         self.loss_exponent = 1.0 if simplify else 1.5
         self.h0 = 100.0
-
-        # Clipping e limite do HAC
         self.max_source_physical = 10000.0
-        self.max_hac = 1000.0            # Limite físico do HAC (evita explosão)
+        self.max_hac = 500.0
         self.use_savgol = True
         self.sg_window = 7
         self.sg_order = 2
+        self.source_norm_constant = self._compute_norm()
 
-        # Normalização da fonte (agora fixa, não derivada de condições típicas)
-        self.source_norm_constant = 1000.0   # valor fixo robusto
+    def _compute_norm(self):
+        V = 400.0
+        Bz = -5.0
+        B = 7.0
+        Pdyn = 2.0
+        base = V * (-Bz) * np.sqrt(B) * (Pdyn/self.p0)**self.alpha_pdyn
+        return base / 100.0
 
     def __repr__(self):
         return (f"Config(model={self.model}, simplify={self.simplify}, "
@@ -88,13 +89,8 @@ def apply_time_shift(df, hours):
     df['time_tag'] = df['time_tag'] - pd.Timedelta(hours=hours)
     return df
 
-def compute_pdyn_nPa(N_cm3, V_kms):
-    N_m3 = N_cm3 * CM3_TO_M3
-    V_ms = V_kms * KMS_TO_MS
-    return M_P * N_m3 * V_ms**2 * 1e9
-
 # ============================
-# TERMOS FONTE (MANTIDOS IGUAIS)
+# TERMOS FONTE
 # ============================
 def compute_source_simple(df, _config=None):
     Bz = df['bz_gsm'].values
@@ -116,25 +112,21 @@ def compute_source_akasofu(df, _config=None):
 def compute_source_advanced(df, config):
     Bx, By, Bz = df['bx_gsm'].values, df['by_gsm'].values, df['bz_gsm'].values
     V, N = df['speed'].values, df['density'].values
-
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
     recon = np.sin(theta / 2)**2 if config.use_by_clock else 1.0
     bz_sul = -np.minimum(Bz, 0)
-
     base = V * bz_sul * recon * np.sqrt(Btot)
-
     if config.use_dynamic_pressure:
         Pdyn = compute_pdyn_nPa(N, V)
         dyn_factor = (Pdyn / config.p0) ** config.alpha_pdyn
         dyn_factor = np.where(Pdyn > 0, dyn_factor, 1.0)
         base *= dyn_factor
-
     base = np.clip(base, 0, config.max_source_physical)
-    return base / config.source_norm_constant   # normalização fixa
+    return base / config.source_norm_constant
 
 # ============================
-# INTEGRAÇÃO CORRIGIDA (SEM MULTIPLICAÇÃO POR TAU_EFF)
+# INTEGRAÇÃO (sem multiplicação por tau_eff)
 # ============================
 def integrate_hac(df, source_func, config, calib_factor=1.0):
     times = df['time_tag'].values
@@ -158,19 +150,15 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
         dt = dt_sec[i]
         tau = tau_sec[i]
 
-        # Perda não linear (τ base)
         if config.loss_exponent != 1.0:
             tau_loss = tau * (1 + (H[i-1] / config.h0) ** (config.loss_exponent - 1))
         else:
             tau_loss = tau
 
-        # Adaptação à fonte (β)
         tau_eff = tau_loss / (1 + config.beta_source * source[i])
-
-        # Filtro exponencial CORRIGIDO: NÃO multiplicar source por tau_eff
         alpha = np.exp(-dt / tau_eff)
-        H[i] = H[i-1] * alpha + source[i] * (1 - alpha)   # ← mudança chave
-        H[i] = max(0, min(H[i], config.max_hac))          # limite físico
+        H[i] = H[i-1] * alpha + source[i] * (1 - alpha)
+        H[i] = max(0, min(H[i], config.max_hac))
 
     H_scaled = H * calib_factor
 
@@ -188,9 +176,13 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# FUNÇÕES DE VALIDAÇÃO (MANTIDAS)
+# VALIDAÇÃO COM OPÇÕES DE PREDITOR E SMOOTHING
 # ============================
 def smooth_dst(merged, hours):
+    if hours <= 0:
+        merged = merged.copy()
+        merged['dst_smooth'] = merged['dst']
+        return merged
     merged = merged.set_index('time_tag')
     if len(merged) > 1:
         med_dt = merged.index.to_series().diff().median().total_seconds()
@@ -201,20 +193,6 @@ def smooth_dst(merged, hours):
         merged['dst_smooth'] = merged['dst']
     merged = merged.dropna(subset=['dst_smooth'])
     return merged.reset_index()
-
-def transform_xy(x, y, ttype):
-    if ttype == 'log':
-        return np.log1p(x), np.log1p(y)
-    elif ttype == 'sqrt':
-        return np.sqrt(x), np.sqrt(y)
-    return x, y
-
-def inv_transform(y_t, ttype):
-    if ttype == 'log':
-        return np.expm1(y_t)
-    elif ttype == 'sqrt':
-        return y_t**2
-    return y_t
 
 def compute_metrics(y_true, y_pred, th_dst=None, th_hac=None, hac_vals=None):
     if len(y_true) < 2:
@@ -272,17 +250,24 @@ def validation_metrics(df_hac, dst_series, predictor, smooth_hours, th_dst=None,
     y_true = -merged['dst_smooth'].values
     return compute_metrics(y_true, y_pred, th_dst, th_hac, hac_vals)
 
-def find_optimal_delay(df_hac, dst_series, max_delay, step, smooth_hours, predictor):
+def find_optimal_delay(df_hac, dst_series, max_delay, step, smooth_hours, predictor, test_invert=False):
     best_corr = -1
     best_delay = 0
-    print(f"\n🔍 Buscando atraso ótimo (predictor={predictor})...")
-    for delay in np.arange(0, max_delay + step, step):
+    print(f"\n🔍 Buscando atraso ótimo (predictor={predictor}, smooth={smooth_hours}h) até {max_delay}h...")
+    delays = np.arange(0, max_delay + step, step)
+    for delay in delays:
         shifted = apply_time_shift(dst_series, delay)
         m = validation_metrics(df_hac, shifted, predictor, smooth_hours)
         if m and not np.isnan(m['correlation']):
-            print(f"   Delay {delay:3.0f}h → r = {m['correlation']:.3f}")
-            if m['correlation'] > best_corr:
-                best_corr = m['correlation']
+            corr = m['correlation']
+            print(f"   Delay {delay:3.0f}h → r = {corr:.3f}")
+            if test_invert:
+                # testar correlação com sinal invertido
+                m_inv = validation_metrics(df_hac.assign(HAC=-df_hac['HAC']), shifted, predictor, smooth_hours)
+                if m_inv and m_inv['correlation'] > corr:
+                    print(f"       → sinal invertido daria r = {m_inv['correlation']:.3f} (melhor)")
+            if corr > best_corr:
+                best_corr = corr
                 best_delay = delay
     if best_corr < 0.1:
         print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
@@ -292,7 +277,7 @@ def find_optimal_delay(df_hac, dst_series, max_delay, step, smooth_hours, predic
     return best_delay, best_corr
 
 def calibrate_nonlinear(df_raw, dst_series, delay, min_hac, min_dst,
-                        smooth_hours, predictor, transform):
+                        smooth_hours, predictor, transform='log1p'):
     shifted = apply_time_shift(dst_series, delay)
     df_raw = df_raw.copy()
     shifted = shifted.copy()
@@ -303,36 +288,39 @@ def calibrate_nonlinear(df_raw, dst_series, delay, min_hac, min_dst,
                            on='time_tag', direction='backward')
     merged = merged.dropna(subset=['HAC_raw', 'dHAC_dt', 'dst'])
     merged = smooth_dst(merged, smooth_hours)
-    col = 'HAC_raw' if predictor == 'hac' else 'dHAC_dt'
+    if predictor == 'hac':
+        col = 'HAC_raw'
+    elif predictor == 'deriv':
+        col = 'dHAC_dt'
+    else:
+        col = 'HAC_raw'
     mask = (merged['dst_smooth'] < 0) & (merged['dst_smooth'].abs() > min_dst) & (merged[col] > min_hac)
     if mask.sum() < 5:
         print("⚠️ Pontos insuficientes para calibração.")
         return None, None
     x = merged.loc[mask, col].values
     y = -merged.loc[mask, 'dst_smooth'].values
-    xt, yt = transform_xy(x, y, transform)
+    if transform == 'log1p':
+        xt = np.log1p(x)
+        yt = np.log1p(y)
+    else:
+        xt, yt = x, y
     slope, intercept, r_value, _, _ = linregress(xt, yt)
     print(f"📊 Calibração (delay={delay}h, transform={transform}):")
     print(f"   f(y) = {slope:.3f} * f(HAC) + {intercept:.3f} (R²={r_value**2:.3f})")
     return slope, intercept
 
-def predict_from_calibration(hac, slope, intercept, transform):
-    if transform == 'log':
+def predict_from_calibration(hac, slope, intercept, transform='log1p'):
+    if transform == 'log1p':
         return np.expm1(slope * np.log1p(hac) + intercept)
-    elif transform == 'sqrt':
-        return (slope * np.sqrt(hac) + intercept)**2
     else:
         return slope * hac + intercept
 
-def hac_threshold_from_calib(slope, intercept, target_dst, transform):
+def hac_threshold_from_calib(slope, intercept, target_dst, transform='log1p'):
     if slope is None or intercept is None:
         return None
-    if transform == 'log':
-        log1p = (np.log1p(target_dst) - intercept) / slope
-        return np.expm1(log1p)
-    elif transform == 'sqrt':
-        sqrt_h = (np.sqrt(target_dst) - intercept) / slope
-        return sqrt_h**2
+    if transform == 'log1p':
+        return np.expm1((np.log1p(target_dst) - intercept) / slope)
     else:
         return (target_dst - intercept) / slope
 
@@ -378,7 +366,7 @@ def plot_comparison(df, simple_vals, akasofu_vals, dst_df, delay, smooth_hours, 
 # TESTE DE UNIDADES (SIMPLIFICADO)
 # ============================
 def test_physics(config):
-    print("\n🧪 TESTE DE UNIDADES FÍSICAS (rápido):")
+    print("\n🧪 TESTE DE UNIDADES FÍSICAS:")
     print("="*50)
     N, V, Bx, By, Bz = 5.0, 400.0, 2.0, 3.0, -5.0
     Pdyn = compute_pdyn_nPa(N, V)
@@ -388,7 +376,7 @@ def test_physics(config):
     S_q = compute_source_advanced(test_df, config)[0]
     print(f"Fonte(quiet) = {S_q:.2f} (deve ser O(1))")
     assert 0.1 < S_q < 10, f"Fonte quiet fora da faixa esperada: {S_q}"
-    print("✅ Teste de unidades passou (faixa da fonte está OK).")
+    print("✅ Teste de unidades passou.")
 
 # ============================
 # MAIN
@@ -402,12 +390,19 @@ def main():
     parser.add_argument('--simplify', action='store_true')
     parser.add_argument('--no_calibrate', action='store_true')
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
+    parser.add_argument('--predictor', default='hac', choices=['hac', 'deriv'],
+                        help='Preditor para validação: hac (acumulado) ou deriv (taxa)')
+    parser.add_argument('--smooth_hours', type=float, default=1,
+                        help='Suavização do Dst em horas (0 = sem suavização)')
+    parser.add_argument('--test_invert', action='store_true',
+                        help='Testar correlação com HAC invertido')
     args = parser.parse_args()
 
     config = Config(alpha_pdyn=args.alpha_pdyn, simplify=args.simplify, model=args.model)
     print("\n" + "="*70)
     print(f"🛰️  HAC - Modelo: {config.model.upper()}")
     print(f"   Configuração: {config}")
+    print(f"   Preditor: {args.predictor}, Suavização Dst: {args.smooth_hours}h")
     print("="*70)
 
     test_physics(config)
@@ -431,7 +426,7 @@ def main():
     dst = dst[dst['time_tag'] <= omni['time_tag'].max()]
     print(f"   Dst cortado: {len(dst)} pontos")
 
-    # Interpolação robusta do Dst na grade OMNI
+    # Interpolação robusta
     time_grid = omni[['time_tag']].copy()
     dst_interp = pd.merge_asof(
         time_grid.sort_values('time_tag'),
@@ -441,9 +436,9 @@ def main():
         tolerance=pd.Timedelta('2h')
     )
     dst_interp = dst_interp.set_index('time_tag').interpolate(method='time', limit=3).reset_index()
-    assert 'dst' in dst_interp.columns, "ERRO: coluna dst sumiu na interpolação"
+    assert 'dst' in dst_interp.columns, "ERRO: coluna dst sumiu"
 
-    # Merge final sem conflito de nomes
+    # Merge final
     if 'dst' in omni.columns:
         omni = omni.drop(columns=['dst'])
     df = pd.merge(omni, dst_interp, on='time_tag', how='left', suffixes=('', '_dst'))
@@ -462,38 +457,49 @@ def main():
     else:
         source_func = compute_source_advanced
 
-    # Primeira integração (sem calibração)
     df = integrate_hac(df, source_func, config, calib_factor=1.0)
 
-    # Baselines (apenas para modelo principal)
+    # Baselines (precisam da coluna dHAC_dt)
     if config.model == 'hac':
         df_simple = integrate_hac(df, lambda d, c: compute_source_simple(d), config, 1.0)
         df_akasofu = integrate_hac(df, lambda d, c: compute_source_akasofu(d), config, 1.0)
         simple_vals = df_simple['HAC'].values
         akasofu_vals = df_akasofu['HAC'].values
+        # Derivadas para baselines
+        dt_sec = np.diff(df['time_tag'].values).astype('timedelta64[s]').astype(float)
+        dt_sec = np.insert(dt_sec, 0, dt_sec[0] if len(dt_sec) > 0 else 60.0)
+        dH_simple = np.gradient(simple_vals, dt_sec) * 3600.0
+        dH_akasofu = np.gradient(akasofu_vals, dt_sec) * 3600.0
     else:
         simple_vals = akasofu_vals = np.zeros(len(df))
+        dH_simple = dH_akasofu = np.zeros(len(df))
 
-    # Preparar validação
+    # Preparar DataFrames para validação (com dHAC_dt)
     df_hac = df[['time_tag', 'HAC', 'dHAC_dt']].copy()
     dst_df = df[['time_tag', 'dst']].copy()
-    max_delay, step = 12, 1
-    smooth_hours = 3
-    predictor = 'hac'
-    transform = 'log'
-    min_dst_calib = 5
+    max_delay = 24
+    step = 1
+    smooth_hours = args.smooth_hours
+    predictor = args.predictor
+    test_invert = args.test_invert
 
-    best_delay, best_corr = find_optimal_delay(df_hac, dst_df, max_delay, step, smooth_hours, predictor)
+    best_delay, best_corr = find_optimal_delay(df_hac, dst_df, max_delay, step, smooth_hours, predictor, test_invert)
 
+    # Calibração (apenas se delay > 0)
     calib_slope, calib_intercept = 1.0, 0.0
-    if not args.no_calibrate:
+    if not args.no_calibrate and best_delay > 0:
         df_raw = df[['time_tag', 'HAC_raw', 'dHAC_dt']].copy()
-        sl, ic = calibrate_nonlinear(df_raw, dst_df, best_delay, 0.01, min_dst_calib,
-                                     smooth_hours, predictor, transform)
+        sl, ic = calibrate_nonlinear(df_raw, dst_df, best_delay, 0.01, 5,
+                                     smooth_hours, predictor, 'log1p')
         if sl is not None:
             calib_slope, calib_intercept = sl, ic
-            hac_mean = df['HAC_raw'].mean()
-            dst_pred = predict_from_calibration(hac_mean, calib_slope, calib_intercept, transform)
+            # recalcular HAC com fator linear aproximado
+            if predictor == 'hac':
+                pred_raw = df['HAC_raw'].values
+            else:
+                pred_raw = df['dHAC_dt'].values
+            hac_mean = pred_raw.mean()
+            dst_pred = predict_from_calibration(hac_mean, calib_slope, calib_intercept, 'log1p')
             linear_factor = dst_pred / hac_mean if hac_mean > 0 else 1.0
             if not (0.01 < linear_factor < 100):
                 linear_factor = 1.0
@@ -503,33 +509,54 @@ def main():
                 df_akasofu = integrate_hac(df, lambda d, c: compute_source_akasofu(d), config, linear_factor)
                 simple_vals = df_simple['HAC'].values
                 akasofu_vals = df_akasofu['HAC'].values
+                dt_sec = np.diff(df['time_tag'].values).astype('timedelta64[s]').astype(float)
+                dt_sec = np.insert(dt_sec, 0, dt_sec[0] if len(dt_sec) > 0 else 60.0)
+                dH_simple = np.gradient(simple_vals, dt_sec) * 3600.0
+                dH_akasofu = np.gradient(akasofu_vals, dt_sec) * 3600.0
             df_hac = df[['time_tag', 'HAC', 'dHAC_dt']].copy()
             print(f"✅ HAC recalibrado com fator linear: {linear_factor:.3f}")
 
+    # Limiar HAC para Dst = -50
     th_dst = 50
-    if not args.no_calibrate and calib_slope != 1.0:
-        hac_th = hac_threshold_from_calib(calib_slope, calib_intercept, th_dst, transform)
+    if not args.no_calibrate and calib_slope != 1.0 and best_delay > 0:
+        if predictor == 'hac':
+            hac_th = hac_threshold_from_calib(calib_slope, calib_intercept, th_dst, 'log1p')
+        else:
+            # Para derivada, usamos percentil 90
+            hac_th = np.percentile(df['dHAC_dt'].dropna(), 90)
         hac_th = hac_th if hac_th is not None else np.percentile(df['HAC'].dropna(), 75)
     else:
-        hac_th = np.percentile(df['HAC'].dropna(), 75)
-    print(f"\n🎯 HAC_THRESHOLD (|Dst| = {th_dst} nT): {hac_th:.2f}")
+        if predictor == 'hac':
+            hac_th = np.percentile(df['HAC'].dropna(), 75)
+        else:
+            hac_th = np.percentile(df['dHAC_dt'].dropna(), 75)
+    print(f"\n🎯 THRESHOLD (|Dst| = {th_dst} nT, predictor={predictor}): {hac_th:.2f}")
 
-    # Validação direta (não linear)
-    print("\n📊 VALIDAÇÃO DIRETA COM CALIBRAÇÃO NÃO LINEAR")
+    # Validação direta
+    print(f"\n📊 VALIDAÇÃO DIRETA (predictor={predictor}, delay={best_delay}h, smooth={smooth_hours}h)")
     print("="*50)
     shifted = apply_time_shift(dst_df, best_delay)
-    merged = pd.merge_asof(df[['time_tag', 'HAC_raw']].sort_values('time_tag'),
+    if predictor == 'hac':
+        pred_col = 'HAC_raw'
+    else:
+        pred_col = 'dHAC_dt'
+    merged = pd.merge_asof(df[['time_tag', pred_col]].sort_values('time_tag'),
                            shifted.sort_values('time_tag'),
-                           on='time_tag', direction='backward').dropna(subset=['dst', 'HAC_raw'])
+                           on='time_tag', direction='backward').dropna(subset=['dst', pred_col])
     merged = smooth_dst(merged, smooth_hours)
     merged = merged[merged['dst_smooth'] < 0]
     metrics_direct = None
     if len(merged) > 10:
         y_true = -merged['dst_smooth'].values
-        y_pred = predict_from_calibration(merged['HAC_raw'].values, calib_slope, calib_intercept, transform)
-        metrics_direct = compute_metrics(y_true, y_pred, th_dst, hac_th, merged['HAC_raw'].values)
+        if predictor == 'hac':
+            y_pred = predict_from_calibration(merged[pred_col].values, calib_slope, calib_intercept, 'log1p')
+        else:
+            # Para derivada, não aplicamos calibração (já está em escala)
+            y_pred = merged[pred_col].values
+        hac_vals = merged[pred_col].values
+        metrics_direct = compute_metrics(y_true, y_pred, th_dst, hac_th, hac_vals)
         if metrics_direct:
-            print(f"✅ Modelo principal (predição direta) vs Dst suavizado (delay={best_delay}h):")
+            print(f"✅ Modelo principal vs Dst suavizado (delay={best_delay}h):")
             print(f"   Correlação: {metrics_direct['correlation']:.3f}")
             print(f"   R²: {metrics_direct['r2']:.3f}")
             print(f"   RMSE: {metrics_direct['rmse']:.2f}")
@@ -537,28 +564,22 @@ def main():
             if metrics_direct['pod'] is not None:
                 print(f"   POD: {metrics_direct['pod']:.3f} | FAR: {metrics_direct['far']:.3f} | CSI: {metrics_direct['csi']:.3f}")
 
-    # Validação com HAC calibrado linear
-    print("\n📊 VALIDAÇÃO COM HAC CALIBRADO (LINEAR)")
-    print("="*50)
-    metrics_linear = validation_metrics(df_hac, shifted, predictor, smooth_hours, th_dst, hac_th)
-    if metrics_linear:
-        print(f"✅ HAC (calibrado linear) vs Dst suavizado (delay={best_delay}h):")
-        print(f"   Correlação: {metrics_linear['correlation']:.3f}")
-        print(f"   R²: {metrics_linear['r2']:.3f}")
-        print(f"   RMSE: {metrics_linear['rmse']:.2f}")
-        print(f"   MAE: {metrics_linear['mae']:.2f}")
-        if metrics_linear['pod'] is not None:
-            print(f"   POD: {metrics_linear['pod']:.3f} | FAR: {metrics_linear['far']:.3f} | CSI: {metrics_linear['csi']:.3f}")
-
     # Comparação com baselines
     if config.model == 'hac' and dst_df is not None:
         print("\n📊 COMPARAÇÃO COM BASELINES")
         print("="*50)
-        df_simple_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': simple_vals})
+        # Baseline simples (usando HAC)
+        if predictor == 'hac':
+            simple_pred = simple_vals
+            akasofu_pred = akasofu_vals
+        else:
+            simple_pred = dH_simple
+            akasofu_pred = dH_akasofu
+        df_simple_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': simple_pred, 'dHAC_dt': dH_simple})
         metrics_simple = validation_metrics(df_simple_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
         if metrics_simple:
             print(f"Baseline (-Bz*V): Correlação={metrics_simple['correlation']:.3f}, R²={metrics_simple['r2']:.3f}")
-        df_akasofu_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': akasofu_vals})
+        df_akasofu_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': akasofu_pred, 'dHAC_dt': dH_akasofu})
         metrics_akasofu = validation_metrics(df_akasofu_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
         if metrics_akasofu:
             print(f"Baseline Akasofu ε: Correlação={metrics_akasofu['correlation']:.3f}, R²={metrics_akasofu['r2']:.3f}")
