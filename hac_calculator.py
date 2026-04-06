@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Sinal Corrigido)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Burton Clássico e HAC como Driver)
 
-Modelo Dst baseado em Burton com correções físicas:
-- Driver integrado (Akasofu ε ou Ey) com memória exponencial (τ_driver)
-- HAC atua como amplificador da injeção (não no decaimento)
-- Dst_star inclui offset atmosférico (+20 nT)
-- τ dinâmico com expoente 1.5, normalização log1p, sem threshold
+Modelo Dst baseado em Burton com:
+- Driver de acoplamento: Akasofu ε (ou Ey, ou HAC)
+- Normalização física por EPSILON_REF (constante)
+- Opcionalmente, integração exponencial do driver (se tau_driver > 0)
+- Sem HAC no modelo Burton a menos que explicitamente usado como driver
 - Busca automática do delay ótimo (--find_delay)
 
 Uso recomendado:
+    # Burton clássico (Akasofu, sem HAC, sem memória extra)
+    python hac_calculator.py --dst_model burton --use_akasofu_driver --find_delay
+
+    # Burton com memória no driver (tau_driver > 0)
     python hac_calculator.py --dst_model burton --use_akasofu_driver --tau_driver 4 --find_delay
+
+    # HAC como driver (experimental)
+    python hac_calculator.py --dst_model burton --use_hac_driver --find_delay
 """
 
 import pandas as pd
@@ -180,17 +187,15 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELO DST BURTON COM CORREÇÕES FÍSICAS (HAC na injeção, offset no Dst_star)
+# MODELO DST BURTON (SEM HAC, COM DRIVER INSTANTÂNEO OU INTEGRADO)
 # ============================
 def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=0.7,
-                       tau_driver=4.0, gamma=0.02, offset=20.0, use_akasofu_driver=False):
+                       tau_driver=0.0, offset=20.0, use_akasofu_driver=False,
+                       use_hac_driver=False):
     """
-    Modelo Dst corrigido:
-        - driver_eff: integração exponencial do driver normalizado (memória)
-        - HAC atua como amplificador da injeção: injection = -alpha * d_eff * (1 + gamma * HAC/100)
-        - Decaimento: decay = Dst_star / tau  (sem HAC)
-        - Dst_star = Dst - b*sqrt(Pdyn) + offset
-        - τ dinâmico com expoente 1.5
+    Modelo Burton clássico, sem HAC (a menos que use_hac_driver=True).
+    Se tau_driver > 0, o driver é integrado exponencialmente (memória adicional).
+    Se tau_driver == 0, usa o driver instantâneo (driver_norm).
     """
     Bz = df['bz_gsm'].values
     V = df['speed'].values
@@ -199,8 +204,12 @@ def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=0.7,
     Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
     times = df['time_tag'].values
 
-    # --- Driver raw (Akasofu ou Ey) ---
-    if use_akasofu_driver:
+    # --- Driver raw ---
+    if use_hac_driver:
+        if 'HAC' not in df.columns:
+            raise ValueError("use_hac_driver requer HAC. Execute integrate_hac primeiro.")
+        driver_raw = df['HAC'].values
+    elif use_akasofu_driver:
         Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
         cos_theta = Bz / (Btot + 1e-10)
         sin_theta2 = np.sqrt((1 - cos_theta) / 2)
@@ -209,14 +218,21 @@ def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=0.7,
     else:
         driver_raw = V * np.maximum(0, -Bz) * 1e-3
 
-    # --- Normalização com log1p (preserva contraste) ---
-    driver_log = np.log1p(driver_raw)
-    driver_pos = driver_log[driver_log > 0]
-    scale = np.percentile(driver_pos, 95) if len(driver_pos) > 0 else 1.0
-    driver_norm = driver_log / (scale + 1e-6)
+    # --- Normalização física (constante EPSILON_REF) ---
+    # Valor típico de Akasofu em tempestades moderadas: ~1000
+    # Para Ey, o valor típico é ~1, então ajustamos com fator
+    if use_akasofu_driver:
+        EPSILON_REF = 1000.0   # escala física (nT/h para uma tempestade moderada)
+        driver_norm = driver_raw / EPSILON_REF
+    elif use_hac_driver:
+        # HAC já está em escala compatível com Dst (pois HAC ≈ |Dst| em muitos casos)
+        driver_norm = driver_raw / 100.0   # ajuste empírico
+    else:
+        # Ey: valor típico ~1 mV/m, alpha ~0.7 já dá resposta razoável
+        driver_norm = driver_raw   # sem normalização extra
     driver_norm = np.clip(driver_norm, 0, None)   # sem threshold
 
-    # --- Integração temporal (dt em segundos) ---
+    # --- Opcional: integração exponencial do driver (memória adicional) ---
     dt_sec_arr = np.zeros(len(times))
     if len(times) > 1:
         diffs = np.diff(times).astype('timedelta64[s]').astype(float)
@@ -225,35 +241,33 @@ def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=0.7,
     else:
         dt_sec_arr[:] = 60.0
 
-    # --- Driver com memória exponencial (anel de corrente) ---
-    driver_eff = np.zeros_like(driver_norm)
-    tau_driver_sec = tau_driver * 3600.0
-    for i in range(1, len(driver_eff)):
-        dt = dt_sec_arr[i]
-        alpha_driver = np.exp(-dt / tau_driver_sec)
-        driver_eff[i] = driver_eff[i-1] * alpha_driver + driver_norm[i] * (1 - alpha_driver)
+    if tau_driver > 0:
+        driver_eff = np.zeros_like(driver_norm)
+        tau_driver_sec = tau_driver * 3600.0
+        for i in range(1, len(driver_eff)):
+            dt = dt_sec_arr[i]
+            alpha_driver = np.exp(-dt / tau_driver_sec)
+            driver_eff[i] = driver_eff[i-1] * alpha_driver + driver_norm[i] * (1 - alpha_driver)
+        driver = driver_eff
+    else:
+        driver = driver_norm
 
-    # --- Integração do Dst ---
+    # --- Integração do Dst (Burton) ---
     Dst = np.zeros(len(times))
-    HAC = df['HAC'].values if (gamma > 0 and 'HAC' in df.columns) else np.zeros(len(times))
-
     for i in range(1, len(times)):
         dt_hours = dt_sec_arr[i] / 3600.0
         # Dst corrigido pela pressão dinâmica + offset atmosférico
         Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i]) + offset
-        # τ dinâmico com expoente 1.5
-        d_eff = driver_eff[i]
-        tau_frac = (d_eff ** 1.5) / (d_eff ** 1.5 + 0.3)
+        # τ dinâmico com expoente 1.5 (usando o driver)
+        d_val = driver[i]
+        tau_frac = (d_val ** 1.5) / (d_val ** 1.5 + 0.3)
         tau = tau_recovery - (tau_recovery - tau_main) * tau_frac
-        # Injeção com HAC como amplificador (combustível)
-        hac_factor = 1.0 + gamma * HAC[i] / 100.0
-        injection = -alpha * d_eff * hac_factor
-        # Decaimento sem HAC (apenas Dst_star)
+        # Injeção (sem HAC, a menos que driver seja o próprio HAC)
+        injection = -alpha * d_val
         decay = Dst_star / tau
         dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt_hours
         Dst[i] = max(-500, min(50, Dst[i]))
-
     return Dst
 
 def compute_dst_hybrid(df, a=0.5, b=0.2):
@@ -424,15 +438,15 @@ def main():
     parser.add_argument('--b_hybrid', type=float, default=0.2, help='Coeficiente dH/dt (hybrid)')
     # Parâmetros para deriv
     parser.add_argument('--k', type=float, default=0.5, help='Coeficiente para modelo deriv')
-    # Parâmetros para burton (corrigidos)
+    # Parâmetros para burton
     parser.add_argument('--tau_main', type=float, default=4.0, help='τ durante injeção (horas)')
     parser.add_argument('--tau_recovery', type=float, default=12.0, help='τ durante recuperação (horas)')
     parser.add_argument('--b', type=float, default=6.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--alpha', type=float, default=0.7, help='Fator de escala base')
-    parser.add_argument('--tau_driver', type=float, default=4.0, help='Constante de tempo do driver (horas)')
-    parser.add_argument('--gamma', type=float, default=0.02, help='Coeficiente de amplificação do HAC na injeção')
+    parser.add_argument('--alpha', type=float, default=0.7, help='Fator de escala para o driver')
+    parser.add_argument('--tau_driver', type=float, default=0.0, help='τ para memória do driver (0 = instantâneo)')
     parser.add_argument('--offset', type=float, default=20.0, help='Offset atmosférico (nT)')
-    parser.add_argument('--use_akasofu_driver', action='store_true', help='Usar ε de Akasofu (recomendado)')
+    parser.add_argument('--use_akasofu_driver', action='store_true', help='Usar ε de Akasofu como driver')
+    parser.add_argument('--use_hac_driver', action='store_true', help='Usar HAC como driver (experimental)')
     # Parâmetros gerais
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
@@ -452,13 +466,13 @@ def main():
         print(f"   k = {args.k}")
     elif args.dst_model == 'burton':
         print(f"   tau_main = {args.tau_main} h, tau_recovery = {args.tau_recovery} h")
-        print(f"   b = {args.b}, alpha = {args.alpha}, tau_driver = {args.tau_driver} h")
-        print(f"   gamma = {args.gamma}, offset = {args.offset} nT")
-        if args.use_akasofu_driver:
-            print("   Driver: Akasofu ε (log1p normalizado + memória exponencial)")
+        print(f"   b = {args.b}, alpha = {args.alpha}, tau_driver = {args.tau_driver} h, offset = {args.offset} nT")
+        if args.use_hac_driver:
+            print("   Driver: HAC (normalizado)")
+        elif args.use_akasofu_driver:
+            print("   Driver: Akasofu ε (normalizado por EPSILON_REF=1000)")
         else:
-            print("   Driver: Ey (log1p normalizado + memória exponencial)")
-        print(f"   HAC atua como amplificador na injeção (combustível)")
+            print("   Driver: Ey")
         print(f"   Busca de delay: {'ativada' if args.find_delay else 'desativada'}")
     print("="*70)
 
@@ -506,9 +520,9 @@ def main():
     if df['dst'].min() > -50:
         print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT).")
 
-    # Necessita HAC? (apenas se gamma>0 ou modelo hybrid/direct/deriv)
+    # Necessita HAC? (apenas se usar HAC como driver ou modelo hybrid/direct/deriv)
     need_hac = (args.dst_model in ['direct', 'deriv', 'hybrid']) or \
-               (args.dst_model == 'burton' and args.gamma > 0)
+               (args.dst_model == 'burton' and args.use_hac_driver)
     if need_hac:
         if config.model == 'simple':
             source_func = lambda d, c: compute_source_simple(d)
@@ -528,8 +542,8 @@ def main():
     else:  # burton
         df['Dst_model'] = compute_dst_burton(df, tau_main=args.tau_main, tau_recovery=args.tau_recovery,
                                              b=args.b, alpha=args.alpha, tau_driver=args.tau_driver,
-                                             gamma=args.gamma, offset=args.offset,
-                                             use_akasofu_driver=args.use_akasofu_driver)
+                                             offset=args.offset, use_akasofu_driver=args.use_akasofu_driver,
+                                             use_hac_driver=args.use_hac_driver)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
