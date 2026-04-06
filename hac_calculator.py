@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Saturação e Ajustes Físicos)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Física Avançada)
 
-Modelos de Dst:
-  - burton: dDst/dt = -α * Ey_sat - (Dst - b√Pdyn) / τ
-    Ey_sat = max(0, Ey - threshold) / (1 + (max(0, Ey - threshold))/E0)
-  - hybrid: Dst = -a * HAC - b * dHAC/dt
-  - direct: Dst = -HAC
+Modelo Dst baseado em Burton com:
+- Campo elétrico de reconexão: Ey = V * max(0, -Bz) * 1e-3  (mV/m)
+- Limiar (threshold) e saturação suave: Ey_sat = Ey_eff / (1 + (Ey_eff/E0)^2)
+- Atraso físico de 2h na injeção (shift)
+- Constante de tempo dinâmica: τ_main (3h) quando há injeção, τ_recovery (10h) caso contrário
+- Termo de pressão dinâmica: Dst_star = Dst - b * sqrt(Pdyn)
 
 Uso:
-    python hac_calculator.py --dst_model burton --alpha 3.0 --b 12 --tau_hours 7 --threshold 0.5 --E0 5.0
+    python hac_calculator.py --dst_model burton --alpha 1.5 --b 10 --threshold 0.5 --E0 10 \
+        --tau_main 3 --tau_recovery 10 --delay_hours 2
     python hac_calculator.py --dst_model hybrid --a 0.5 --b_hybrid 0.2
 """
 
@@ -180,37 +182,61 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELOS DST FÍSICOS (COM SATURAÇÃO)
+# MODELOS DST (BURTON AVANÇADO E HÍBRIDOS)
 # ============================
-def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=3.0, threshold=0.5, E0=5.0):
+def compute_dst_burton(df, tau_main=3.0, tau_recovery=10.0, b=10.0, alpha=1.5,
+                       threshold=0.5, E0=10.0, delay_hours=2.0):
     """
-    Modelo de Burton com saturação:
-        Ey = V * max(0, -Bz) * 1e-3   (mV/m)
-        Ey_eff = max(0, Ey - threshold)
-        Ey_sat = Ey_eff / (1 + Ey_eff / E0)
-        dDst/dt = -α * Ey_sat - (Dst - b√Pdyn) / τ
+    Modelo Burton com:
+        - Campo elétrico Ey = V * max(0, -Bz) * 1e-3 (mV/m)
+        - Limiar e saturação suave: Ey_sat = Ey_eff / (1 + (Ey_eff/E0)^2)
+        - Atraso físico na injeção (shift)
+        - τ dinâmico: tau_main durante injeção, tau_recovery no resto
     """
     Bz = df['bz_gsm'].values
     V = df['speed'].values
-    Ey_raw = V * np.maximum(0, -Bz) * 1e-3          # mV/m
-    Ey_eff = np.maximum(0, Ey_raw - threshold)      # acima do limiar
-    Ey_sat = Ey_eff / (1 + Ey_eff / E0)             # saturação
     Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
 
+    # Ey bruto (mV/m)
+    Ey_raw = V * np.maximum(0, -Bz) * 1e-3
+    Ey_eff = np.maximum(0, Ey_raw - threshold)
+
+    # Atraso físico (shift da série temporal)
+    # Calcular dt médio para converter delay_hours em índices
     times = df['time_tag'].values
-    dt_sec = np.zeros(len(times))
+    if len(times) > 1:
+        dt_sec = np.median(np.diff(times).astype('timedelta64[s]').astype(float))
+    else:
+        dt_sec = 3600.0
+    delay_steps = int(round(delay_hours * 3600 / dt_sec))
+    if delay_steps > 0:
+        Ey_eff = np.roll(Ey_eff, delay_steps)
+        # Preencher os primeiros delay_steps com zero (evitar dados futuros)
+        Ey_eff[:delay_steps] = 0.0
+
+    # Saturação suave
+    Ey_sat = Ey_eff / (1 + (Ey_eff / E0)**2)
+
+    # Integração
+    dt_sec_arr = np.zeros(len(times))
     if len(times) > 1:
         diffs = np.diff(times).astype('timedelta64[s]').astype(float)
-        dt_sec[1:] = diffs
-        dt_sec[0] = np.median(diffs) if len(diffs) > 0 else 60.0
+        dt_sec_arr[1:] = diffs
+        dt_sec_arr[0] = np.median(diffs) if len(diffs) > 0 else 60.0
     else:
-        dt_sec[:] = 60.0
+        dt_sec_arr[:] = 60.0
 
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
-        dt_hours = dt_sec[i] / 3600.0
+        dt_hours = dt_sec_arr[i] / 3600.0
+        # Dst corrigido pela pressão dinâmica
         Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])
-        dDst = -alpha * Ey_sat[i] - Dst_star / tau_hours
+        # Constante de tempo dinâmica
+        if Ey_eff[i] > 0:
+            tau = tau_main
+        else:
+            tau = tau_recovery
+        dDst = -alpha * Ey_sat[i] - Dst_star / tau
         Dst[i] = Dst[i-1] + dDst * dt_hours
         Dst[i] = max(-500, min(50, Dst[i]))
     return Dst
@@ -342,7 +368,7 @@ def plot_comparison(df, df_model, dst_df, delay, smooth_hours, fname):
     print(f"✅ Figura salva: {fname}")
 
 # ============================
-# TESTE DE UNIDADES
+# TESTE DE UNIDADES (simplificado)
 # ============================
 def test_physics(config):
     print("\n🧪 TESTE DE UNIDADES FÍSICAS:")
@@ -381,12 +407,14 @@ def main():
     parser.add_argument('--b_hybrid', type=float, default=0.2, help='Coeficiente dH/dt (hybrid)')
     # Parâmetros para deriv
     parser.add_argument('--k', type=float, default=0.5, help='Coeficiente para modelo deriv')
-    # Parâmetros para burton
-    parser.add_argument('--tau_hours', type=float, default=7.0, help='Constante de tempo (horas)')
+    # Parâmetros para burton avançado
+    parser.add_argument('--tau_main', type=float, default=3.0, help='τ durante injeção (horas)')
+    parser.add_argument('--tau_recovery', type=float, default=10.0, help='τ durante recuperação (horas)')
     parser.add_argument('--b', type=float, default=10.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--alpha', type=float, default=3.0, help='Fator de escala para Ey')
+    parser.add_argument('--alpha', type=float, default=1.5, help='Fator de escala para Ey')
     parser.add_argument('--threshold', type=float, default=0.5, help='Limiar para Ey (mV/m)')
-    parser.add_argument('--E0', type=float, default=5.0, help='Parâmetro de saturação (mV/m)')
+    parser.add_argument('--E0', type=float, default=10.0, help='Parâmetro de saturação suave (mV/m)')
+    parser.add_argument('--delay_hours', type=float, default=2.0, help='Atraso físico da injeção (horas)')
     # Parâmetros gerais
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
@@ -403,7 +431,9 @@ def main():
     elif args.dst_model == 'deriv':
         print(f"   k = {args.k}")
     elif args.dst_model == 'burton':
-        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}, threshold = {args.threshold} mV/m, E0 = {args.E0} mV/m")
+        print(f"   tau_main = {args.tau_main} h, tau_recovery = {args.tau_recovery} h")
+        print(f"   b = {args.b}, alpha = {args.alpha}, threshold = {args.threshold} mV/m")
+        print(f"   E0 = {args.E0} mV/m, delay = {args.delay_hours} h")
     print("="*70)
 
     test_physics(config)
@@ -450,16 +480,15 @@ def main():
     if df['dst'].min() > -50:
         print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT).")
 
-    # Selecionar fonte HAC
-    if config.model == 'simple':
-        source_func = lambda d, c: compute_source_simple(d)
-    elif config.model == 'akasofu':
-        source_func = lambda d, c: compute_source_akasofu(d)
-    else:
-        source_func = compute_source_advanced
-
-    # Calcular HAC
-    df = integrate_hac(df, source_func, config, calib_factor=1.0)
+    # Selecionar fonte HAC (apenas para modelos que usam HAC)
+    if args.dst_model in ['direct', 'deriv', 'hybrid']:
+        if config.model == 'simple':
+            source_func = lambda d, c: compute_source_simple(d)
+        elif config.model == 'akasofu':
+            source_func = lambda d, c: compute_source_akasofu(d)
+        else:
+            source_func = compute_source_advanced
+        df = integrate_hac(df, source_func, config, calib_factor=1.0)
 
     # Gerar Dst_model conforme escolha
     if args.dst_model == 'direct':
@@ -469,9 +498,9 @@ def main():
     elif args.dst_model == 'hybrid':
         df['Dst_model'] = compute_dst_hybrid(df, a=args.a, b=args.b_hybrid)
     else:  # burton
-        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b,
-                                             alpha=args.alpha, threshold=args.threshold,
-                                             E0=args.E0)
+        df['Dst_model'] = compute_dst_burton(df, tau_main=args.tau_main, tau_recovery=args.tau_recovery,
+                                             b=args.b, alpha=args.alpha, threshold=args.threshold,
+                                             E0=args.E0, delay_hours=args.delay_hours)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
@@ -480,7 +509,7 @@ def main():
     step = 1
     smooth_hours = args.smooth_hours
 
-    # Encontrar delay ótimo
+    # Encontrar delay ótimo (apenas para comparação, o modelo Burton já tem delay interno)
     best_delay, best_corr = find_optimal_delay(df_model, dst_df, max_delay, step, smooth_hours)
 
     # Calibração linear (apenas para modelos não físicos)
@@ -512,4 +541,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
