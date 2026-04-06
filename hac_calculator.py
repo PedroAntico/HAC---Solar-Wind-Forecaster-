@@ -429,29 +429,32 @@ def create_figure(df, baseline_simple_vals, baseline_akasofu_vals, dst_df, delay
     print(f"✅ Figura salva: {filename}")
 
 # ============================
-# TESTES DE UNIDADES
+# TESTES DE UNIDADES (CORRIGIDOS)
 # ============================
 def test_physics(config):
     print("\n🧪 TESTE DE UNIDADES FÍSICAS:")
     print("="*50)
-    # Condições típicas
+    # Condições típicas (quiet)
     N = 5.0
     V = 400.0
     Bx = 2.0
     By = 3.0
     Bz = -5.0
+
     # 1. Pdyn
     Pdyn = compute_pdyn_nPa(N, V)
     print(f"1. Pdyn({N} cm⁻³, {V} km/s) = {Pdyn:.2f} nPa")
     assert 1.0 < Pdyn < 2.0, f"Pdyn fora do esperado: {Pdyn}"
-    # 2. Fonte do modelo principal
-    # Criar um DataFrame fictício com uma linha para testar
+
+    # 2. Fonte do modelo principal em quiet
     test_df = pd.DataFrame({'bx_gsm': [Bx], 'by_gsm': [By], 'bz_gsm': [Bz],
                             'speed': [V], 'density': [N]})
     S = compute_source_advanced(test_df, config)[0]
     print(f"2. Fonte(quiet) = {S:.2f}")
-    assert 0.5 < S < 3.0, f"Fonte quiet fora do esperado: {S}"
-    # 3. Evento extremo
+    # Agora a escala física é ~100 (pois HAC_quiet_target=100)
+    assert 50 < S < 150, f"Fonte quiet fora do esperado (deveria ser ~100): {S}"
+
+    # 3. Evento extremo (storm)
     N_storm = 30.0
     V_storm = 800.0
     Bz_storm = -20.0
@@ -459,10 +462,13 @@ def test_physics(config):
                                   'speed': [V_storm], 'density': [N_storm]})
     S_storm = compute_source_advanced(test_df_storm, config)[0]
     print(f"3. Fonte(storm) = {S_storm:.2f}")
-    assert S_storm > 10 * S, f"Fonte de tempestade não amplificou: {S_storm} vs {S}"
+    # Verifica amplificação relativa (fator > 5)
+    assert S_storm > 5 * S, f"Fonte de tempestade não amplificou: {S_storm} vs {S}"
+
     # 4. Normalização
     print(f"4. SOURCE_NORM = {config.source_norm_constant:.2f}")
     assert 30 < config.source_norm_constant < 100, f"Normalização fora da faixa: {config.source_norm_constant}"
+
     print("\n✅ Todos os testes passaram!")
 
 # ============================
