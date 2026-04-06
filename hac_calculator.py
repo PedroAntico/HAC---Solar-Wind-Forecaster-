@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final Ajustada)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Correção Conceitual)
 
 Modelo Dst baseado em Burton com:
 - Campo elétrico de reconexão: Ey = V * max(0, -Bz) * 1e-3  (mV/m)
@@ -8,12 +8,11 @@ Modelo Dst baseado em Burton com:
 - Atraso físico de 2h na injeção (shift causal)
 - Constante de tempo **contínua**: τ = τ_recovery - (τ_recovery - τ_main) * (Ey_eff/(Ey_eff+1))
 - Termo de pressão dinâmica: Dst_star = Dst - b * sqrt(Pdyn)
-- Termo adicional de energia acumulada (HAC) com coeficiente gamma (opcional)
+- **Termo de energia acumulada (HAC) no decaimento**: (Dst_star + γ * HAC) / τ
 
 Uso:
-    python hac_calculator.py --dst_model burton --alpha 1.2 --b 6 \
-        --tau_main 4 --tau_recovery 12 --delay_hours 2
-    python hac_calculator.py --dst_model burton --gamma 0.1  # com HAC
+    python hac_calculator.py --dst_model burton --alpha 1.0 --b 6 \
+        --tau_main 4 --tau_recovery 12 --delay_hours 2 --gamma 0.05
 """
 
 import pandas as pd
@@ -183,10 +182,10 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELO DST BURTON (COM TERMO OPCIONAL HAC)
+# MODELO DST BURTON (COM HAC NO DECAIMENTO)
 # ============================
-def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=1.2,
-                       threshold=0.5, delay_hours=2.0, gamma=0.0):
+def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=1.0,
+                       threshold=0.5, delay_hours=2.0, gamma=0.05):
     """
     Modelo Burton com:
         - Ey = V * max(0, -Bz) * 1e-3 (mV/m)
@@ -194,7 +193,7 @@ def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=1.2,
         - Atraso causal na injeção
         - τ contínuo: τ = τ_recovery - (τ_recovery - τ_main) * (Ey_eff/(Ey_eff+1))
         - Pressão dinâmica: Dst_star = Dst - b * sqrt(Pdyn)
-        - Termo adicional: -gamma * HAC (se gamma > 0)
+        - Decaimento modificado: (Dst_star + γ * HAC) / τ
     """
     Bz = df['bz_gsm'].values
     V = df['speed'].values
@@ -227,17 +226,21 @@ def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=1.2,
         dt_sec_arr[:] = 60.0
 
     Dst = np.zeros(len(times))
+    # Se gamma > 0, precisamos do HAC (já calculado)
+    if gamma > 0 and 'HAC' not in df.columns:
+        raise ValueError("gamma > 0 requer HAC. Execute primeiro integrate_hac.")
+    HAC = df['HAC'].values if gamma > 0 else np.zeros(len(times))
+
     for i in range(1, len(times)):
         dt_hours = dt_sec_arr[i] / 3600.0
         # Dst corrigido pela pressão dinâmica
         Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])
         # τ contínuo (transição suave)
         tau = tau_recovery - (tau_recovery - tau_main) * (Ey_eff[i] / (Ey_eff[i] + 1.0))
-        # Termo de injeção (Ey) e opcional HAC
+        # Termo de injeção (Ey) e decaimento com HAC
         injection = -alpha * Ey_eff[i]
-        if gamma > 0 and 'HAC' in df.columns:
-            injection -= gamma * df['HAC'].values[i]
-        dDst = injection - Dst_star / tau
+        decay = (Dst_star + gamma * HAC[i]) / tau
+        dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt_hours
         Dst[i] = max(-500, min(50, Dst[i]))
     return Dst
@@ -411,15 +414,15 @@ def main():
     parser.add_argument('--b_hybrid', type=float, default=0.2, help='Coeficiente dH/dt (hybrid)')
     # Parâmetros para deriv
     parser.add_argument('--k', type=float, default=0.5, help='Coeficiente para modelo deriv')
-    # Parâmetros para burton (ajustados)
+    # Parâmetros para burton (corrigidos)
     parser.add_argument('--tau_main', type=float, default=4.0, help='τ durante injeção (horas)')
     parser.add_argument('--tau_recovery', type=float, default=12.0, help='τ durante recuperação (horas)')
     parser.add_argument('--b', type=float, default=6.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--alpha', type=float, default=1.2, help='Fator de escala para Ey')
+    parser.add_argument('--alpha', type=float, default=1.0, help='Fator de escala para Ey')
     parser.add_argument('--threshold', type=float, default=0.5, help='Limiar para Ey (mV/m)')
     parser.add_argument('--delay_hours', type=float, default=2.0, help='Atraso físico da injeção (horas)')
-    parser.add_argument('--gamma', type=float, default=0.0,
-                        help='Coeficiente para termo de energia acumulada (HAC) no modelo Burton')
+    parser.add_argument('--gamma', type=float, default=0.05,
+                        help='Coeficiente de energia acumulada no decaimento (HAC/τ)')
     # Parâmetros gerais
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
