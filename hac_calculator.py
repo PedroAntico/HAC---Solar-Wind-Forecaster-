@@ -420,7 +420,7 @@ def test_physics(config):
     print("\n✅ Todos os testes passaram!")
 
 # ============================
-# MAIN
+# MAIN (CORRIGIDA)
 # ============================
 def main():
     parser = argparse.ArgumentParser()
@@ -442,7 +442,7 @@ def main():
     # Teste físico
     test_physics(config)
 
-    # Carregar dados
+    # Carregar OMNI
     if not os.path.exists(args.omni):
         print(f"❌ OMNI não encontrado: {args.omni}")
         return
@@ -450,18 +450,38 @@ def main():
     omni = prepare_omni(omni)
     print(f"✅ OMNI: {len(omni)} pontos, {omni['time_tag'].min()} a {omni['time_tag'].max()}")
 
+    # Carregar Dst Kyoto
     if not os.path.exists(args.dst):
         print(f"❌ Dst não encontrado: {args.dst}")
         return
     dst = pd.read_csv(args.dst, parse_dates=['time_tag']).sort_values('time_tag')
     print(f"✅ Dst Kyoto: {len(dst)} pontos, {dst['time_tag'].min()} a {dst['time_tag'].max()}")
 
-    # Merge (interpola Dst na grade do OMNI)
+    # Cortar Dst para o mesmo período do OMNI (evita extrapolação)
+    dst = dst[dst['time_tag'] <= omni['time_tag'].max()]
+    print(f"   Dst cortado para período OMNI: {len(dst)} pontos")
+
+    # Merge robusto usando merge_asof (substitui reindex problemático)
     time_grid = omni['time_tag'].copy()
-    dst_interp = dst.set_index('time_tag').reindex(time_grid, method='nearest', limit=2)
-    dst_interp = dst_interp.interpolate(method='time', limit=3).reset_index().rename(columns={'index': 'time_tag'})
+    dst_interp = pd.merge_asof(
+        pd.DataFrame({'time_tag': time_grid}),
+        dst[['time_tag', 'dst']].sort_values('time_tag'),
+        on='time_tag',
+        direction='nearest',
+        tolerance=pd.Timedelta('2h')
+    )
+    # Preencher pequenas lacunas com interpolação linear
+    dst_interp = dst_interp.set_index('time_tag')
+    dst_interp = dst_interp.interpolate(method='time', limit=3)
+    dst_interp = dst_interp.reset_index()
+
+    # Verificação de segurança
+    assert 'dst' in dst_interp.columns, "ERRO: coluna 'dst' sumiu no merge!"
+    assert not dst_interp['dst'].isna().all(), "ERRO: todos os valores de Dst são NaN!"
+
+    # Juntar com OMNI
     df = pd.merge(omni, dst_interp, on='time_tag', how='left').dropna(subset=['dst'])
-    print(f"   Merge: {len(df)} pontos, Dst min = {df['dst'].min():.1f} nT")
+    print(f"   Merge final: {len(df)} pontos, Dst min = {df['dst'].min():.1f} nT")
     if df['dst'].min() > -50:
         print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT). A validação pode ser prejudicada.")
 
@@ -595,3 +615,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
