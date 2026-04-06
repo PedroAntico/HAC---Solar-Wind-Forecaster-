@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final Validada)
+HAC - Heliospheric Accumulated Coupling (Versão Final Corrigida)
 Modelo físico: HAC = integral de S(t) com memória adaptativa e perda não linear.
 S(t) = V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (Pdyn/P0)^{α}
 Baselines: (-Bz*V) e Akasofu ε (mesma dinâmica).
 
 Uso:
     python hac_calculator.py --omni data/omni_2000_2020.csv --dst data/dst_kyoto_2000_2020.csv
-    python hac_calculator.py --model simple
-    python hac_calculator.py --model akasofu
-    python hac_calculator.py --simplify
-    python hac_calculator.py --alpha_pdyn 0.0
 """
 
 import pandas as pd
@@ -51,7 +47,7 @@ class Config:
         # Termo fonte
         self.use_by_clock = True
         self.use_dynamic_pressure = not simplify
-        self.p0 = 2.0                          # nPa
+        self.p0 = 2.0
 
         # Adaptação e perda
         self.beta_source = 0.0 if simplify else 0.5
@@ -86,6 +82,9 @@ class Config:
 # ============================
 def prepare_omni(df):
     df = df.copy().sort_values('time_tag').reset_index(drop=True)
+    # Remove coluna 'dst' se existir (OMNI não deve ter, mas por segurança)
+    if 'dst' in df.columns:
+        df = df.drop(columns=['dst'])
     df['bz_gsm'] = df['bz_gsm'].ffill(limit=2)
     for col in ['bx_gsm', 'by_gsm', 'density', 'speed']:
         if col in df.columns:
@@ -100,13 +99,12 @@ def apply_time_shift(df, hours):
 def compute_pdyn_nPa(N_cm3, V_kms):
     N_m3 = N_cm3 * CM3_TO_M3
     V_ms = V_kms * KMS_TO_MS
-    return M_P * N_m3 * V_ms**2 * 1e9   # nPa
+    return M_P * N_m3 * V_ms**2 * 1e9
 
 # ============================
 # TERMOS FONTE
 # ============================
 def compute_source_simple(df, _config=None):
-    """Fonte baseline: -Bz * V / 1000"""
     Bz = df['bz_gsm'].values
     V = df['speed'].values
     source = np.zeros_like(Bz)
@@ -115,7 +113,6 @@ def compute_source_simple(df, _config=None):
     return source
 
 def compute_source_akasofu(df, _config=None):
-    """Fonte Akasofu: V * B² * sin⁴(θ/2) / 1e6"""
     Bx, By, Bz = df['bx_gsm'].values, df['by_gsm'].values, df['bz_gsm'].values
     V = df['speed'].values
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
@@ -125,14 +122,13 @@ def compute_source_akasofu(df, _config=None):
     return V * (Btot**2) * sin4 / 1e6
 
 def compute_source_advanced(df, config):
-    """Fonte principal: V * (-Bz) * sin²(θ/2) * sqrt(B) * (Pdyn/P0)^{α}"""
     Bx, By, Bz = df['bx_gsm'].values, df['by_gsm'].values, df['bz_gsm'].values
     V, N = df['speed'].values, df['density'].values
 
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
     recon = np.sin(theta / 2)**2 if config.use_by_clock else 1.0
-    bz_sul = -np.minimum(Bz, 0)            # positivo para Bz<0
+    bz_sul = -np.minimum(Bz, 0)
 
     base = V * bz_sul * recon * np.sqrt(Btot)
 
@@ -146,14 +142,13 @@ def compute_source_advanced(df, config):
     return base / config.source_norm_constant
 
 # ============================
-# INTEGRAÇÃO (mesma dinâmica para todos os modelos)
+# INTEGRAÇÃO (mesma dinâmica)
 # ============================
 def integrate_hac(df, source_func, config, calib_factor=1.0):
     times = df['time_tag'].values
     Vsw = df['speed'].values
     source = source_func(df, config)
 
-    # dt em segundos
     dt_sec = np.zeros(len(times))
     if len(times) > 1:
         diffs = np.diff(times).astype('timedelta64[s]').astype(float)
@@ -171,22 +166,18 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
         dt = dt_sec[i]
         tau = tau_sec[i]
 
-        # Perda não linear (τ base)
         if config.loss_exponent != 1.0:
             tau_loss = tau * (1 + (H[i-1] / config.h0) ** (config.loss_exponent - 1))
         else:
             tau_loss = tau
 
-        # Adaptação à fonte
         tau_eff = tau_loss / (1 + config.beta_source * source[i])
-
         alpha = np.exp(-dt / tau_eff)
         H[i] = H[i-1] * alpha + source[i] * tau_eff * (1 - alpha)
         H[i] = max(0, H[i])
 
     H_scaled = H * calib_factor
 
-    # Derivada suavizada
     if config.use_savgol and len(H_scaled) >= config.sg_window:
         H_smooth = savgol_filter(H_scaled, config.sg_window, config.sg_order)
     else:
@@ -388,25 +379,22 @@ def plot_comparison(df, simple_vals, akasofu_vals, dst_df, delay, smooth_hours, 
     print(f"✅ Figura salva: {fname}")
 
 # ============================
-# TESTE DE UNIDADES (CORRIGIDO)
+# TESTE DE UNIDADES
 # ============================
 def test_physics(config):
     print("\n🧪 TESTE DE UNIDADES FÍSICAS:")
     print("="*50)
-    # Condições quiet
     N, V, Bx, By, Bz = 5.0, 400.0, 2.0, 3.0, -5.0
     Pdyn = compute_pdyn_nPa(N, V)
     print(f"1. Pdyn({N} cm⁻³, {V} km/s) = {Pdyn:.2f} nPa")
     assert 1.0 < Pdyn < 2.0, f"Pdyn fora do esperado: {Pdyn}"
 
-    # Fonte quiet
     test_df = pd.DataFrame({'bx_gsm': [Bx], 'by_gsm': [By], 'bz_gsm': [Bz],
                             'speed': [V], 'density': [N]})
     S_q = compute_source_advanced(test_df, config)[0]
     print(f"2. Fonte(quiet) = {S_q:.2f}")
     assert 50 < S_q < 150, f"Fonte quiet fora do esperado: {S_q}"
 
-    # Fonte storm (parâmetros mais realistas)
     N_s, V_s, Bx_s, By_s, Bz_s = 40.0, 900.0, 5.0, 15.0, -30.0
     test_df_s = pd.DataFrame({'bx_gsm': [Bx_s], 'by_gsm': [By_s], 'bz_gsm': [Bz_s],
                               'speed': [V_s], 'density': [N_s]})
@@ -420,7 +408,7 @@ def test_physics(config):
     print("\n✅ Todos os testes passaram!")
 
 # ============================
-# MAIN (CORRIGIDA)
+# MAIN
 # ============================
 def main():
     parser = argparse.ArgumentParser()
@@ -439,7 +427,6 @@ def main():
     print(f"   Configuração: {config}")
     print("="*70)
 
-    # Teste físico
     test_physics(config)
 
     # Carregar OMNI
@@ -447,7 +434,7 @@ def main():
         print(f"❌ OMNI não encontrado: {args.omni}")
         return
     omni = pd.read_csv(args.omni, parse_dates=['time_tag'])
-    omni = prepare_omni(omni)
+    omni = prepare_omni(omni)  # remove qualquer coluna 'dst' e prepara
     print(f"✅ OMNI: {len(omni)} pontos, {omni['time_tag'].min()} a {omni['time_tag'].max()}")
 
     # Carregar Dst Kyoto
@@ -457,35 +444,44 @@ def main():
     dst = pd.read_csv(args.dst, parse_dates=['time_tag']).sort_values('time_tag')
     print(f"✅ Dst Kyoto: {len(dst)} pontos, {dst['time_tag'].min()} a {dst['time_tag'].max()}")
 
-    # Cortar Dst para o mesmo período do OMNI (evita extrapolação)
+    # Cortar Dst para o período do OMNI
     dst = dst[dst['time_tag'] <= omni['time_tag'].max()]
     print(f"   Dst cortado para período OMNI: {len(dst)} pontos")
 
-    # Merge robusto usando merge_asof (substitui reindex problemático)
-    time_grid = omni['time_tag'].copy()
+    # Interpolação robusta do Dst na grade do OMNI usando merge_asof
+    time_grid = omni[['time_tag']].copy()
     dst_interp = pd.merge_asof(
-        pd.DataFrame({'time_tag': time_grid}),
+        time_grid.sort_values('time_tag'),
         dst[['time_tag', 'dst']].sort_values('time_tag'),
         on='time_tag',
         direction='nearest',
         tolerance=pd.Timedelta('2h')
     )
-    # Preencher pequenas lacunas com interpolação linear
+    # Preencher pequenas lacunas com interpolação temporal
     dst_interp = dst_interp.set_index('time_tag')
     dst_interp = dst_interp.interpolate(method='time', limit=3)
     dst_interp = dst_interp.reset_index()
 
-    # Verificação de segurança
-    assert 'dst' in dst_interp.columns, "ERRO: coluna 'dst' sumiu no merge!"
-    assert not dst_interp['dst'].isna().all(), "ERRO: todos os valores de Dst são NaN!"
+    assert 'dst' in dst_interp.columns, "ERRO: coluna 'dst' sumiu na interpolação!"
 
-    # Juntar com OMNI
-    df = pd.merge(omni, dst_interp, on='time_tag', how='left').dropna(subset=['dst'])
+    # Merge final com OMNI - garantir que não haja conflito de nomes
+    if 'dst' in omni.columns:
+        omni = omni.drop(columns=['dst'])  # segurança extra
+    df = pd.merge(omni, dst_interp, on='time_tag', how='left', suffixes=('', '_dst'))
+    # Se a coluna resultante for 'dst_dst', renomear para 'dst'
+    if 'dst_dst' in df.columns:
+        df = df.rename(columns={'dst_dst': 'dst'})
+    # Remover qualquer coluna duplicada indesejada
+    for col in ['dst_x', 'dst_y']:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    assert 'dst' in df.columns, "Coluna 'dst' não encontrada após merge!"
+    df = df.dropna(subset=['dst'])
     print(f"   Merge final: {len(df)} pontos, Dst min = {df['dst'].min():.1f} nT")
     if df['dst'].min() > -50:
-        print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT). A validação pode ser prejudicada.")
+        print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT).")
 
-    # Selecionar função fonte
+    # Selecionar fonte conforme modelo
     if config.model == 'simple':
         source_func = lambda d, c: compute_source_simple(d)
     elif config.model == 'akasofu':
@@ -496,7 +492,7 @@ def main():
     # Primeira integração (sem calibração)
     df = integrate_hac(df, source_func, config, calib_factor=1.0)
 
-    # Baselines (apenas para modelo principal, para comparação)
+    # Baselines (apenas para modelo principal)
     if config.model == 'hac':
         df_simple = integrate_hac(df, lambda d, c: compute_source_simple(d), config, 1.0)
         df_akasofu = integrate_hac(df, lambda d, c: compute_source_akasofu(d), config, 1.0)
@@ -514,10 +510,8 @@ def main():
     transform = 'log'
     min_dst_calib = 5
 
-    # Delay ótimo
     best_delay, best_corr = find_optimal_delay(df_hac, dst_df, max_delay, step, smooth_hours, predictor)
 
-    # Calibração
     calib_slope, calib_intercept = 1.0, 0.0
     if not args.no_calibrate:
         df_raw = df[['time_tag', 'HAC_raw', 'dHAC_dt']].copy()
@@ -525,7 +519,6 @@ def main():
                                      smooth_hours, predictor, transform)
         if sl is not None:
             calib_slope, calib_intercept = sl, ic
-            # Ajustar fator linear para visualização
             hac_mean = df['HAC_raw'].mean()
             dst_pred = predict_from_calibration(hac_mean, calib_slope, calib_intercept, transform)
             linear_factor = dst_pred / hac_mean if hac_mean > 0 else 1.0
@@ -540,8 +533,7 @@ def main():
             df_hac = df[['time_tag', 'HAC', 'dHAC_dt']].copy()
             print(f"✅ HAC recalibrado com fator linear: {linear_factor:.3f}")
 
-    # Limiar HAC para Dst = -50
-    th_dst = 50   # valor positivo para métricas (|Dst|)
+    th_dst = 50
     if not args.no_calibrate and calib_slope != 1.0:
         hac_th = hac_threshold_from_calib(calib_slope, calib_intercept, th_dst, transform)
         hac_th = hac_th if hac_th is not None else np.percentile(df['HAC'].dropna(), 75)
@@ -549,7 +541,7 @@ def main():
         hac_th = np.percentile(df['HAC'].dropna(), 75)
     print(f"\n🎯 HAC_THRESHOLD (|Dst| = {th_dst} nT): {hac_th:.2f}")
 
-    # Validação direta (predição não linear)
+    # Validação direta
     print("\n📊 VALIDAÇÃO DIRETA COM CALIBRAÇÃO NÃO LINEAR")
     print("="*50)
     shifted = apply_time_shift(dst_df, best_delay)
@@ -572,7 +564,7 @@ def main():
             if metrics_direct['pod'] is not None:
                 print(f"   POD: {metrics_direct['pod']:.3f} | FAR: {metrics_direct['far']:.3f} | CSI: {metrics_direct['csi']:.3f}")
 
-    # Validação com HAC calibrado linear
+    # Validação linear
     print("\n📊 VALIDAÇÃO COM HAC CALIBRADO (LINEAR)")
     print("="*50)
     metrics_linear = validation_metrics(df_hac, shifted, predictor, smooth_hours, th_dst, hac_th)
@@ -585,34 +577,28 @@ def main():
         if metrics_linear['pod'] is not None:
             print(f"   POD: {metrics_linear['pod']:.3f} | FAR: {metrics_linear['far']:.3f} | CSI: {metrics_linear['csi']:.3f}")
 
-    # Comparação com baselines (apenas para modelo principal)
+    # Comparação com baselines
     if config.model == 'hac' and dst_df is not None:
         print("\n📊 COMPARAÇÃO COM BASELINES")
         print("="*50)
-        # Avaliar baseline simples
         df_simple_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': simple_vals})
         metrics_simple = validation_metrics(df_simple_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
         if metrics_simple:
-            print(f"Baseline (-Bz*V):")
-            print(f"   Correlação: {metrics_simple['correlation']:.3f}, R²: {metrics_simple['r2']:.3f}")
-        # Avaliar baseline Akasofu
+            print(f"Baseline (-Bz*V): Correlação={metrics_simple['correlation']:.3f}, R²={metrics_simple['r2']:.3f}")
         df_akasofu_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': akasofu_vals})
         metrics_akasofu = validation_metrics(df_akasofu_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
         if metrics_akasofu:
-            print(f"Baseline Akasofu ε:")
-            print(f"   Correlação: {metrics_akasofu['correlation']:.3f}, R²: {metrics_akasofu['r2']:.3f}")
+            print(f"Baseline Akasofu ε: Correlação={metrics_akasofu['correlation']:.3f}, R²={metrics_akasofu['r2']:.3f}")
         if metrics_direct:
-            print(f"Seu modelo HAC:")
-            print(f"   Correlação: {metrics_direct['correlation']:.3f}, R²: {metrics_direct['r2']:.3f}")
+            print(f"Seu modelo HAC: Correlação={metrics_direct['correlation']:.3f}, R²={metrics_direct['r2']:.3f}")
 
     # Salvar resultados
     df.to_csv(args.output, index=False)
     print(f"\n💾 Resultados salvos em {args.output}")
 
-    # Gráfico (usando o limiar negativo)
+    # Gráfico
     plot_comparison(df, simple_vals, akasofu_vals, dst_df, best_delay,
                     smooth_hours, predictor, -th_dst, "hac_comparison.png")
 
 if __name__ == "__main__":
     main()
-    
