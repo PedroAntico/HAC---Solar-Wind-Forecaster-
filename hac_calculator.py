@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com HAC Vetorial)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Melhorias)
 
-Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) conforme paper,
-e previsão do índice Dst a partir dos estados.
+Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) com:
+- Driver puro de Akasofu: ε = V * Btot² * sin⁴(θ/2)  (normalizado)
+- Memória exponencial no driver (τ_driver)
+- Correção de pressão dinâmica no decaimento (Dst* = Dst - b * sqrt(Pdyn))
+- Peso ajustável para Hload, Hrel e C (acoplamento complementar)
+- Busca automática de delay
 
 Uso:
-    python hac_calculator.py --dst_model hac --find_delay
+    python hac_calculator.py --find_delay
 """
 
 import pandas as pd
@@ -54,10 +58,10 @@ def apply_time_shift(df, hours):
 # ============================
 # HAC VETORIAL (Hload, Hrel, Hsat)
 # ============================
-def integrate_hac_vectorial(df):
+def integrate_hac_vectorial(df, driver_type='akasofu'):
     """
     Calcula os estados Hload, Hrel, Hsat e HCI a partir dos dados OMNI.
-    Retorna DataFrame com colunas adicionais.
+    driver_type: 'akasofu' (padrão) ou 'hybrid' (anterior).
     """
     times = df['time_tag'].values
     Bz = df['bz_gsm'].values
@@ -66,14 +70,20 @@ def integrate_hac_vectorial(df):
     Bx = df['bx_gsm'].values
     By = df['by_gsm'].values
 
-    # ----- Driver φ(t) (fisicamente realista) -----
+    # ----- Driver φ(t) -----
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
     sin4 = np.sin(theta / 2)**4
-    # Termo de pressão dinâmica (em nPa) vezes Btot
-    Pdyn = compute_pdyn_nPa(N, V)
-    phi = 0.7 * (Pdyn * Btot) + 0.3 * (V * Btot**2 * sin4)
-    phi = phi / 1000.0   # normalização para escala ~1
+
+    if driver_type == 'akasofu':
+        # Akasofu puro: ε = V * Btot² * sin⁴(θ/2)
+        phi_raw = V * (Btot**2) * sin4
+        phi = phi_raw / 1000.0   # normalização empírica (ε típico ~1000)
+    else:
+        # Híbrido antigo (preservado para comparação)
+        Pdyn = compute_pdyn_nPa(N, V)
+        phi = 0.7 * (Pdyn * Btot) + 0.3 * (V * Btot**2 * sin4)
+        phi = phi / 1000.0
 
     # ----- Tempo -----
     dt_sec = np.zeros(len(times))
@@ -133,52 +143,63 @@ def integrate_hac_vectorial(df):
     return out
 
 # ============================
-# MODELO DST BASEADO NO HAC VETORIAL
+# MODELO DST BASEADO NO HAC VETORIAL (COM MELHORIAS)
 # ============================
-def compute_dst_hac(df, alpha=2.0, tau=10.0, gamma1=0.7, gamma2=0.2, delay_internal=2.0):
+def compute_dst_hac(df, alpha=2.0, tau=10.0, gamma1=1.0, gamma2=0.0,
+                    delay_internal=2.0, tau_driver=2.0, b_pressure=6.0):
     """
     Dst a partir dos estados HAC.
-    Driver combinado: γ1*Hload + γ2*Hrel + γ3*C, onde γ3 = 1 - γ1 - γ2.
-    Equação: dDst/dt = -α * driver - Dst/τ
-    delay_internal: atraso na injeção (horas).
+    - Driver combinado: γ1*Hload + γ2*Hrel + (1-γ1-γ2)*C
+    - Memória exponencial no driver (τ_driver)
+    - Correção de pressão dinâmica: Dst* = Dst - b_pressure * sqrt(Pdyn)
+    - Equação: dDst/dt = -α * driver_eff - Dst* / τ
     """
     times = df['time_tag'].values
     Hload = df['Hload'].values
     Hrel  = df['Hrel'].values
     C     = df['C'].values
+    Pdyn  = compute_pdyn_nPa(df['density'].values, df['speed'].values)
 
-    # Combinação linear (evita duplicação de Hload)
+    # Combinação linear dos estados
     gamma3 = 1.0 - gamma1 - gamma2
     driver_raw = gamma1 * Hload + gamma2 * Hrel + gamma3 * C
 
     # Atraso interno (shift)
-    if delay_internal > 0:
-        if len(times) > 1:
-            dt_sec = np.median(np.diff(times).astype('timedelta64[s]').astype(float))
-        else:
-            dt_sec = 3600.0
-        delay_steps = int(round(delay_internal * 3600 / dt_sec))
-        if delay_steps > 0:
-            driver = np.zeros_like(driver_raw)
-            if delay_steps < len(driver):
-                driver[delay_steps:] = driver_raw[:-delay_steps]
-        else:
-            driver = driver_raw
-    else:
-        driver = driver_raw
-
-    # Integração do Dst
     dt_sec_arr = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec_arr[1:] = diffs
     dt_sec_arr[0] = np.median(diffs) if len(diffs) > 0 else 60.0
     dt_h = dt_sec_arr / 3600.0
 
+    if delay_internal > 0:
+        delay_steps = int(round(delay_internal * 3600 / np.median(dt_sec_arr[dt_sec_arr>0])))
+        if delay_steps > 0:
+            driver_delayed = np.zeros_like(driver_raw)
+            if delay_steps < len(driver_raw):
+                driver_delayed[delay_steps:] = driver_raw[:-delay_steps]
+        else:
+            driver_delayed = driver_raw
+    else:
+        driver_delayed = driver_raw
+
+    # Memória exponencial no driver (τ_driver)
+    if tau_driver > 0:
+        driver_eff = np.zeros_like(driver_delayed)
+        for i in range(1, len(driver_eff)):
+            decay = np.exp(-dt_h[i] / tau_driver)
+            driver_eff[i] = driver_eff[i-1] * decay + driver_delayed[i] * (1 - decay)
+        driver = driver_eff
+    else:
+        driver = driver_delayed
+
+    # Integração do Dst com correção de pressão
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
+        # Dst corrigido pela pressão dinâmica
+        Dst_star = Dst[i-1] - b_pressure * np.sqrt(Pdyn[i])
         injection = -alpha * driver[i]
-        decay = Dst[i-1] / tau
+        decay = Dst_star / tau
         dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt
         Dst[i] = max(-500, min(50, Dst[i]))
@@ -293,23 +314,29 @@ def plot_comparison(df, df_model, dst_df, delay, smooth_hours, fname):
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC Calculator - Modelo Vetorial')
+    parser = argparse.ArgumentParser(description='HAC Calculator - Modelo Vetorial Melhorado')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
+    parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'],
+                        help='Tipo de driver: akasofu (puro) ou hybrid')
     parser.add_argument('--alpha', type=float, default=2.0, help='Coeficiente de injeção')
     parser.add_argument('--tau', type=float, default=10.0, help='Constante de decaimento (horas)')
-    parser.add_argument('--gamma1', type=float, default=0.7, help='Peso de Hload')
-    parser.add_argument('--gamma2', type=float, default=0.2, help='Peso de Hrel')
+    parser.add_argument('--gamma1', type=float, default=1.0, help='Peso de Hload')
+    parser.add_argument('--gamma2', type=float, default=0.0, help='Peso de Hrel')
     parser.add_argument('--delay_internal', type=float, default=2.0, help='Atraso interno (horas)')
+    parser.add_argument('--tau_driver', type=float, default=2.0, help='Memória exponencial do driver (horas)')
+    parser.add_argument('--b_pressure', type=float, default=6.0, help='Coeficiente de correção de pressão (Dst*)')
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
     parser.add_argument('--find_delay', action='store_true', help='Busca atraso ótimo')
     parser.add_argument('--max_delay', type=int, default=24, help='Máximo delay para busca')
     args = parser.parse_args()
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo Vetorial (Hload, Hrel, Hsat)")
-    print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}, delay_internal={args.delay_internal}h")
+    print("🛰️  HAC - Modelo Vetorial Melhorado")
+    print(f"   Driver: {args.driver_type.upper()}")
+    print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}")
+    print(f"   delay_internal={args.delay_internal}h, tau_driver={args.tau_driver}h, b_pressure={args.b_pressure}")
     print("="*70)
 
     # Carregar OMNI
@@ -355,10 +382,15 @@ def main():
         print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT).")
 
     # HAC vetorial
-    df = integrate_hac_vectorial(df)
-    df['Dst_model'] = compute_dst_hac(df, alpha=args.alpha, tau=args.tau,
-                                      gamma1=args.gamma1, gamma2=args.gamma2,
-                                      delay_internal=args.delay_internal)
+    df = integrate_hac_vectorial(df, driver_type=args.driver_type)
+    df['Dst_model'] = compute_dst_hac(df,
+                                      alpha=args.alpha,
+                                      tau=args.tau,
+                                      gamma1=args.gamma1,
+                                      gamma2=args.gamma2,
+                                      delay_internal=args.delay_internal,
+                                      tau_driver=args.tau_driver,
+                                      b_pressure=args.b_pressure)
 
     # Validação
     df_model = df[['time_tag', 'Dst_model']].copy()
