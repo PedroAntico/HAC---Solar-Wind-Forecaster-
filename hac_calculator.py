@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final)
+HAC - Heliospheric Accumulated Coupling (Versão Final Validada)
 Modelo físico: HAC = integral de S(t) com memória adaptativa e perda não linear.
 S(t) = V * (-Bz) * sin²(θ/2) * sqrt(B_total) * (Pdyn/P0)^{α}
 Baselines: (-Bz*V) e Akasofu ε (mesma dinâmica).
@@ -324,9 +324,9 @@ def calibrate_nonlinear(df_raw, dst_series, delay, min_hac, min_dst,
     x = merged.loc[mask, col].values
     y = -merged.loc[mask, 'dst_smooth'].values
     xt, yt = transform_xy(x, y, transform)
-    slope, intercept, r2, _, _ = linregress(xt, yt)
+    slope, intercept, r_value, _, _ = linregress(xt, yt)
     print(f"📊 Calibração (delay={delay}h, transform={transform}):")
-    print(f"   f(y) = {slope:.3f} * f(HAC) + {intercept:.3f} (R²={r2**2:.3f})")
+    print(f"   f(y) = {slope:.3f} * f(HAC) + {intercept:.3f} (R²={r_value**2:.3f})")
     return slope, intercept
 
 def predict_from_calibration(hac, slope, intercept, transform):
@@ -352,7 +352,7 @@ def hac_threshold_from_calib(slope, intercept, target_dst, transform):
 # ============================
 # GRÁFICO
 # ============================
-def plot_comparison(df, simple_vals, akasofu_vals, dst_df, delay, smooth_hours, predictor, th_dst, fname):
+def plot_comparison(df, simple_vals, akasofu_vals, dst_df, delay, smooth_hours, predictor, th_dst_neg, fname):
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
     axes[0].plot(df['time_tag'], df['HAC'], label='HAC (principal)', color='#d62728', lw=2)
@@ -369,7 +369,7 @@ def plot_comparison(df, simple_vals, akasofu_vals, dst_df, delay, smooth_hours, 
             dst_shifted = dst_df.copy()
         dst_shifted = smooth_dst(dst_shifted, smooth_hours)
         axes[1].plot(dst_shifted['time_tag'], dst_shifted['dst_smooth'], 'k', lw=1.5, label='Dst suavizado')
-        axes[1].axhline(th_dst, color='red', ls='--', label=f'Limiar tempestade ({th_dst} nT)')
+        axes[1].axhline(th_dst_neg, color='red', ls='--', label=f'Limiar tempestade ({th_dst_neg} nT)')
         axes[1].set_ylabel('Dst [nT]')
         axes[1].legend(loc='upper left')
         axes[1].grid(True, alpha=0.3)
@@ -413,7 +413,6 @@ def test_physics(config):
     S_s = compute_source_advanced(test_df_s, config)[0]
     ratio = S_s / S_q
     print(f"3. Fonte(storm) = {S_s:.2f} (amplificação = {ratio:.2f}x)")
-    # Verificação física: espera-se amplificação > 1.5 (e geralmente > 5 em tempestades reais)
     assert ratio > 1.5, f"Tempestade não amplificou o suficiente: {ratio:.2f}x"
 
     print(f"4. SOURCE_NORM = {config.source_norm_constant:.2f}")
@@ -522,7 +521,7 @@ def main():
             print(f"✅ HAC recalibrado com fator linear: {linear_factor:.3f}")
 
     # Limiar HAC para Dst = -50
-    th_dst = 50
+    th_dst = 50   # valor positivo para métricas (|Dst|)
     if not args.no_calibrate and calib_slope != 1.0:
         hac_th = hac_threshold_from_calib(calib_slope, calib_intercept, th_dst, transform)
         hac_th = hac_th if hac_th is not None else np.percentile(df['HAC'].dropna(), 75)
@@ -530,7 +529,7 @@ def main():
         hac_th = np.percentile(df['HAC'].dropna(), 75)
     print(f"\n🎯 HAC_THRESHOLD (|Dst| = {th_dst} nT): {hac_th:.2f}")
 
-    # Validação direta
+    # Validação direta (predição não linear)
     print("\n📊 VALIDAÇÃO DIRETA COM CALIBRAÇÃO NÃO LINEAR")
     print("="*50)
     shifted = apply_time_shift(dst_df, best_delay)
@@ -539,39 +538,60 @@ def main():
                            on='time_tag', direction='backward').dropna(subset=['dst', 'HAC_raw'])
     merged = smooth_dst(merged, smooth_hours)
     merged = merged[merged['dst_smooth'] < 0]
+    metrics_direct = None
     if len(merged) > 10:
         y_true = -merged['dst_smooth'].values
         y_pred = predict_from_calibration(merged['HAC_raw'].values, calib_slope, calib_intercept, transform)
-        m = compute_metrics(y_true, y_pred, th_dst, hac_th, merged['HAC_raw'].values)
-        if m:
+        metrics_direct = compute_metrics(y_true, y_pred, th_dst, hac_th, merged['HAC_raw'].values)
+        if metrics_direct:
             print(f"✅ Modelo principal (predição direta) vs Dst suavizado (delay={best_delay}h):")
-            print(f"   Correlação: {m['correlation']:.3f}")
-            print(f"   R²: {m['r2']:.3f}")
-            print(f"   RMSE: {m['rmse']:.2f}")
-            print(f"   MAE: {m['mae']:.2f}")
-            if m['pod'] is not None:
-                print(f"   POD: {m['pod']:.3f} | FAR: {m['far']:.3f} | CSI: {m['csi']:.3f}")
+            print(f"   Correlação: {metrics_direct['correlation']:.3f}")
+            print(f"   R²: {metrics_direct['r2']:.3f}")
+            print(f"   RMSE: {metrics_direct['rmse']:.2f}")
+            print(f"   MAE: {metrics_direct['mae']:.2f}")
+            if metrics_direct['pod'] is not None:
+                print(f"   POD: {metrics_direct['pod']:.3f} | FAR: {metrics_direct['far']:.3f} | CSI: {metrics_direct['csi']:.3f}")
 
     # Validação com HAC calibrado linear
     print("\n📊 VALIDAÇÃO COM HAC CALIBRADO (LINEAR)")
     print("="*50)
-    m2 = validation_metrics(df_hac, shifted, predictor, smooth_hours, th_dst, hac_th)
-    if m2:
+    metrics_linear = validation_metrics(df_hac, shifted, predictor, smooth_hours, th_dst, hac_th)
+    if metrics_linear:
         print(f"✅ HAC (calibrado linear) vs Dst suavizado (delay={best_delay}h):")
-        print(f"   Correlação: {m2['correlation']:.3f}")
-        print(f"   R²: {m2['r2']:.3f}")
-        print(f"   RMSE: {m2['rmse']:.2f}")
-        print(f"   MAE: {m2['mae']:.2f}")
-        if m2['pod'] is not None:
-            print(f"   POD: {m2['pod']:.3f} | FAR: {m2['far']:.3f} | CSI: {m2['csi']:.3f}")
+        print(f"   Correlação: {metrics_linear['correlation']:.3f}")
+        print(f"   R²: {metrics_linear['r2']:.3f}")
+        print(f"   RMSE: {metrics_linear['rmse']:.2f}")
+        print(f"   MAE: {metrics_linear['mae']:.2f}")
+        if metrics_linear['pod'] is not None:
+            print(f"   POD: {metrics_linear['pod']:.3f} | FAR: {metrics_linear['far']:.3f} | CSI: {metrics_linear['csi']:.3f}")
+
+    # Comparação com baselines (apenas para modelo principal)
+    if config.model == 'hac' and dst_df is not None:
+        print("\n📊 COMPARAÇÃO COM BASELINES")
+        print("="*50)
+        # Avaliar baseline simples
+        df_simple_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': simple_vals})
+        metrics_simple = validation_metrics(df_simple_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
+        if metrics_simple:
+            print(f"Baseline (-Bz*V):")
+            print(f"   Correlação: {metrics_simple['correlation']:.3f}, R²: {metrics_simple['r2']:.3f}")
+        # Avaliar baseline Akasofu
+        df_akasofu_eval = pd.DataFrame({'time_tag': df['time_tag'], 'HAC': akasofu_vals})
+        metrics_akasofu = validation_metrics(df_akasofu_eval, shifted, predictor, smooth_hours, th_dst, hac_th)
+        if metrics_akasofu:
+            print(f"Baseline Akasofu ε:")
+            print(f"   Correlação: {metrics_akasofu['correlation']:.3f}, R²: {metrics_akasofu['r2']:.3f}")
+        if metrics_direct:
+            print(f"Seu modelo HAC:")
+            print(f"   Correlação: {metrics_direct['correlation']:.3f}, R²: {metrics_direct['r2']:.3f}")
 
     # Salvar resultados
     df.to_csv(args.output, index=False)
     print(f"\n💾 Resultados salvos em {args.output}")
 
-    # Gráfico
+    # Gráfico (usando o limiar negativo)
     plot_comparison(df, simple_vals, akasofu_vals, dst_df, best_delay,
-                    smooth_hours, predictor, DST_THRESHOLD, "hac_comparison.png")
+                    smooth_hours, predictor, -th_dst, "hac_comparison.png")
 
 if __name__ == "__main__":
     main()
