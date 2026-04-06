@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final Corrigida)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Saturação e Ajustes Físicos)
+
 Modelos de Dst:
-  - burton: dDst/dt = -α * Ey_eff - (Dst - b√Pdyn)/τ   (Ey_eff = max(0, Ey - threshold))
+  - burton: dDst/dt = -α * Ey_sat - (Dst - b√Pdyn) / τ
+    Ey_sat = max(0, Ey - threshold) / (1 + (max(0, Ey - threshold))/E0)
   - hybrid: Dst = -a * HAC - b * dHAC/dt
   - direct: Dst = -HAC
+
 Uso:
-    python hac_calculator.py --dst_model burton --alpha 1.5 --b 10 --tau_hours 7 --threshold 0.5
+    python hac_calculator.py --dst_model burton --alpha 3.0 --b 12 --tau_hours 7 --threshold 0.5 --E0 5.0
     python hac_calculator.py --dst_model hybrid --a 0.5 --b_hybrid 0.2
 """
 
@@ -30,7 +33,6 @@ CM3_TO_M3 = 1e6
 KMS_TO_MS = 1e3
 
 def compute_pdyn_nPa(N_cm3, V_kms):
-    """Pressão dinâmica em nPa (unidade correta)"""
     N_m3 = N_cm3 * CM3_TO_M3
     V_ms = V_kms * KMS_TO_MS
     return M_P * N_m3 * V_ms**2 * 1e9
@@ -178,19 +180,21 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELOS DST FÍSICOS (CORRIGIDOS)
+# MODELOS DST FÍSICOS (COM SATURAÇÃO)
 # ============================
-def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=1.5, threshold=0.5):
+def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=3.0, threshold=0.5, E0=5.0):
     """
-    Modelo de Burton com:
+    Modelo de Burton com saturação:
         Ey = V * max(0, -Bz) * 1e-3   (mV/m)
-        Ey_eff = max(0, Ey - threshold)   (só injeção acima do limiar)
-        dDst/dt = -α * Ey_eff - (Dst - b√Pdyn) / τ   (τ em horas)
+        Ey_eff = max(0, Ey - threshold)
+        Ey_sat = Ey_eff / (1 + Ey_eff / E0)
+        dDst/dt = -α * Ey_sat - (Dst - b√Pdyn) / τ
     """
     Bz = df['bz_gsm'].values
     V = df['speed'].values
     Ey_raw = V * np.maximum(0, -Bz) * 1e-3          # mV/m
-    Ey_eff = np.maximum(0, Ey_raw - threshold)      # limiar
+    Ey_eff = np.maximum(0, Ey_raw - threshold)      # acima do limiar
+    Ey_sat = Ey_eff / (1 + Ey_eff / E0)             # saturação
     Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
 
     times = df['time_tag'].values
@@ -202,19 +206,16 @@ def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=1.5, threshold=0.5):
     else:
         dt_sec[:] = 60.0
 
-    # Conversão para horas (usado no termo de perda)
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt_hours = dt_sec[i] / 3600.0
-        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])   # Dst corrigido pela pressão
-        # Equação: dDst/dt (nT/h) = -α * Ey_eff (mV/m) - Dst_star / τ (horas)
-        dDst = -alpha * Ey_eff[i] - Dst_star / tau_hours
+        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])
+        dDst = -alpha * Ey_sat[i] - Dst_star / tau_hours
         Dst[i] = Dst[i-1] + dDst * dt_hours
-        Dst[i] = max(-500, min(50, Dst[i]))          # limites físicos
+        Dst[i] = max(-500, min(50, Dst[i]))
     return Dst
 
 def compute_dst_hybrid(df, a=0.5, b=0.2):
-    """Modelo híbrido: Dst = -a * HAC - b * dHAC/dt"""
     return -a * df['HAC'].values - b * df['dHAC_dt'].values
 
 def compute_dst_direct(df):
@@ -383,8 +384,9 @@ def main():
     # Parâmetros para burton
     parser.add_argument('--tau_hours', type=float, default=7.0, help='Constante de tempo (horas)')
     parser.add_argument('--b', type=float, default=10.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--alpha', type=float, default=1.5, help='Fator de escala para Ey')
+    parser.add_argument('--alpha', type=float, default=3.0, help='Fator de escala para Ey')
     parser.add_argument('--threshold', type=float, default=0.5, help='Limiar para Ey (mV/m)')
+    parser.add_argument('--E0', type=float, default=5.0, help='Parâmetro de saturação (mV/m)')
     # Parâmetros gerais
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
@@ -401,7 +403,7 @@ def main():
     elif args.dst_model == 'deriv':
         print(f"   k = {args.k}")
     elif args.dst_model == 'burton':
-        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}, threshold = {args.threshold} mV/m")
+        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}, threshold = {args.threshold} mV/m, E0 = {args.E0} mV/m")
     print("="*70)
 
     test_physics(config)
@@ -468,7 +470,8 @@ def main():
         df['Dst_model'] = compute_dst_hybrid(df, a=args.a, b=args.b_hybrid)
     else:  # burton
         df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b,
-                                             alpha=args.alpha, threshold=args.threshold)
+                                             alpha=args.alpha, threshold=args.threshold,
+                                             E0=args.E0)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
@@ -509,3 +512,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
