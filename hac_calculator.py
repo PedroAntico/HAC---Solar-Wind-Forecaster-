@@ -1,33 +1,14 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Modelo Dst Físico)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Burton Físico)
 
-Este script implementa:
-- Cálculo do HAC (acúmulo de energia) a partir de dados OMNI.
-- Modelagem do índice Dst a partir do HAC, usando:
-   * Modelo direto: Dst_sim = -HAC (proxy)
-   * Modelo com correção derivativa: Dst_sim = -HAC + k * dH/dt
-   * Modelo de Burton: dDst/dt = Q(t) - Dst/τ (físico)
+Modelo HAC: acumulação de energia com perda adaptativa.
+Modelo Dst (Burton et al.): dDst/dt = Q(t) - (Dst - b*sqrt(Pdyn))/τ
+onde Q(t) é o termo fonte original (injeção de energia) e Pdyn a pressão dinâmica.
 
-Argumentos:
-  --omni         Arquivo CSV com dados OMNI (time_tag, bx_gsm, by_gsm, bz_gsm, density, speed)
-  --dst          Arquivo CSV com Dst Kyoto (time_tag, dst)
-  --model        Modelo HAC: 'hac', 'simple', 'akasofu'
-  --simplify     Simplifica o modelo HAC (desliga pressão dinâmica e perda não linear)
-  --dst_model    Tipo de modelo Dst: 'direct', 'deriv', 'burton'
-  --k            Coeficiente para termo derivativo (padrão 0.5)
-  --tau_hours    Constante de tempo para modelo Burton (padrão 7 horas)
-  --alpha_pdyn   Expoente da pressão dinâmica (padrão 1/6)
-  --predictor    Preditor para validação: 'hac' ou 'deriv' (apenas para comparação)
-  --smooth_hours Suavização do Dst (horas)
-  --test_invert  Testar inversão de sinal
-  --no_calibrate Pular calibração
-  --output       Arquivo de saída
-
-Exemplo:
-    python hac_calculator.py --dst_model direct
-    python hac_calculator.py --dst_model deriv --k 0.3
-    python hac_calculator.py --dst_model burton --tau_hours 8
+Uso:
+    python hac_calculator.py --omni data/omni_2000_2020.csv --dst data/dst_kyoto_2000_2020.csv
+    python hac_calculator.py --dst_model burton --tau_hours 7 --b 0.2 --scale_q 0.01
 """
 
 import pandas as pd
@@ -194,22 +175,22 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     out['HAC_raw'] = H
     out['HAC_smooth'] = H_smooth
     out['dHAC_dt'] = dH_dt
+    out['source'] = source   # Salvar a fonte original (injeção de energia)
     return out
 
 # ============================
-# MODELOS DST A PARTIR DO HAC
+# MODELO DST (BURTON FÍSICO)
 # ============================
-def compute_dst_from_hac(df, dst_model='direct', k=0.5, tau_hours=7.0):
+def compute_dst_burton(df, tau_hours=7.0, b=0.2, scale_q=0.01):
     """
-    Cria uma série Dst_model baseada no HAC.
-    Opções:
-        'direct' : Dst_model = -HAC
-        'deriv'  : Dst_model = -HAC + k * dHAC_dt
-        'burton' : dDst/dt = source - Dst/tau  (usando source do HAC)
+    Modelo de Burton:
+        Dst* = Dst - b * sqrt(Pdyn)
+        dDst/dt = Q(t) - Dst*/τ
+    Onde Q(t) é a fonte (injeção de energia) e Pdyn a pressão dinâmica.
     """
     times = df['time_tag'].values
-    H = df['HAC'].values
-    dH = df['dHAC_dt'].values
+    Q = df['source'].values                     # injeção original
+    Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
     dt_sec = np.zeros(len(times))
     if len(times) > 1:
         diffs = np.diff(times).astype('timedelta64[s]').astype(float)
@@ -218,33 +199,26 @@ def compute_dst_from_hac(df, dst_model='direct', k=0.5, tau_hours=7.0):
     else:
         dt_sec[:] = 60.0
 
-    if dst_model == 'direct':
-        Dst_model = -H
-    elif dst_model == 'deriv':
-        Dst_model = -H + k * dH
-    elif dst_model == 'burton':
-        # Usar o source (taxa de injeção) armazenado em 'HAC_raw'? Na verdade, source é a entrada.
-        # Precisamos do source original (não o HAC acumulado). Vamos usar o source do HAC_raw?
-        # O HAC_raw é o acumulado, não o source. Precisamos recuperar o source do dataframe.
-        # A função integrate_hac não salvou o source. Vamos recalcular o source?
-        # Alternativa: usar a derivada dH/dt + perda para obter source.
-        # source = dH/dt + H/tau_eff
-        # Mas tau_eff é variável. Vamos simplificar usando um tau fixo.
-        tau_sec = tau_hours * 3600.0
-        Dst_model = np.zeros(len(times))
-        for i in range(1, len(times)):
-            # Fonte: HAC_raw[i] é o acumulado? Não, HAC_raw é o H antes da calibração.
-            # Na verdade, a fonte real é a entrada do modelo, que não está disponível.
-            # Vamos usar a derivada do HAC como proxy da injeção.
-            Q = dH[i]  # simplificação
-            dDst = Q - Dst_model[i-1] / tau_sec
-            Dst_model[i] = Dst_model[i-1] + dDst * dt_sec[i]
-    else:
-        raise ValueError(f"Modelo Dst desconhecido: {dst_model}")
+    tau_sec = tau_hours * 3600.0
+    Dst_model = np.zeros(len(times))
+    for i in range(1, len(times)):
+        # Dst corrigido pela pressão dinâmica
+        Dst_star = Dst_model[i-1] - b * np.sqrt(Pdyn[i])
+        # Taxa de variação
+        dDst = scale_q * Q[i] - Dst_star / tau_sec
+        Dst_model[i] = Dst_model[i-1] + dDst * dt_sec[i]
     return Dst_model
 
+def compute_dst_direct(df):
+    """Modelo direto: Dst_model = -HAC (proxy simples)"""
+    return -df['HAC'].values
+
+def compute_dst_deriv(df, k=0.5):
+    """Modelo derivativo: Dst_model = -HAC + k * dH/dt"""
+    return -df['HAC'].values + k * df['dHAC_dt'].values
+
 # ============================
-# VALIDAÇÃO (delay, calibração, métricas)
+# VALIDAÇÃO
 # ============================
 def smooth_dst(merged, hours):
     if hours <= 0:
@@ -287,8 +261,8 @@ def validation_metrics(df_model, dst_series, smooth_hours):
                            on='time_tag', direction='backward')
     merged = merged.dropna(subset=['dst', 'Dst_model'])
     merged = smooth_dst(merged, smooth_hours)
-    y_true = -merged['dst_smooth'].values  # positivo
-    y_pred = -merged['Dst_model'].values   # queremos que Dst_model seja negativo
+    y_true = -merged['dst_smooth'].values
+    y_pred = -merged['Dst_model'].values
     return compute_metrics(y_true, y_pred)
 
 def find_optimal_delay(df_model, dst_series, max_delay, step, smooth_hours):
@@ -326,7 +300,6 @@ def calibrate_dst_model(df_model, dst_series, delay, smooth_hours):
         return 1.0
     x = merged.loc[mask, 'Dst_model'].values
     y = -merged.loc[mask, 'dst_smooth'].values
-    # Regressão linear sem intercepto
     slope = np.sum(x * y) / np.sum(x * x)
     print(f"📊 Calibração: Dst_model = {slope:.3f} * Dst_model_orig")
     return slope
@@ -395,10 +368,12 @@ def main():
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--model', default='hac', choices=['hac', 'simple', 'akasofu'])
     parser.add_argument('--simplify', action='store_true')
-    parser.add_argument('--dst_model', default='direct', choices=['direct', 'deriv', 'burton'],
+    parser.add_argument('--dst_model', default='burton', choices=['direct', 'deriv', 'burton'],
                         help='Modelo para converter HAC em Dst')
     parser.add_argument('--k', type=float, default=0.5, help='Coeficiente para modelo deriv')
     parser.add_argument('--tau_hours', type=float, default=7.0, help='Constante de tempo (Burton)')
+    parser.add_argument('--b', type=float, default=0.2, help='Coeficiente da pressão dinâmica (Burton)')
+    parser.add_argument('--scale_q', type=float, default=0.01, help='Fator de escala para Q (Burton)')
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
     parser.add_argument('--no_calibrate', action='store_true', help='Não aplicar calibração linear')
@@ -412,7 +387,7 @@ def main():
     if args.dst_model == 'deriv':
         print(f"   Coeficiente k = {args.k}")
     elif args.dst_model == 'burton':
-        print(f"   τ = {args.tau_hours} h")
+        print(f"   τ = {args.tau_hours} h, b = {args.b}, scale_Q = {args.scale_q}")
     print("="*70)
 
     test_physics(config)
@@ -470,8 +445,13 @@ def main():
     # Calcular HAC (sem calibração)
     df = integrate_hac(df, source_func, config, calib_factor=1.0)
 
-    # Gerar Dst_model a partir do HAC
-    df['Dst_model'] = compute_dst_from_hac(df, dst_model=args.dst_model, k=args.k, tau_hours=args.tau_hours)
+    # Gerar Dst_model conforme escolha
+    if args.dst_model == 'direct':
+        df['Dst_model'] = compute_dst_direct(df)
+    elif args.dst_model == 'deriv':
+        df['Dst_model'] = compute_dst_deriv(df, k=args.k)
+    else:  # burton
+        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b, scale_q=args.scale_q)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
@@ -483,8 +463,8 @@ def main():
     # Encontrar delay ótimo
     best_delay, best_corr = find_optimal_delay(df_model, dst_df, max_delay, step, smooth_hours)
 
-    # Calibração linear (opcional)
-    if not args.no_calibrate:
+    # Calibração linear (opcional, apenas para direct/deriv)
+    if not args.no_calibrate and args.dst_model != 'burton':
         factor = calibrate_dst_model(df_model, dst_df, best_delay, smooth_hours)
         if factor != 1.0:
             df['Dst_model'] = df['Dst_model'] * factor
