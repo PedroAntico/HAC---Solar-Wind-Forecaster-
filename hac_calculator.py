@@ -2,20 +2,11 @@
 """
 HAC - Heliospheric Accumulated Coupling (Versão Final com HAC Vetorial)
 
-Implementa o modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) 
-conforme descrito no paper, e o utiliza para prever o índice Dst.
+Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) conforme paper,
+e previsão do índice Dst a partir dos estados.
 
-Modelos disponíveis:
-  - 'hac': Dst_model = -α * HCI (com decaimento exponencial)
-  - 'burton': modelo clássico de Burton com driver Akasofu ε
-  - 'direct': Dst = -a * HAC (para comparação)
-
-Uso recomendado:
-    # HAC vetorial
+Uso:
     python hac_calculator.py --dst_model hac --find_delay
-
-    # Burton (baseline)
-    python hac_calculator.py --dst_model burton --use_akasofu_driver --find_delay
 """
 
 import pandas as pd
@@ -43,44 +34,6 @@ def compute_pdyn_nPa(N_cm3, V_kms):
     return M_P * N_m3 * V_ms**2 * 1e9
 
 # ============================
-# CLASSE DE CONFIGURAÇÃO (HAC)
-# ============================
-class Config:
-    def __init__(self, alpha_pdyn=1/6, simplify=False, model='hac'):
-        self.alpha_pdyn = alpha_pdyn
-        self.simplify = simplify
-        self.model = model
-        self.tau_base_hours = 3.0
-        self.v_ref = 400.0
-        self.tau_power = 0.3
-        self.tau_min_hours = 1.0
-        self.tau_max_hours = 6.0
-        self.use_by_clock = True
-        self.use_dynamic_pressure = not simplify
-        self.p0 = 2.0
-        self.beta_source = 0.0 if simplify else 0.5
-        self.loss_exponent = 1.0 if simplify else 1.5
-        self.h0 = 100.0
-        self.max_source_physical = 10000.0
-        self.max_hac = 500.0
-        self.use_savgol = True
-        self.sg_window = 7
-        self.sg_order = 2
-        self.source_norm_constant = self._compute_norm()
-
-    def _compute_norm(self):
-        V = 400.0
-        Bz = -5.0
-        B = 7.0
-        Pdyn = 2.0
-        base = V * (-Bz) * np.sqrt(B) * (Pdyn/self.p0)**self.alpha_pdyn
-        return base / 100.0
-
-    def __repr__(self):
-        return (f"Config(model={self.model}, simplify={self.simplify}, "
-                f"alpha_pdyn={self.alpha_pdyn:.3f}, norm={self.source_norm_constant:.2f})")
-
-# ============================
 # FUNÇÕES AUXILIARES
 # ============================
 def prepare_omni(df):
@@ -101,10 +54,10 @@ def apply_time_shift(df, hours):
 # ============================
 # HAC VETORIAL (Hload, Hrel, Hsat)
 # ============================
-def integrate_hac_vectorial(df, config):
+def integrate_hac_vectorial(df):
     """
-    HAC REAL - versão vetorial (Hload, Hrel, Hsat) conforme paper.
-    Retorna DataFrame com colunas Hload, Hrel, Hsat, HCI.
+    Calcula os estados Hload, Hrel, Hsat e HCI a partir dos dados OMNI.
+    Retorna DataFrame com colunas adicionais.
     """
     times = df['time_tag'].values
     Bz = df['bz_gsm'].values
@@ -113,27 +66,28 @@ def integrate_hac_vectorial(df, config):
     Bx = df['bx_gsm'].values
     By = df['by_gsm'].values
 
-    # ===== DRIVER φ(t) =====
+    # ----- Driver φ(t) (fisicamente realista) -----
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
     sin4 = np.sin(theta / 2)**4
-    # termo híbrido (pressão dinâmica + reconexão)
-    phi = 0.7 * (N * V**2 * Btot**2) + 0.3 * (V * Btot**2 * sin4)
-    phi = phi / 1e6   # normalização
+    # Termo de pressão dinâmica (em nPa) vezes Btot
+    Pdyn = compute_pdyn_nPa(N, V)
+    phi = 0.7 * (Pdyn * Btot) + 0.3 * (V * Btot**2 * sin4)
+    phi = phi / 1000.0   # normalização para escala ~1
 
-    # ===== TEMPO =====
+    # ----- Tempo -----
     dt_sec = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec[1:] = diffs
     dt_sec[0] = np.median(diffs) if len(diffs) > 0 else 60.0
     dt_h = dt_sec / 3600.0
 
-    # ===== ESTADOS =====
+    # ----- Estados -----
     Hload = np.zeros(len(times))
     Hrel  = np.zeros(len(times))
     Hsat  = np.zeros(len(times))
 
-    # ===== PARÂMETROS (do paper, ajustáveis) =====
+    # ----- Parâmetros (ajustáveis) -----
     alpha_L = 1.2e-5
     beta_L  = 0.15
     alpha_R = 0.08
@@ -165,8 +119,8 @@ def integrate_hac_vectorial(df, config):
     # último Hsat
     Hsat[-1] = 1 / (1 + np.exp(-(Hload[-1] - theta_sat) / sigma_sat))
 
-    # ===== HCI (como no paper) =====
-    C = np.maximum(-Bz, 0) * (V / 400.0)   # termo de acoplamento complementar
+    # ----- HCI (acoplamento complementar) -----
+    C = np.maximum(-Bz, 0) * (V / 400.0)
     HCI = C + Hload
 
     out = df.copy()
@@ -175,129 +129,60 @@ def integrate_hac_vectorial(df, config):
     out['Hsat']  = Hsat
     out['HCI']   = HCI
     out['phi']   = phi
+    out['C']     = C
     return out
 
 # ============================
 # MODELO DST BASEADO NO HAC VETORIAL
 # ============================
-def compute_dst_hac(df, alpha=5.0, tau=8.0, gamma1=1.0, gamma2=0.0, delay_hours=0.0):
+def compute_dst_hac(df, alpha=2.0, tau=10.0, gamma1=0.7, gamma2=0.2, delay_internal=2.0):
     """
-    Dst baseado no estado HAC real.
-        injection = -α * (γ1 * Hload + γ2 * Hrel + (1-γ1-γ2)*HCI)   (padrão: apenas HCI)
-        decay = Dst / τ
-    Opcionalmente, aplica atraso interno (shift) na injeção.
+    Dst a partir dos estados HAC.
+    Driver combinado: γ1*Hload + γ2*Hrel + γ3*C, onde γ3 = 1 - γ1 - γ2.
+    Equação: dDst/dt = -α * driver - Dst/τ
+    delay_internal: atraso na injeção (horas).
     """
     times = df['time_tag'].values
     Hload = df['Hload'].values
     Hrel  = df['Hrel'].values
-    HCI   = df['HCI'].values
+    C     = df['C'].values
 
-    # Combinação linear dos estados (ajustável)
-    if gamma1 + gamma2 > 1.0:
-        gamma1 = gamma1 / (gamma1+gamma2+1e-6)
-        gamma2 = gamma2 / (gamma1+gamma2+1e-6)
+    # Combinação linear (evita duplicação de Hload)
     gamma3 = 1.0 - gamma1 - gamma2
-    driver = gamma1 * Hload + gamma2 * Hrel + gamma3 * HCI
+    driver_raw = gamma1 * Hload + gamma2 * Hrel + gamma3 * C
 
-    # Atraso interno (shift puro)
-    if delay_hours > 0:
-        # Calcular dt médio
+    # Atraso interno (shift)
+    if delay_internal > 0:
         if len(times) > 1:
             dt_sec = np.median(np.diff(times).astype('timedelta64[s]').astype(float))
         else:
             dt_sec = 3600.0
-        delay_steps = int(round(delay_hours * 3600 / dt_sec))
+        delay_steps = int(round(delay_internal * 3600 / dt_sec))
         if delay_steps > 0:
-            driver_shifted = np.zeros_like(driver)
+            driver = np.zeros_like(driver_raw)
             if delay_steps < len(driver):
-                driver_shifted[delay_steps:] = driver[:-delay_steps]
-            driver = driver_shifted
+                driver[delay_steps:] = driver_raw[:-delay_steps]
+        else:
+            driver = driver_raw
+    else:
+        driver = driver_raw
 
     # Integração do Dst
-    dt_sec = np.zeros(len(times))
-    diffs = np.diff(times).astype('timedelta64[s]').astype(float)
-    dt_sec[1:] = diffs
-    dt_sec[0] = np.median(diffs) if len(diffs) > 0 else 60.0
-    dt_h = dt_sec / 3600.0
-
-    Dst = np.zeros(len(times))
-    tau_sec = tau * 3600.0   # não usado diretamente, pois a equação é em horas
-    for i in range(1, len(times)):
-        dt = dt_h[i]
-        injection = -alpha * driver[i]
-        decay = Dst[i-1] / tau    # tau em horas
-        dDst = injection - decay
-        Dst[i] = Dst[i-1] + dDst * dt
-        Dst[i] = max(-500, min(50, Dst[i]))
-    return Dst
-
-# ============================
-# MODELO DST BURTON (já existente)
-# ============================
-def compute_dst_burton(df, tau_main=4.0, tau_recovery=12.0, b=6.0, alpha=0.7,
-                       tau_driver=0.0, offset=20.0, gamma=0.0,
-                       use_akasofu_driver=False):
-    """
-    Modelo Burton clássico com Akasofu ε ou Ey, sem HAC.
-    (código resumido para brevidade – versão completa disponível anteriormente)
-    """
-    Bz = df['bz_gsm'].values
-    V = df['speed'].values
-    Bx = df['bx_gsm'].values
-    By = df['by_gsm'].values
-    Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
-    times = df['time_tag'].values
-
-    if use_akasofu_driver:
-        Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
-        cos_theta = Bz / (Btot + 1e-10)
-        sin_theta2 = np.sqrt((1 - cos_theta) / 2)
-        sin4 = sin_theta2**4
-        driver_raw = V * (Btot**2) * sin4
-        EPSILON_REF = 1000.0
-        driver_norm = driver_raw / EPSILON_REF
-    else:
-        driver_raw = V * np.maximum(0, -Bz) * 1e-3
-        driver_norm = driver_raw
-    driver_norm = np.clip(driver_norm, 0, None)
-
-    # Integração temporal
     dt_sec_arr = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec_arr[1:] = diffs
     dt_sec_arr[0] = np.median(diffs) if len(diffs) > 0 else 60.0
     dt_h = dt_sec_arr / 3600.0
 
-    if tau_driver > 0:
-        driver_eff = np.zeros_like(driver_norm)
-        tau_driver_sec = tau_driver * 3600.0
-        for i in range(1, len(driver_eff)):
-            dt = dt_sec_arr[i]
-            alpha_d = np.exp(-dt / tau_driver_sec)
-            driver_eff[i] = driver_eff[i-1] * alpha_d + driver_norm[i] * (1 - alpha_d)
-        driver = driver_eff
-    else:
-        driver = driver_norm
-
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
-        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i]) + offset
-        d_val = driver[i]
-        tau_frac = (d_val ** 1.5) / (d_val ** 1.5 + 0.3)
-        tau = tau_recovery - (tau_recovery - tau_main) * tau_frac
-        injection = -alpha * d_val
-        decay = Dst_star / tau
+        injection = -alpha * driver[i]
+        decay = Dst[i-1] / tau
         dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt
         Dst[i] = max(-500, min(50, Dst[i]))
     return Dst
-
-def compute_dst_direct(df):
-    return -df['HAC'].values   # HAC do modelo vetorial? Na verdade, aqui usaremos Hload? Mas para compatibilidade, manteremos como estava.
-
-def compute_dst_hybrid(df, a=0.5, b=0.2):
-    return -a * df['HAC'].values - b * df['dHAC_dt'].values
 
 # ============================
 # VALIDAÇÃO
@@ -368,23 +253,6 @@ def find_optimal_delay(df_model, dst_series, max_delay, step, smooth_hours):
     print(f"🔥 Melhor delay: {best_delay:.0f}h (r = {best_corr:.3f})")
     return best_delay, best_corr
 
-def calibrate_dst_model(df_model, dst_series, delay, smooth_hours):
-    shifted = apply_time_shift(dst_series, delay)
-    merged = pd.merge_asof(df_model[['time_tag', 'Dst_model']].sort_values('time_tag'),
-                           shifted.sort_values('time_tag'),
-                           on='time_tag', direction='backward')
-    merged = merged.dropna(subset=['dst', 'Dst_model'])
-    merged = smooth_dst(merged, smooth_hours)
-    mask = merged['dst_smooth'] < 0
-    if mask.sum() < 5:
-        print("⚠️ Poucos pontos para calibração.")
-        return 1.0
-    x = merged.loc[mask, 'Dst_model'].values
-    y = -merged.loc[mask, 'dst_smooth'].values
-    slope = np.sum(x * y) / np.sum(x * x)
-    print(f"📊 Calibração: Dst_model = {slope:.3f} * Dst_model_orig")
-    return slope
-
 # ============================
 # GRÁFICO
 # ============================
@@ -422,78 +290,27 @@ def plot_comparison(df, df_model, dst_df, delay, smooth_hours, fname):
     print(f"✅ Figura salva: {fname}")
 
 # ============================
-# TESTE DE UNIDADES
-# ============================
-def test_physics(config):
-    print("\n🧪 TESTE DE UNIDADES FÍSICAS:")
-    print("="*50)
-    N, V, Bx, By, Bz = 5.0, 400.0, 2.0, 3.0, -5.0
-    Pdyn = compute_pdyn_nPa(N, V)
-    print(f"Pdyn({N} cm⁻³, {V} km/s) = {Pdyn:.2f} nPa (esperado ~1.34)")
-    test_df = pd.DataFrame({'bx_gsm': [Bx], 'by_gsm': [By], 'bz_gsm': [Bz],
-                            'speed': [V], 'density': [N]})
-    S_q = compute_source_advanced(test_df, config)[0]
-    print(f"Fonte(quiet) = {S_q:.2f} (esperado ~50-100)")
-    assert 10 < S_q < 200, f"Fonte quiet fora da faixa: {S_q}"
-    N_s, V_s, Bx_s, By_s, Bz_s = 40.0, 900.0, 5.0, 15.0, -30.0
-    test_df_s = pd.DataFrame({'bx_gsm': [Bx_s], 'by_gsm': [By_s], 'bz_gsm': [Bz_s],
-                              'speed': [V_s], 'density': [N_s]})
-    S_s = compute_source_advanced(test_df_s, config)[0]
-    ratio = S_s / S_q
-    print(f"Fonte(storm) = {S_s:.2f} (amplificação = {ratio:.2f}x)")
-    assert ratio > 1.5, f"Tempestade não amplificou: {ratio:.2f}x"
-    print("✅ Teste de unidades passou.")
-
-# ============================
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC Calculator - HAC Vetorial vs Burton')
+    parser = argparse.ArgumentParser(description='HAC Calculator - Modelo Vetorial')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
-    parser.add_argument('--model', default='hac', choices=['hac', 'simple', 'akasofu'])
-    parser.add_argument('--simplify', action='store_true')
-    parser.add_argument('--dst_model', default='hac', choices=['hac', 'burton', 'direct', 'hybrid'],
-                        help='Modelo Dst: hac (vetorial), burton, direct, hybrid')
-    # Parâmetros para modelo HAC vetorial
-    parser.add_argument('--alpha', type=float, default=5.0, help='Coeficiente de injeção (HAC)')
-    parser.add_argument('--tau_hac', type=float, default=8.0, help='Constante de decaimento (horas)')
-    parser.add_argument('--gamma1', type=float, default=1.0, help='Peso de Hload na injeção')
-    parser.add_argument('--gamma2', type=float, default=0.0, help='Peso de Hrel na injeção')
-    parser.add_argument('--delay_internal', type=float, default=0.0, help='Atraso interno na injeção (horas)')
-    # Parâmetros para Burton
-    parser.add_argument('--use_akasofu_driver', action='store_true', help='Burton: usar Akasofu ε')
-    parser.add_argument('--tau_main', type=float, default=4.0, help='Burton: τ injeção')
-    parser.add_argument('--tau_recovery', type=float, default=12.0, help='Burton: τ recuperação')
-    parser.add_argument('--b', type=float, default=6.0, help='Burton: coef. pressão dinâmica')
-    parser.add_argument('--alpha_burton', type=float, default=0.7, help='Burton: escala do driver')
-    parser.add_argument('--tau_driver', type=float, default=0.0, help='Burton: memória extra do driver')
-    parser.add_argument('--offset', type=float, default=20.0, help='Burton: offset atmosférico')
-    # Parâmetros gerais
-    parser.add_argument('--alpha_pdyn', type=float, default=1/6)
+    parser.add_argument('--alpha', type=float, default=2.0, help='Coeficiente de injeção')
+    parser.add_argument('--tau', type=float, default=10.0, help='Constante de decaimento (horas)')
+    parser.add_argument('--gamma1', type=float, default=0.7, help='Peso de Hload')
+    parser.add_argument('--gamma2', type=float, default=0.2, help='Peso de Hrel')
+    parser.add_argument('--delay_internal', type=float, default=2.0, help='Atraso interno (horas)')
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
-    parser.add_argument('--no_calibrate', action='store_true')
-    parser.add_argument('--find_delay', action='store_true', help='Busca atraso ótimo (recomendado)')
-    parser.add_argument('--max_delay', type=int, default=24, help='Máximo delay para busca (horas)')
+    parser.add_argument('--find_delay', action='store_true', help='Busca atraso ótimo')
+    parser.add_argument('--max_delay', type=int, default=24, help='Máximo delay para busca')
     args = parser.parse_args()
 
-    config = Config(alpha_pdyn=args.alpha_pdyn, simplify=args.simplify, model=args.model)
     print("\n" + "="*70)
-    print(f"🛰️  HAC - Modelo: {config.model.upper()}")
-    print(f"   Configuração: {config}")
-    print(f"   Modelo Dst: {args.dst_model}")
-    if args.dst_model == 'hac':
-        print(f"   Parâmetros HAC: alpha={args.alpha}, tau={args.tau_hac}, gamma1={args.gamma1}, gamma2={args.gamma2}, delay_internal={args.delay_internal}h")
-    elif args.dst_model == 'burton':
-        print(f"   Parâmetros Burton: tau_main={args.tau_main}, tau_recovery={args.tau_recovery}, b={args.b}, alpha={args.alpha_burton}, tau_driver={args.tau_driver}, offset={args.offset}")
-        if args.use_akasofu_driver:
-            print("   Driver: Akasofu ε")
-        else:
-            print("   Driver: Ey")
+    print("🛰️  HAC - Modelo Vetorial (Hload, Hrel, Hsat)")
+    print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}, delay_internal={args.delay_internal}h")
     print("="*70)
-
-    test_physics(config)
 
     # Carregar OMNI
     if not os.path.exists(args.omni):
@@ -537,35 +354,17 @@ def main():
     if df['dst'].min() > -50:
         print("⚠️ ALERTA: Período sem tempestades fortes (Dst > -50 nT).")
 
-    # ===== CÁLCULO DO MODELO =====
-    if args.dst_model == 'hac':
-        # HAC vetorial
-        df = integrate_hac_vectorial(df, config)
-        df['Dst_model'] = compute_dst_hac(df, alpha=args.alpha, tau=args.tau_hac,
-                                          gamma1=args.gamma1, gamma2=args.gamma2,
-                                          delay_hours=args.delay_internal)
-    elif args.dst_model == 'burton':
-        df['Dst_model'] = compute_dst_burton(df, tau_main=args.tau_main, tau_recovery=args.tau_recovery,
-                                             b=args.b, alpha=args.alpha_burton, tau_driver=args.tau_driver,
-                                             offset=args.offset, use_akasofu_driver=args.use_akasofu_driver)
-    elif args.dst_model == 'direct':
-        # Para direct/hybrid, precisamos do HAC simples (não vetorial). Vamos usar o HAC antigo.
-        # Para não quebrar, usamos a função antiga integrate_hac (que não está mais aqui). Então, por simplicidade,
-        # vamos avisar que esse modo requer o HAC antigo. Mas como estamos focando no HAC vetorial, deixamos apenas como placeholder.
-        print("❌ Modelo direct/hybrid não implementado com HAC vetorial. Use --dst_model hac ou burton.")
-        return
-    elif args.dst_model == 'hybrid':
-        print("❌ Modelo hybrid não implementado com HAC vetorial. Use --dst_model hac ou burton.")
-        return
-    else:
-        raise ValueError("Modelo Dst desconhecido")
+    # HAC vetorial
+    df = integrate_hac_vectorial(df)
+    df['Dst_model'] = compute_dst_hac(df, alpha=args.alpha, tau=args.tau,
+                                      gamma1=args.gamma1, gamma2=args.gamma2,
+                                      delay_internal=args.delay_internal)
 
-    # DataFrame para validação
+    # Validação
     df_model = df[['time_tag', 'Dst_model']].copy()
     dst_df = df[['time_tag', 'dst']].copy()
     smooth_hours = args.smooth_hours
 
-    # Busca de delay ótimo (se solicitado)
     best_delay = 0
     if args.find_delay:
         best_delay, best_corr = find_optimal_delay(df_model, dst_df, args.max_delay, 1, smooth_hours)
@@ -577,7 +376,6 @@ def main():
             best_corr = metrics['correlation']
             print(f"\n📊 Correlação sem delay externo: r = {best_corr:.3f}")
 
-    # Validação final
     print("\n📊 VALIDAÇÃO DO MODELO Dst")
     print("="*50)
     shifted = apply_time_shift(dst_df, best_delay)
