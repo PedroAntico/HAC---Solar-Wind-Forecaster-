@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Modelos Físicos)
+HAC - Heliospheric Accumulated Coupling (Versão Final Corrigida)
 Modelos de Dst:
-  - burton: dDst/dt = -α * Ey - (Dst - b√Pdyn)/τ   (Ey em mV/m)
+  - burton: dDst/dt = -α * Ey_eff - (Dst - b√Pdyn)/τ   (Ey_eff = max(0, Ey - threshold))
   - hybrid: Dst = -a * HAC - b * dHAC/dt
   - direct: Dst = -HAC
 Uso:
-    python hac_calculator.py --dst_model burton --alpha 1.0 --b 10 --tau_hours 7
-    python hac_calculator.py --dst_model hybrid --a 0.5 --b 0.2
+    python hac_calculator.py --dst_model burton --alpha 1.5 --b 10 --tau_hours 7 --threshold 0.5
+    python hac_calculator.py --dst_model hybrid --a 0.5 --b_hybrid 0.2
 """
 
 import pandas as pd
@@ -178,17 +178,19 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELOS DST FÍSICOS
+# MODELOS DST FÍSICOS (CORRIGIDOS)
 # ============================
-def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=1.0):
+def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=1.5, threshold=0.5):
     """
-    Modelo de Burton com unidades corretas.
-    Ey = V * max(0, -Bz) * 1e-3  (mV/m)
-    dDst/dt = -α * Ey - (Dst - b√Pdyn)/τ
+    Modelo de Burton com:
+        Ey = V * max(0, -Bz) * 1e-3   (mV/m)
+        Ey_eff = max(0, Ey - threshold)   (só injeção acima do limiar)
+        dDst/dt = -α * Ey_eff - (Dst - b√Pdyn) / τ   (τ em horas)
     """
     Bz = df['bz_gsm'].values
     V = df['speed'].values
-    Ey = V * np.maximum(0, -Bz) * 1e-3          # mV/m (correção crucial)
+    Ey_raw = V * np.maximum(0, -Bz) * 1e-3          # mV/m
+    Ey_eff = np.maximum(0, Ey_raw - threshold)      # limiar
     Pdyn = compute_pdyn_nPa(df['density'].values, df['speed'].values)
 
     times = df['time_tag'].values
@@ -200,12 +202,13 @@ def compute_dst_burton(df, tau_hours=7.0, b=10.0, alpha=1.0):
     else:
         dt_sec[:] = 60.0
 
-    tau_sec = tau_hours * 3600.0
+    # Conversão para horas (usado no termo de perda)
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt_hours = dt_sec[i] / 3600.0
-        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])   # Dst corrigido pela Pdyn
-        dDst = -alpha * Ey[i] - Dst_star / tau_sec
+        Dst_star = Dst[i-1] - b * np.sqrt(Pdyn[i])   # Dst corrigido pela pressão
+        # Equação: dDst/dt (nT/h) = -α * Ey_eff (mV/m) - Dst_star / τ (horas)
+        dDst = -alpha * Ey_eff[i] - Dst_star / tau_hours
         Dst[i] = Dst[i-1] + dDst * dt_hours
         Dst[i] = max(-500, min(50, Dst[i]))          # limites físicos
     return Dst
@@ -380,7 +383,8 @@ def main():
     # Parâmetros para burton
     parser.add_argument('--tau_hours', type=float, default=7.0, help='Constante de tempo (horas)')
     parser.add_argument('--b', type=float, default=10.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--alpha', type=float, default=1.0, help='Fator de escala para Ey')
+    parser.add_argument('--alpha', type=float, default=1.5, help='Fator de escala para Ey')
+    parser.add_argument('--threshold', type=float, default=0.5, help='Limiar para Ey (mV/m)')
     # Parâmetros gerais
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
@@ -397,7 +401,7 @@ def main():
     elif args.dst_model == 'deriv':
         print(f"   k = {args.k}")
     elif args.dst_model == 'burton':
-        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}")
+        print(f"   τ = {args.tau_hours} h, b = {args.b}, α = {args.alpha}, threshold = {args.threshold} mV/m")
     print("="*70)
 
     test_physics(config)
@@ -463,7 +467,8 @@ def main():
     elif args.dst_model == 'hybrid':
         df['Dst_model'] = compute_dst_hybrid(df, a=args.a, b=args.b_hybrid)
     else:  # burton
-        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b, alpha=args.alpha)
+        df['Dst_model'] = compute_dst_burton(df, tau_hours=args.tau_hours, b=args.b,
+                                             alpha=args.alpha, threshold=args.threshold)
 
     # DataFrame para validação
     df_model = df[['time_tag', 'Dst_model']].copy()
