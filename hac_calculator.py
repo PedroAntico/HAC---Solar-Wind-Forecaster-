@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Física Avançada)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Atraso Causal)
 
 Modelo Dst baseado em Burton com:
 - Campo elétrico de reconexão: Ey = V * max(0, -Bz) * 1e-3  (mV/m)
 - Limiar (threshold) e saturação suave: Ey_sat = Ey_eff / (1 + (Ey_eff/E0)^2)
-- Atraso físico de 2h na injeção (shift)
+- Atraso físico de 2h na injeção (shift causal, sem np.roll)
 - Constante de tempo dinâmica: τ_main (3h) quando há injeção, τ_recovery (10h) caso contrário
 - Termo de pressão dinâmica: Dst_star = Dst - b * sqrt(Pdyn)
 
@@ -91,6 +91,7 @@ def prepare_omni(df):
     return df.dropna(subset=['bz_gsm', 'speed', 'density'])
 
 def apply_time_shift(df, hours):
+    """Aplica deslocamento temporal (positivo: Dst atrasado em relação ao modelo)."""
     df = df.copy()
     df['time_tag'] = df['time_tag'] - pd.Timedelta(hours=hours)
     return df
@@ -182,7 +183,7 @@ def integrate_hac(df, source_func, config, calib_factor=1.0):
     return out
 
 # ============================
-# MODELOS DST (BURTON AVANÇADO E HÍBRIDOS)
+# MODELOS DST (BURTON AVANÇADO COM ATRASO CAUSAL)
 # ============================
 def compute_dst_burton(df, tau_main=3.0, tau_recovery=10.0, b=10.0, alpha=1.5,
                        threshold=0.5, E0=10.0, delay_hours=2.0):
@@ -190,7 +191,7 @@ def compute_dst_burton(df, tau_main=3.0, tau_recovery=10.0, b=10.0, alpha=1.5,
     Modelo Burton com:
         - Campo elétrico Ey = V * max(0, -Bz) * 1e-3 (mV/m)
         - Limiar e saturação suave: Ey_sat = Ey_eff / (1 + (Ey_eff/E0)^2)
-        - Atraso físico na injeção (shift)
+        - Atraso físico na injeção (shift causal, sem np.roll)
         - τ dinâmico: tau_main durante injeção, tau_recovery no resto
     """
     Bz = df['bz_gsm'].values
@@ -201,8 +202,7 @@ def compute_dst_burton(df, tau_main=3.0, tau_recovery=10.0, b=10.0, alpha=1.5,
     Ey_raw = V * np.maximum(0, -Bz) * 1e-3
     Ey_eff = np.maximum(0, Ey_raw - threshold)
 
-    # Atraso físico (shift da série temporal)
-    # Calcular dt médio para converter delay_hours em índices
+    # Atraso físico (shift causal)
     times = df['time_tag'].values
     if len(times) > 1:
         dt_sec = np.median(np.diff(times).astype('timedelta64[s]').astype(float))
@@ -210,9 +210,11 @@ def compute_dst_burton(df, tau_main=3.0, tau_recovery=10.0, b=10.0, alpha=1.5,
         dt_sec = 3600.0
     delay_steps = int(round(delay_hours * 3600 / dt_sec))
     if delay_steps > 0:
-        Ey_eff = np.roll(Ey_eff, delay_steps)
-        # Preencher os primeiros delay_steps com zero (evitar dados futuros)
-        Ey_eff[:delay_steps] = 0.0
+        # Desloca para a direita (passado -> futuro), preenchendo com zeros no início
+        Ey_eff_shifted = np.zeros_like(Ey_eff)
+        if delay_steps < len(Ey_eff):
+            Ey_eff_shifted[delay_steps:] = Ey_eff[:-delay_steps]
+        Ey_eff = Ey_eff_shifted
 
     # Saturação suave
     Ey_sat = Ey_eff / (1 + (Ey_eff / E0)**2)
@@ -337,16 +339,19 @@ def calibrate_dst_model(df_model, dst_series, delay, smooth_hours):
     return slope
 
 # ============================
-# GRÁFICO
+# GRÁFICO (com verificação de existência da coluna HAC)
 # ============================
 def plot_comparison(df, df_model, dst_df, delay, smooth_hours, fname):
     plt.style.use('seaborn-v0_8-darkgrid')
     fig, axes = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
-    axes[0].plot(df['time_tag'], df['HAC'], label='HAC', color='#d62728', lw=2)
-    axes[0].set_ylabel('HAC')
-    axes[0].legend(loc='upper left')
-    axes[0].grid(True, alpha=0.3)
-    axes[0].set_title('Acumulação de Energia (HAC)')
+    if 'HAC' in df.columns:
+        axes[0].plot(df['time_tag'], df['HAC'], label='HAC', color='#d62728', lw=2)
+        axes[0].set_ylabel('HAC')
+        axes[0].legend(loc='upper left')
+        axes[0].grid(True, alpha=0.3)
+        axes[0].set_title('Acumulação de Energia (HAC)')
+    else:
+        axes[0].set_visible(False)
     if dst_df is not None:
         if delay > 0:
             dst_shifted = apply_time_shift(dst_df, delay)
@@ -419,6 +424,7 @@ def main():
     parser.add_argument('--alpha_pdyn', type=float, default=1/6)
     parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst (horas)')
     parser.add_argument('--no_calibrate', action='store_true', help='Não aplicar calibração linear')
+    parser.add_argument('--find_delay', action='store_true', help='Busca delay externo (não recomendado para Burton)')
     args = parser.parse_args()
 
     config = Config(alpha_pdyn=args.alpha_pdyn, simplify=args.simplify, model=args.model)
@@ -509,8 +515,18 @@ def main():
     step = 1
     smooth_hours = args.smooth_hours
 
-    # Encontrar delay ótimo (apenas para comparação, o modelo Burton já tem delay interno)
-    best_delay, best_corr = find_optimal_delay(df_model, dst_df, max_delay, step, smooth_hours)
+    # Busca de delay externo (apenas se solicitado)
+    best_delay = 0
+    if args.find_delay:
+        best_delay, best_corr = find_optimal_delay(df_model, dst_df, max_delay, step, smooth_hours)
+    else:
+        best_delay = 0
+        # Apenas calcula correlação sem deslocamento adicional
+        shifted = apply_time_shift(dst_df, best_delay)
+        metrics = validation_metrics(df_model, shifted, smooth_hours)
+        if metrics:
+            best_corr = metrics['correlation']
+            print(f"\n📊 Correlação sem delay externo: r = {best_corr:.3f}")
 
     # Calibração linear (apenas para modelos não físicos)
     if not args.no_calibrate and args.dst_model in ['direct', 'deriv', 'hybrid']:
@@ -526,7 +542,7 @@ def main():
     shifted = apply_time_shift(dst_df, best_delay)
     metrics = validation_metrics(df_model, shifted, smooth_hours)
     if metrics:
-        print(f"✅ Dst_model vs Dst real (delay={best_delay}h):")
+        print(f"✅ Dst_model vs Dst real (delay externo={best_delay}h):")
         print(f"   Correlação: {metrics['correlation']:.3f}")
         print(f"   R²: {metrics['r2']:.3f}")
         print(f"   RMSE: {metrics['rmse']:.2f}")
