@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final Corrigida)
+HAC - Heliospheric Accumulated Coupling (Versão Final Otimizada)
 
 Modelo Dst baseado em Burton com:
 - Driver físico: VBs = V * max(-Bz,0) / 1000
-- Termos de memória: Hload, Hrel, C
+- Termos de memória: Hload, Hrel, C (com pesos ajustáveis)
 - Equação: dDst/dt = -driver - Dst/τ + b_pressure * sqrt(Pdyn)
 - Atraso interno no driver (delay_internal)
-- Normalização opcional do driver
-- Validação treino/teste com calibração linear (opcional)
+- Normalização do driver por percentil 95 (obrigatória)
+- Sem clipping fixo (apenas proteção contra explosões via percentil 99)
+- Validação treino/teste com calibração linear opcional
 
-Uso recomendado:
-    python hac_calculator.py --train_test --delay_internal 2 --gamma6 0.02 --b_pressure 7 --normalize_driver
+Uso recomendado (após os ajustes):
+    python hac_calculator.py --train_test --delay_internal 2 --gamma1 0.2 --gamma2 0.05 --gamma3 0.05 --gamma6 0.05 --b_pressure 2 --normalize_driver
 """
 
 import pandas as pd
@@ -146,11 +147,11 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST DIRETO (COM SINAL CORRETO E PRESSÃO)
+# MODELO DST DIRETO (SEM CLIPPING AGRESSIVO)
 # ============================
-def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
-                       gamma4=0.0, gamma5=0.0, gamma6=0.02, threshold=1.5,
-                       delay_internal=2.0, tau_driver=0.0, b_pressure=7.0,
+def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
+                       gamma4=0.0, gamma5=0.0, gamma6=0.05, threshold=1.5,
+                       delay_internal=2.0, tau_driver=0.0, b_pressure=2.0,
                        normalize_driver=True, debug=False):
     """
     Modelo Dst com equação física:
@@ -158,6 +159,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
     driver = gamma1*Hload + gamma2*Hrel + gamma3*C + gamma4*interaction + gamma5*extra + gamma6*VBs_normalizado
     VBs = V * max(-Bz,0) / 1000 (escala física)
     delay_internal: atraso aplicado ao driver (horas)
+    NÃO há clipping fixo (apenas proteção via percentil 99, se necessário)
     """
     times = df['time_tag'].values
     Hload = df['Hload'].values
@@ -188,7 +190,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
         print(f"   driver_raw: min={np.min(driver_raw):.3f}, max={np.max(driver_raw):.3f}, mean={np.mean(driver_raw):.3f}")
         print(f"   VBs: min={np.min(VBs):.3f}, max={np.max(VBs):.3f}, mean={np.mean(VBs):.3f}")
 
-    # Normalização do driver (recomendada)
+    # Normalização do driver (recomendada, estabiliza escala)
     if normalize_driver:
         pos = driver_raw[driver_raw > 0]
         if len(pos) > 0:
@@ -200,8 +202,13 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
         if debug:
             print(f"   driver_raw após normalização: min={np.min(driver_raw):.3f}, max={np.max(driver_raw):.3f}")
 
-    # Clipping para estabilidade
-    driver_raw = np.clip(driver_raw, 0, 50)
+    # Proteção contra explosões numéricas (apenas valores extremamente altos)
+    # Usamos percentil 99 em vez de clipping fixo
+    if np.any(driver_raw > 100):
+        cap = np.percentile(driver_raw, 99)
+        driver_raw = np.clip(driver_raw, 0, cap)
+        if debug:
+            print(f"   Aplicado clipping suave no percentil 99: cap={cap:.2f}")
 
     # Atraso interno (shift puro)
     dt_sec_arr = np.zeros(len(times))
@@ -240,7 +247,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
         dt = dt_h[i]
         dDst = -driver[i] - Dst[i-1] / tau_eff[i] + b_pressure * np.sqrt(Pdyn[i])
         Dst[i] = Dst[i-1] + dDst * dt
-        # Limite físico
+        # Limite físico (não essencial, mas evita valores impossíveis)
         Dst[i] = max(-500, min(50, Dst[i]))
 
     if debug:
@@ -372,24 +379,24 @@ def plot_event(df, event_name, start, end, pred_col='Dst_calib', fname=None):
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC - Modelo Dst Corrigido (Sinal + Pressão)')
+    parser = argparse.ArgumentParser(description='HAC - Modelo Dst Otimizado')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'])
-    # Parâmetros do modelo
+    # Parâmetros do modelo (valores padrão ajustados)
     parser.add_argument('--tau_R', type=float, default=6.0, help='Constante de tempo base (horas)')
-    parser.add_argument('--gamma1', type=float, default=0.5, help='Peso de Hload')
-    parser.add_argument('--gamma2', type=float, default=0.1, help='Peso de Hrel')
-    parser.add_argument('--gamma3', type=float, default=0.1, help='Peso de C')
+    parser.add_argument('--gamma1', type=float, default=0.2, help='Peso de Hload')
+    parser.add_argument('--gamma2', type=float, default=0.05, help='Peso de Hrel')
+    parser.add_argument('--gamma3', type=float, default=0.05, help='Peso de C')
     parser.add_argument('--gamma4', type=float, default=0.0, help='Peso da interação Hload*C')
     parser.add_argument('--gamma5', type=float, default=0.0, help='Peso do termo extra (limiar)')
-    parser.add_argument('--gamma6', type=float, default=0.02, help='Peso do driver físico VBs')
+    parser.add_argument('--gamma6', type=float, default=0.05, help='Peso do driver físico VBs')
     parser.add_argument('--threshold', type=float, default=1.5)
     parser.add_argument('--delay_internal', type=float, default=2.0, help='Atraso interno (horas)')
     parser.add_argument('--tau_driver', type=float, default=0.0, help='Memória exponencial do driver')
-    parser.add_argument('--b_pressure', type=float, default=7.0, help='Coeficiente da pressão dinâmica')
-    parser.add_argument('--normalize_driver', action='store_true', help='Normalizar o driver (recomendado)')
+    parser.add_argument('--b_pressure', type=float, default=2.0, help='Coeficiente da pressão dinâmica')
+    parser.add_argument('--normalize_driver', action='store_true', default=True, help='Normalizar o driver (recomendado)')
     parser.add_argument('--smooth_hours', type=float, default=1)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--train_test', action='store_true')
@@ -405,7 +412,7 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo Dst Corrigido (Sinal + Pressão Dinâmica)")
+    print("🛰️  HAC - Modelo Dst Otimizado (sem clipping agressivo)")
     print(f"   tau_R = {args.tau_R} h, delay_internal = {args.delay_internal} h")
     print(f"   gamma1={args.gamma1}, gamma2={args.gamma2}, gamma3={args.gamma3}, gamma6={args.gamma6}")
     print(f"   b_pressure = {args.b_pressure}, normalize_driver = {args.normalize_driver}")
