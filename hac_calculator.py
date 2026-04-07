@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final com Regime de Tempestade)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Diagnóstico Completo)
 
 Modelo baseado em anel de corrente efetivo R(t):
     dR/dt = driver_eff - R/τ_eff
     Dst_raw = -α * R
     depois calibrado linearmente contra Dst real.
 
-O driver inclui:
-- Termos lineares (Hload, Hrel, C)
-- Interação não-linear (Hload*C)
-- Termo quadrático com limiar (extra)
-- **Boost dependente de Bz sul**: south²
-- **Injeção não-linear**: storm_boost = C²/(1+C)
-- **τ_eff variável**: τ_eff = τ_R / (1 + k_tau * C)
+Inclui:
+- Termos de boost por Bz sul (south_boost * south²)
+- Injeção não-linear (gamma_storm * C²/(1+C))
+- τ_eff variável: τ_eff = τ_R / (1 + k_tau * C)
+- Opção de normalização do driver (desabilitada por padrão)
+- Diagnósticos detalhados (imprime estatísticas de Dst_raw, correlação raw, etc.)
 
-Além disso, permite atraso interno e normalização do driver.
-
-Uso:
-    python hac_calculator.py --train_test --normalize_driver --tau_R 8 --k_tau 0.5 --gamma_storm 0.5 --south_boost 0.5
+Uso recomendado para teste rápido (sem normalização):
+    python hac_calculator.py --train_test --debug --tau_R 4 --alpha 0.1 --south_boost 0.2 --gamma_storm 0.2
 """
 
 import pandas as pd
@@ -155,11 +152,11 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
 # ============================
 # MODELO DST COM ANEL DE CORRENTE (R) E REGIME DE TEMPESTADE
 # ============================
-def compute_dst_ring_current(df, tau_R=8.0, alpha=1.0, gamma1=0.8, gamma2=0.1, gamma3=0.1,
+def compute_dst_ring_current(df, tau_R=4.0, alpha=0.1, gamma1=0.8, gamma2=0.1, gamma3=0.1,
                              gamma4=0.0, gamma5=0.0, threshold=1.5,
-                             gamma_storm=0.0, south_boost=0.0, k_tau=0.0,
-                             delay_internal=0.0, tau_driver=3.0, b_pressure=0.0,
-                             normalize_driver=True, debug=False):
+                             gamma_storm=0.2, south_boost=0.2, k_tau=0.5,
+                             delay_internal=0.0, tau_driver=0.0, b_pressure=0.0,
+                             normalize_driver=False, debug=False):
     """
     Modelo de anel de corrente com:
         - driver base (Hload, Hrel, C, interação, extra)
@@ -194,14 +191,21 @@ def compute_dst_ring_current(df, tau_R=8.0, alpha=1.0, gamma1=0.8, gamma2=0.1, g
     # Driver completo
     driver_raw = driver_base + south_boost_term + storm_boost
 
-    # Normalização do driver (opcional)
+    if debug:
+        print(f"\n🔍 DEBUG ANTES DA NORMALIZAÇÃO:")
+        print(f"   driver_raw: min={np.min(driver_raw):.3f}, max={np.max(driver_raw):.3f}, mean={np.mean(driver_raw):.3f}")
+
+    # Normalização do driver (opcional, desabilitada por padrão)
     if normalize_driver:
         pos = driver_raw[driver_raw > 0]
         if len(pos) > 0:
             scale = np.percentile(pos, 95)
+            print(f"   scale (p95): {scale:.3f}")
         else:
             scale = 1.0
         driver_raw = driver_raw / (scale + 1e-6)
+        if debug:
+            print(f"   driver_raw após normalização: min={np.min(driver_raw):.3f}, max={np.max(driver_raw):.3f}")
 
     # Atraso interno e memória do driver
     dt_sec_arr = np.zeros(len(times))
@@ -237,9 +241,10 @@ def compute_dst_ring_current(df, tau_R=8.0, alpha=1.0, gamma1=0.8, gamma2=0.1, g
     R = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
-        dR = driver[i] - R[i-1] / tau_eff[i]   # τ variável
+        dR = driver[i] - R[i-1] / tau_eff[i]
         R[i] = R[i-1] + dR * dt
-        R[i] = max(-10, R[i])   # clipping leve
+        # Clipping leve para evitar valores negativos extremos
+        R[i] = max(-10, R[i])
 
     Dst_raw = -alpha * R
 
@@ -248,15 +253,19 @@ def compute_dst_ring_current(df, tau_R=8.0, alpha=1.0, gamma1=0.8, gamma2=0.1, g
         Dst_raw = Dst_raw - b_pressure * np.sqrt(Pdyn)
 
     if debug:
-        print(f"DEBUG: driver médio = {np.mean(driver):.3f}, max = {np.max(driver):.3f}")
-        print(f"DEBUG: R médio = {np.mean(R):.3f}, max = {np.max(R):.3f}")
-        print(f"DEBUG: Dst_raw médio = {np.mean(Dst_raw):.3f}, min = {np.min(Dst_raw):.3f}")
+        print(f"\n🔍 DEBUG APÓS INTEGRAÇÃO:")
+        print(f"   driver: min={np.min(driver):.3f}, max={np.max(driver):.3f}, mean={np.mean(driver):.3f}")
+        print(f"   tau_eff: min={np.min(tau_eff):.3f}, max={np.max(tau_eff):.3f}, mean={np.mean(tau_eff):.3f}")
+        print(f"   R: min={np.min(R):.3f}, max={np.max(R):.3f}, mean={np.mean(R):.3f}, std={np.std(R):.3f}")
+        print(f"   Dst_raw: min={np.min(Dst_raw):.3f}, max={np.max(Dst_raw):.3f}, mean={np.mean(Dst_raw):.3f}, std={np.std(Dst_raw):.3f}")
+
     return Dst_raw
 
 # ============================
 # VALIDAÇÃO COM CALIBRAÇÃO LINEAR
 # ============================
 def validation_metrics_calibrated(train_df, test_df, pred_col='Dst_raw', smooth_hours=1):
+    # Alinhar dados suavizados do treino
     train_smooth = smooth_dst(train_df[['time_tag', 'dst']], smooth_hours)
     train_aligned = pd.merge_asof(
         train_smooth.sort_values('time_tag'),
@@ -265,10 +274,18 @@ def validation_metrics_calibrated(train_df, test_df, pred_col='Dst_raw', smooth_
     ).dropna(subset=['dst_smooth', pred_col])
     X_train = train_aligned[pred_col].values.reshape(-1, 1)
     y_train = train_aligned['dst_smooth'].values
+
+    # Diagnóstico da correlação raw
+    corr_raw = pearsonr(X_train.ravel(), y_train)[0] if len(X_train) > 1 else np.nan
+    print(f"\n🔍 CORRELAÇÃO RAW (treino, Dst_raw vs Dst_real): {corr_raw:.3f}")
+    print(f"   X_train (Dst_raw): min={np.min(X_train):.3f}, max={np.max(X_train):.3f}, std={np.std(X_train):.3f}")
+    print(f"   y_train (Dst_real): min={np.min(y_train):.3f}, max={np.max(y_train):.3f}, std={np.std(y_train):.3f}")
+
+    # Regressão linear
     reg = LinearRegression().fit(X_train, y_train)
     coef = reg.coef_[0]
     interc = reg.intercept_
-    print(f"\n📐 Calibração linear (treino): Dst_real = {coef:.3f} * Dst_raw + {interc:.2f}")
+    print(f"\n📐 Calibração linear (treino): Dst_real = {coef:.6f} * Dst_raw + {interc:.2f}")
 
     train_df['Dst_calib'] = coef * train_df[pred_col] + interc
     test_df['Dst_calib']  = coef * test_df[pred_col]  + interc
@@ -347,7 +364,7 @@ def plot_event(df, event_name, start, end, pred_col='Dst_calib', fname=None):
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
     event = df[mask].copy()
     if len(event) == 0:
-        print(f"⚠️ Evento {event_name} não encontrado.")
+        print(f"⚠️ Evento {event_name} não encontrado no período.")
         return
     plt.figure(figsize=(12, 5))
     plt.plot(event['time_tag'], event['dst'], 'k-', label='Dst Real', lw=2)
@@ -368,14 +385,14 @@ def plot_event(df, event_name, start, end, pred_col='Dst_calib', fname=None):
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC - Modelo com Anel de Corrente e Regime de Tempestade')
+    parser = argparse.ArgumentParser(description='HAC - Modelo com Anel de Corrente e Diagnóstico')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'])
     # Parâmetros do anel de corrente
-    parser.add_argument('--tau_R', type=float, default=8.0, help='Constante de tempo base (horas)')
-    parser.add_argument('--alpha', type=float, default=1.0, help='Fator de escala Dst_raw = -α * R')
+    parser.add_argument('--tau_R', type=float, default=4.0, help='Constante de tempo base (horas)')
+    parser.add_argument('--alpha', type=float, default=0.1, help='Fator de escala Dst_raw = -α * R')
     # Parâmetros do driver base
     parser.add_argument('--gamma1', type=float, default=0.8)
     parser.add_argument('--gamma2', type=float, default=0.1)
@@ -383,13 +400,13 @@ def main():
     parser.add_argument('--gamma4', type=float, default=0.0)
     parser.add_argument('--gamma5', type=float, default=0.0)
     parser.add_argument('--threshold', type=float, default=1.5)
-    # Novos parâmetros para regime de tempestade
-    parser.add_argument('--south_boost', type=float, default=0.5, help='Boost dependente de Bz sul (south²)')
-    parser.add_argument('--gamma_storm', type=float, default=0.5, help='Boost não-linear (C²/(1+C))')
+    # Parâmetros de regime de tempestade
+    parser.add_argument('--south_boost', type=float, default=0.2, help='Boost dependente de Bz sul (south²)')
+    parser.add_argument('--gamma_storm', type=float, default=0.2, help='Boost não-linear (C²/(1+C))')
     parser.add_argument('--k_tau', type=float, default=0.5, help='Dependência de τ com C: τ_eff = τ_R / (1 + k_tau*C)')
     # Parâmetros auxiliares
     parser.add_argument('--delay_internal', type=float, default=0.0, help='Atraso interno (horas)')
-    parser.add_argument('--tau_driver', type=float, default=3.0, help='Memória exponencial do driver')
+    parser.add_argument('--tau_driver', type=float, default=0.0, help='Memória exponencial do driver (0 = off)')
     parser.add_argument('--b_pressure', type=float, default=0.0, help='Correção de pressão')
     parser.add_argument('--normalize_driver', action='store_true', help='Normalizar o driver pelo percentil 95')
     parser.add_argument('--smooth_hours', type=float, default=1)
@@ -407,7 +424,7 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo com Anel de Corrente e Regime de Tempestade")
+    print("🛰️  HAC - Modelo com Anel de Corrente e Diagnóstico")
     print(f"   tau_R = {args.tau_R} h, alpha = {args.alpha}")
     print(f"   Driver base: gamma1={args.gamma1}, gamma2={args.gamma2}, gamma3={args.gamma3}, gamma4={args.gamma4}, gamma5={args.gamma5}, threshold={args.threshold}")
     print(f"   Regime: south_boost={args.south_boost}, gamma_storm={args.gamma_storm}, k_tau={args.k_tau}")
@@ -569,7 +586,7 @@ def main():
     # Usar o dataframe completo df (com Dst_calib) para os eventos
     plot_event(df, 'Halloween Storm 2003', '2003-10-28', '2003-11-02', pred_col='Dst_calib')
     plot_event(df, 'St. Patrick Storm 2015', '2015-03-17', '2015-03-19', pred_col='Dst_calib')
-    plot_event(df, 'Quase Carrington 2012', '2012-07-23', '2012-07-25', pred_col='Dst_calib')
+    plot_event(df, 'Quase Carrington 2012', '2012-07-22', '2012-07-24', pred_col='Dst_calib')
 
     # Salvar resultados do teste
     test_df.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
