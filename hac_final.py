@@ -403,7 +403,14 @@ class ProductionHACModel:
                 dHAC_dt = np.gradient(hac_total) / dt_hours
 
         dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
-        dHAC_dt = np.clip(dHAC_dt, -200, 200)
+        raw_dhdt = dHAC_dt.copy()
+
+# Log para debug
+if np.max(np.abs(raw_dhdt)) > 200:
+    print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f}")
+
+# Soft clipping (melhor que cortar seco)
+dHAC_dt = 200 * np.tanh(raw_dhdt / 200)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
@@ -530,22 +537,22 @@ class ProductionHACModel:
         final_severity = base_severity
         
         # Escalação baseada no score Nowcast
-        if nowcast_score >= 10:
+        if nowcast_score >= 12:
             # Condições extremas - forçar G5
             if base_severity < 5:
                 final_level = "G5 (Nowcast Override)"
                 final_severity = 5
-        elif nowcast_score >= 8:
+        elif nowcast_score >= 9:
             # Condições muito fortes - forçar G4
             if base_severity < 4:
                 final_level = "G4 (Nowcast Override)"
                 final_severity = 4
-        elif nowcast_score >= 6:
+        elif nowcast_score >= 7:
             # Condições fortes - forçar G3
             if base_severity < 3:
                 final_level = "G3 (Nowcast Override)"
                 final_severity = 3
-        elif nowcast_score >= 4:
+        elif nowcast_score >= 5:
             # Condições moderadas - forçar G2
             if base_severity < 2:
                 final_level = "G2 (Nowcast Enhancement)"
@@ -553,7 +560,7 @@ class ProductionHACModel:
         
         # REGRAS ESPECIAIS PARA CONDIÇÕES EXTREMAS
         # Mesmo com HAC baixo, se crescimento for extremo e condições favoráveis
-        if dhdt > 200 and bz < -15 and v > 700:
+        if dhdt > 220 and bz < -18 and v > 750 and hac > 100:
             if base_severity < 5:
                 final_level = "G5 (Extreme Nowcast)"
                 final_severity = 5
