@@ -605,7 +605,7 @@ class ProductionHACModel:
             hac_increase = hac_values[i] - hac_values[i-window]
             
             # Boost para G5 se crescimento extremo
-            if max_dhdt > 220 and mean_dhdt > 70 and hac_increase > 100:
+            if max_dhdt > 220 and mean_dhdt > 70 and hac_increase > 120:
                 current = storm_levels[i]
                 if "G5" not in current:
                     enhanced_levels[i] = "G5 (Trend Boost)"
@@ -617,6 +617,24 @@ class ProductionHACModel:
                     enhanced_levels[i] = "G4 (Trend Boost)"
         
         return enhanced_levels
+
+    def apply_persistence_filter(levels, min_duration=30):
+    filtered = levels.copy()
+    
+    current = levels[0]
+    count = 1
+    
+    for i in range(1, len(levels)):
+        if levels[i] == current:
+            count += 1
+        else:
+            if count < min_duration:
+                fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
+                filtered[i-count:i] = [fill] * count
+            current = levels[i]
+            count = 1
+
+    return filtered
     
     def _validate_output(self, hac_values):
         """Validação rigorosa dos resultados"""
