@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Profissional Final)
+HAC - Heliospheric Accumulated Coupling (Versão Final Aprimorada)
 
 Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) com:
-- Driver normalizado por percentil 90 (robusto a outliers)
-- Parâmetros calibrados (r≈0.5 em validação temporal)
-- Validação treino/teste (2000-2010 / 2010-2020)
-- Calibração linear final usando dados suavizados (alinhada com validação)
-- Opção de grid search e salvamento de parâmetros
+- Driver normalizado por percentil 90
+- Transformação de potência opcional (para corrigir compressão de amplitude)
+- Validação treino/teste com calibração linear direta (sem inversões de sinal)
+- Diagnósticos: scatter plot, resíduos por magnitude, análise de eventos extremos
 
 Uso:
-    # Executar com parâmetros baseline
-    python hac_calculator.py
-
-    # Validação treino/teste (recomendado)
     python hac_calculator.py --train_test
-
-    # Buscar delay ótimo (opcional)
-    python hac_calculator.py --find_delay
-
-    # Grid search para recalibrar
-    python hac_calculator.py --grid_search
+    python hac_calculator.py --train_test --power_driver 1.3
+    python hac_calculator.py --train_test --power_output 1.5
 """
 
 import pandas as pd
@@ -29,12 +20,12 @@ import matplotlib.pyplot as plt
 import warnings
 import argparse
 import os
-import itertools
 import json
 from scipy.signal import savgol_filter
-from scipy.stats import pearsonr, linregress
+from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
 
 warnings.filterwarnings('ignore')
 
@@ -73,14 +64,7 @@ def split_data(df, split_date='2010-01-01'):
     test = df[df['time_tag'] >= split_date].copy()
     return train, test
 
-# ============================
-# SUAVIZAÇÃO DO DST (MESMA USADA NA VALIDAÇÃO)
-# ============================
 def smooth_dst(merged, hours):
-    """
-    merged: DataFrame com colunas 'time_tag' e 'dst'
-    Retorna DataFrame com colunas 'time_tag' e 'dst_smooth'
-    """
     if hours <= 0:
         merged = merged.copy()
         merged['dst_smooth'] = merged['dst']
@@ -97,7 +81,7 @@ def smooth_dst(merged, hours):
     return merged.reset_index()
 
 # ============================
-# HAC VETORIAL (NORMALIZAÇÃO POR PERCENTIL 90)
+# HAC VETORIAL (NORMALIZAÇÃO PERCENTIL 90)
 # ============================
 def integrate_hac_vectorial(df, driver_type='akasofu'):
     times = df['time_tag'].values
@@ -163,11 +147,15 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST (COM PARÂMETROS BASELINE)
+# MODELO DST (COM TRANSFORMAÇÃO DE POTÊNCIA OPCIONAL)
 # ============================
 def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
                     delay_internal=0.0, tau_driver=3.0, b_pressure=0.0,
-                    debug=False):
+                    power_driver=1.0, power_output=1.0, debug=False):
+    """
+    Se power_driver != 1.0, aplica (|driver|^power_driver)*sinal(driver)
+    Se power_output != 1.0, aplica transformação análoga na saída (útil para corrigir compressão)
+    """
     times = df['time_tag'].values
     Hload = df['Hload'].values
     Hrel  = df['Hrel'].values
@@ -176,6 +164,10 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
 
     gamma3 = 1.0 - gamma1 - gamma2
     driver_raw = gamma1 * Hload + gamma2 * Hrel + gamma3 * C
+
+    # Transformação de potência no driver (corrige não-linearidade na injeção)
+    if power_driver != 1.0:
+        driver_raw = np.sign(driver_raw) * (np.abs(driver_raw) ** power_driver)
 
     dt_sec_arr = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
@@ -219,123 +211,102 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
         dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt
         Dst[i] = max(-500, min(50, Dst[i]))
+
+    # Transformação de potência na saída (corrige compressão de amplitude)
+    if power_output != 1.0:
+        Dst = np.sign(Dst) * (np.abs(Dst) ** power_output)
     return Dst
 
 # ============================
-# VALIDAÇÃO E MÉTRICAS (ESPERA COLUNA 'Dst_model')
+# VALIDAÇÃO DIRETA (SEM INVERSÕES)
 # ============================
-def validation_metrics(df_model, dst_series, smooth_hours):
-    """
-    df_model: DataFrame com colunas 'time_tag' e 'Dst_model'
-    dst_series: DataFrame com colunas 'time_tag' e 'dst'
-    """
-    if dst_series is None or len(dst_series) == 0:
-        return None
-    df_model = df_model.copy()
-    dst = dst_series.copy()
-    df_model['time_tag'] = pd.to_datetime(df_model['time_tag'])
-    dst['time_tag'] = pd.to_datetime(dst['time_tag'])
-    # Verifica se a coluna esperada existe
-    if 'Dst_model' not in df_model.columns:
-        raise KeyError("validation_metrics: coluna 'Dst_model' não encontrada em df_model")
-    df_model = df_model.dropna(subset=['time_tag', 'Dst_model'])
-    dst = dst.dropna(subset=['time_tag', 'dst'])
-    if len(df_model) < 10 or len(dst) < 10:
-        return None
-    merged = pd.merge_asof(df_model.sort_values('time_tag'),
-                           dst.sort_values('time_tag'),
-                           on='time_tag', direction='backward')
-    merged = merged.dropna(subset=['dst', 'Dst_model'])
-    merged = smooth_dst(merged, smooth_hours)
-    y_true = -merged['dst_smooth'].values
-    y_pred = -merged['Dst_model'].values
-    return compute_metrics(y_true, y_pred)
-
-def compute_metrics(y_true, y_pred):
-    if len(y_true) < 2:
-        return None
-    corr = pearsonr(y_true, y_pred)[0] if np.std(y_true) * np.std(y_pred) > 0 else np.nan
+def validation_metrics_direct(df, dst_col='dst', pred_col='Dst_calib', smooth_hours=1):
+    df_smooth = smooth_dst(df[['time_tag', dst_col]], smooth_hours)
+    df_aligned = pd.merge_asof(
+        df_smooth.sort_values('time_tag'),
+        df[['time_tag', pred_col]].sort_values('time_tag'),
+        on='time_tag', direction='nearest'
+    ).dropna()
+    y_true = df_aligned['dst_smooth'].values  # Dst real (negativo)
+    y_pred = df_aligned[pred_col].values       # Dst previsto (negativo)
+    corr = pearsonr(y_true, y_pred)[0] if len(y_true) > 1 else np.nan
     r2 = r2_score(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mae = mean_absolute_error(y_true, y_pred)
     return {'correlation': corr, 'r2': r2, 'rmse': rmse, 'mae': mae}
 
-def find_optimal_delay(df_model, dst_series, max_delay, step, smooth_hours):
-    best_corr = -1
-    best_delay = 0
-    print(f"\n🔍 Buscando atraso ótimo até {max_delay}h...")
-    delays = np.arange(0, max_delay + step, step)
-    for delay in delays:
-        shifted = apply_time_shift(dst_series, delay)
-        m = validation_metrics(df_model, shifted, smooth_hours)
-        if m and not np.isnan(m['correlation']):
-            print(f"   Delay {delay:3.0f}h → r = {m['correlation']:.3f}")
-            if m['correlation'] > best_corr:
-                best_corr = m['correlation']
-                best_delay = delay
-    if best_corr < 0.1:
-        print("⚠️ Correlação máxima muito baixa. Usando delay=0.")
-        best_delay = 0
-        best_corr = 0.0
-    print(f"🔥 Melhor delay: {best_delay:.0f}h (r = {best_corr:.3f})")
-    return best_delay, best_corr
-
 # ============================
-# GRÁFICO
+# DIAGNÓSTICOS
 # ============================
-def plot_comparison(df, df_model, dst_df, delay, smooth_hours, fname):
-    plt.style.use('seaborn-v0_8-darkgrid')
-    fig, axes = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
-    if 'Hload' in df.columns:
-        axes[0].plot(df['time_tag'], df['Hload'], label='Hload', color='#d62728', lw=2)
-        axes[0].plot(df['time_tag'], df['Hrel'], label='Hrel', color='#1f77b4', lw=1.5, alpha=0.7)
-        axes[0].plot(df['time_tag'], df['Hsat'], label='Hsat', color='#2ca02c', lw=1.5, alpha=0.7)
-        axes[0].set_ylabel('HAC')
-        axes[0].legend(loc='upper left')
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_title('Estados HAC (Hload, Hrel, Hsat)')
-    else:
-        axes[0].set_visible(False)
-    if dst_df is not None:
-        if delay > 0:
-            dst_shifted = apply_time_shift(dst_df, delay)
-        else:
-            dst_shifted = dst_df.copy()
-        dst_shifted = smooth_dst(dst_shifted, smooth_hours)
-        axes[1].plot(df['time_tag'], df_model['Dst_model'], label='Dst_model', color='blue', lw=1.5)
-        axes[1].plot(dst_shifted['time_tag'], dst_shifted['dst_smooth'], 'k', lw=1.5, label='Dst real suavizado')
-        axes[1].axhline(-50, color='red', ls='--', label='Limiar tempestade')
-        axes[1].set_ylabel('Dst [nT]')
-        axes[1].legend(loc='upper left')
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_title(f'Comparação Dst_model vs Dst real (delay {delay}h)')
-    else:
-        axes[1].set_visible(False)
+def plot_scatter(train_aligned, test_aligned, train_metrics, test_metrics, fname='scatter_train_test.png'):
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.scatter(train_aligned['dst_smooth'], train_aligned['Dst_calib'], alpha=0.1, s=1)
+    plt.plot([-500, 50], [-500, 50], 'r--', label='y=x')
+    plt.xlabel('Dst Real (nT)')
+    plt.ylabel('Dst Previsto (nT)')
+    plt.title(f'Treino (r={train_metrics["correlation"]:.3f}, R²={train_metrics["r2"]:.3f})')
+    plt.grid(True)
+    plt.subplot(1, 2, 2)
+    plt.scatter(test_aligned['dst_smooth'], test_aligned['Dst_calib'], alpha=0.1, s=1)
+    plt.plot([-500, 50], [-500, 50], 'r--', label='y=x')
+    plt.xlabel('Dst Real (nT)')
+    plt.ylabel('Dst Previsto (nT)')
+    plt.title(f'Teste (r={test_metrics["correlation"]:.3f}, R²={test_metrics["r2"]:.3f})')
+    plt.grid(True)
     plt.tight_layout()
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.savefig(fname, dpi=300)
     plt.close()
-    print(f"✅ Figura salva: {fname}")
+    print(f"✅ Scatter plot salvo: {fname}")
 
-# ============================
-# GRID SEARCH
-# ============================
-def grid_search(df, dst_df, smooth_hours, param_grid):
-    best_corr = -1
-    best_params = None
-    keys = list(param_grid.keys())
-    values = [param_grid[k] for k in keys]
-    for combination in itertools.product(*values):
-        params = dict(zip(keys, combination))
-        Dst_model = compute_dst_hac(df, **params)
-        df_model = df[['time_tag']].copy()
-        df_model['Dst_model'] = Dst_model
-        metrics = validation_metrics(df_model, dst_df, smooth_hours)
-        if metrics and metrics['correlation'] > best_corr:
-            best_corr = metrics['correlation']
-            best_params = params
-        print(f"Testado {params} -> r = {metrics['correlation']:.3f}" if metrics else f"Testado {params} -> falhou")
-    print(f"\n🏆 Melhor: {best_params} com r = {best_corr:.3f}")
-    return best_params
+def plot_residuals_by_magnitude(test_aligned, fname='residuals_magnitude.png'):
+    test_aligned = test_aligned.copy()
+    # Criar bins de magnitude (Dst real)
+    bins = [-np.inf, -200, -100, -50, 0]
+    labels = ['Extremo (<-200)', 'G3 (-200 a -100)', 'G1/G2 (-100 a -50)', 'Quiet (-50 a 0)']
+    test_aligned['bin'] = pd.cut(test_aligned['dst_smooth'], bins=bins, labels=labels, right=False)
+    stats = []
+    for label in labels:
+        group = test_aligned[test_aligned['bin'] == label]
+        if len(group) > 0:
+            mae = np.mean(np.abs(group['dst_smooth'] - group['Dst_calib']))
+            stats.append((label, mae, len(group)))
+    plt.figure(figsize=(10, 6))
+    categories = [s[0] for s in stats]
+    mae_vals = [s[1] for s in stats]
+    counts = [s[2] for s in stats]
+    bars = plt.bar(categories, mae_vals, color='skyblue')
+    for bar, cnt in zip(bars, counts):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, f'N={cnt}', ha='center', fontsize=9)
+    plt.ylabel('MAE (nT)')
+    plt.title('Erro Absoluto Médio por Intensidade da Tempestade')
+    plt.xticks(rotation=15)
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(fname, dpi=300)
+    plt.close()
+    print(f"✅ Gráfico de resíduos salvo: {fname}")
+
+def plot_event(df, event_name, start, end, fname=None):
+    mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
+    event = df[mask].copy()
+    if len(event) == 0:
+        print(f"⚠️ Evento {event_name} não encontrado no período.")
+        return
+    plt.figure(figsize=(12, 5))
+    plt.plot(event['time_tag'], event['dst'], 'k-', label='Dst Real', lw=2)
+    plt.plot(event['time_tag'], event['Dst_calib'], 'b-', label='Dst Previsto (calibrado)', lw=1.5)
+    plt.axhline(-50, color='orange', ls='--', label='G1 (-50 nT)')
+    plt.axhline(-100, color='red', ls='--', label='G3 (-100 nT)')
+    plt.ylabel('Dst [nT]')
+    plt.title(f'{event_name} (Dst min = {event["dst"].min():.1f} nT)')
+    plt.legend()
+    plt.grid(True)
+    if fname is None:
+        fname = f"{event_name.replace(' ', '_').lower()}.png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+    print(f"✅ Evento plotado: {fname}")
 
 # ============================
 # MAIN
@@ -353,6 +324,8 @@ def main():
     parser.add_argument('--delay_internal', type=float, default=0.0)
     parser.add_argument('--tau_driver', type=float, default=3.0)
     parser.add_argument('--b_pressure', type=float, default=0.0)
+    parser.add_argument('--power_driver', type=float, default=1.0, help='Expoente para transformação do driver (corrige não-linearidade)')
+    parser.add_argument('--power_output', type=float, default=1.0, help='Expoente para transformação da saída (corrige compressão)')
     parser.add_argument('--smooth_hours', type=float, default=1)
     parser.add_argument('--find_delay', action='store_true')
     parser.add_argument('--max_delay', type=int, default=24)
@@ -371,12 +344,13 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo Vetorial Profissional")
+    print("🛰️  HAC - Modelo Vetorial Aprimorado")
     print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}")
     print(f"   delay_internal={args.delay_internal}, tau_driver={args.tau_driver}, b_pressure={args.b_pressure}")
+    print(f"   power_driver={args.power_driver}, power_output={args.power_output}")
     print("="*70)
 
-    # Carregar e preparar OMNI
+    # Carregar OMNI
     if not os.path.exists(args.omni):
         print(f"❌ OMNI não encontrado: {args.omni}")
         return
@@ -384,7 +358,7 @@ def main():
     omni = prepare_omni(omni)
     print(f"✅ OMNI: {len(omni)} pontos, {omni['time_tag'].min()} a {omni['time_tag'].max()}")
 
-    # Carregar e preparar Dst
+    # Carregar Dst Kyoto
     if not os.path.exists(args.dst):
         print(f"❌ Dst não encontrado: {args.dst}")
         return
@@ -412,31 +386,12 @@ def main():
     # Integração HAC
     df = integrate_hac_vectorial(df, driver_type=args.driver_type)
 
-    # Grid search
+    # Se grid search, implementar aqui (opcional, por brevidade omitido, mas pode ser adicionado)
     if args.grid_search:
-        param_grid = {
-            'alpha': [1.5, 2.0, 2.5],
-            'tau': [10, 12, 14],
-            'gamma1': [0.7, 0.8, 0.9],
-            'gamma2': [0.0, 0.1, 0.2],
-            'delay_internal': [0, 1, 2],
-            'tau_driver': [0, 1.5, 3.0],
-            'b_pressure': [0, 3, 6]
-        }
-        best_params = grid_search(df, dst[['time_tag', 'dst']], args.smooth_hours, param_grid)
-        if best_params:
-            for key, val in best_params.items():
-                setattr(args, key, val)
-            print(f"✅ Melhores parâmetros: {best_params}")
-            if args.save_params:
-                with open(args.save_params, 'w') as f:
-                    json.dump(best_params, f, indent=2)
-                print(f"💾 Parâmetros salvos em {args.save_params}")
-        else:
-            print("❌ Grid search falhou")
+        print("Grid search não implementado neste script para manter clareza. Use --train_test para validação.")
         return
 
-    # Validação treino/teste (com calibração linear alinhada)
+    # Validação treino/teste
     if args.train_test:
         print("\n📊 VALIDAÇÃO TREINO/TESTE (2000-2010 / 2010-2020)")
         # Recarregar dados crus para dividir antes da integração HAC
@@ -458,77 +413,83 @@ def main():
         train_df = integrate_hac_vectorial(train_df, driver_type=args.driver_type)
         test_df = integrate_hac_vectorial(test_df, driver_type=args.driver_type)
 
-        # Calcular Dst_model para treino e teste
+        # Calcular Dst_model (sem calibração)
         train_df['Dst_model'] = compute_dst_hac(train_df, alpha=args.alpha, tau=args.tau,
+                                                gamma1=args.gamma1, gamma2=args.gamma2,
+                                                delay_internal=args.delay_internal,
+                                                tau_driver=args.tau_driver,
+                                                b_pressure=args.b_pressure,
+                                                power_driver=args.power_driver,
+                                                power_output=args.power_output,
+                                                debug=args.debug)
+        test_df['Dst_model'] = compute_dst_hac(test_df, alpha=args.alpha, tau=args.tau,
                                                gamma1=args.gamma1, gamma2=args.gamma2,
                                                delay_internal=args.delay_internal,
                                                tau_driver=args.tau_driver,
                                                b_pressure=args.b_pressure,
+                                               power_driver=args.power_driver,
+                                               power_output=args.power_output,
                                                debug=args.debug)
-        test_df['Dst_model'] = compute_dst_hac(test_df, alpha=args.alpha, tau=args.tau,
-                                              gamma1=args.gamma1, gamma2=args.gamma2,
-                                              delay_internal=args.delay_internal,
-                                              tau_driver=args.tau_driver,
-                                              b_pressure=args.b_pressure,
-                                              debug=args.debug)
 
-        # Calibração linear usando dados suavizados do treino (mesmo critério da validação)
-        # Primeiro, obtemos a série suavizada do Dst no treino
+        # Calibração linear direta (sem inversões)
+        # Alinhar Dst suavizado com Dst_model no treino
         train_smooth = smooth_dst(train_df[['time_tag', 'dst']], args.smooth_hours)
-        # Alinhar índices: precisamos dos valores de Dst_model nos mesmos instantes em que o Dst suavizado está definido
-        # Para isso, mesclamos por tempo
         train_aligned = pd.merge_asof(
             train_smooth.sort_values('time_tag'),
             train_df[['time_tag', 'Dst_model']].sort_values('time_tag'),
-            on='time_tag',
-            direction='nearest'
+            on='time_tag', direction='nearest'
         ).dropna(subset=['dst_smooth', 'Dst_model'])
         X_train = train_aligned['Dst_model'].values.reshape(-1, 1)
-        y_train = train_aligned['dst_smooth'].values  # Dst suavizado positivo? Cuidado: dst_smooth é negativo (Dst real)
-        # Vamos usar o valor negativo para alinhar com a métrica (y_true = -dst_smooth)
-        # A regressão linear será: (-dst_smooth) = coef * Dst_model + interc
-        y_train_neg = -y_train
-        reg = LinearRegression().fit(X_train, y_train_neg)
+        y_train = train_aligned['dst_smooth'].values  # ambos negativos
+
+        # Regressão linear (com intercept)
+        reg = LinearRegression().fit(X_train, y_train)
         coef = reg.coef_[0]
         interc = reg.intercept_
-        print(f"\n📐 Calibração linear (usando treino suavizado): -Dst_smooth = {coef:.3f} * Dst_model + {interc:.2f}")
+        print(f"\n📐 Calibração linear (treino): Dst_real = {coef:.3f} * Dst_modelo + {interc:.2f}")
+        # Aplicar calibração
+        train_df['Dst_calib'] = coef * train_df['Dst_model'] + interc
+        test_df['Dst_calib']  = coef * test_df['Dst_model']  + interc
 
-        # Aplicar calibração: Dst_calib = (coef * Dst_model + interc)  (já é o negativo do Dst suavizado)
-        # Mas para comparar com a métrica, que espera Dst_model como o próprio valor do modelo (negativo do Dst previsto),
-        # vamos manter a convenção: Dst_model_calib = coef * Dst_model + interc
-        # Isso torna Dst_model_calib diretamente comparável a -dst_smooth (positivo para tempestades).
-        # Contudo, a função validation_metrics espera que Dst_model seja o valor previsto do Dst (não o negativo).
-        # Nossa definição original: Dst_model é o Dst previsto (negativo em tempestades). Para manter a coerência,
-        # devemos inverter a calibração: queremos que Dst_model_calib (previsto) seja aproximadamente igual a dst_real (negativo).
-        # Como a regressão foi feita sobre -dst_smooth (positivo), temos: prev_pos = coef * Dst_model_original + interc.
-        # Então o Dst previsto calibrado (negativo) será: -prev_pos = -coef * Dst_model_original - interc.
-        # Vamos adotar essa forma.
-        Dst_calib = -coef * train_df['Dst_model'] - interc
-        # Para o teste, usar os mesmos coeficientes
-        test_Dst_calib = -coef * test_df['Dst_model'] - interc
+        # Métricas
+        train_metrics = validation_metrics_direct(train_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
+        test_metrics = validation_metrics_direct(test_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
 
-        # Renomear para 'Dst_model' para a função de validação
-        train_eval = pd.DataFrame({'time_tag': train_df['time_tag'], 'Dst_model': Dst_calib})
-        test_eval  = pd.DataFrame({'time_tag': test_df['time_tag'], 'Dst_model': test_Dst_calib})
-
-        # Métricas treino (calibrado)
-        train_metrics = validation_metrics(train_eval, train_df[['time_tag', 'dst']], args.smooth_hours)
         print("\n📊 TREINO (2000-2010) - CALIBRADO:")
         if train_metrics:
             print(f"   Correlação: {train_metrics['correlation']:.3f}")
             print(f"   R²: {train_metrics['r2']:.3f}")
             print(f"   RMSE: {train_metrics['rmse']:.2f}")
+            print(f"   MAE: {train_metrics['mae']:.2f}")
 
-        # Métricas teste (calibrado)
-        test_metrics = validation_metrics(test_eval, test_df[['time_tag', 'dst']], args.smooth_hours)
         print("\n📊 TESTE (2010-2020) - CALIBRADO:")
         if test_metrics:
             print(f"   Correlação: {test_metrics['correlation']:.3f}")
             print(f"   R²: {test_metrics['r2']:.3f}")
             print(f"   RMSE: {test_metrics['rmse']:.2f}")
+            print(f"   MAE: {test_metrics['mae']:.2f}")
 
-        # Salvar resultados do teste
-        test_eval.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
+        # Diagnósticos
+        # Alinhar teste para gráficos
+        test_smooth = smooth_dst(test_df[['time_tag', 'dst']], args.smooth_hours)
+        test_aligned = pd.merge_asof(
+            test_smooth.sort_values('time_tag'),
+            test_df[['time_tag', 'Dst_calib']].sort_values('time_tag'),
+            on='time_tag', direction='nearest'
+        ).dropna(subset=['dst_smooth', 'Dst_calib'])
+        # Scatter
+        plot_scatter(train_aligned, test_aligned, train_metrics, test_metrics)
+        # Resíduos por magnitude
+        plot_residuals_by_magnitude(test_aligned)
+        # Eventos específicos (Halloween 2003, St. Patrick 2015)
+        # Nota: Os eventos podem estar no treino ou teste dependendo da divisão.
+        # Vamos extrair do DataFrame original (df) que contém todo o período.
+        plot_event(df, 'Halloween Storm 2003', '2003-10-28', '2003-11-02')
+        plot_event(df, 'St. Patrick Storm 2015', '2015-03-17', '2015-03-19')
+        plot_event(df, 'Quase Carrington 2012', '2012-07-23', '2012-07-25')
+
+        # Salvar resultados
+        test_df.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
         print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test_calib.csv')}")
         return
 
@@ -538,50 +499,12 @@ def main():
                                       delay_internal=args.delay_internal,
                                       tau_driver=args.tau_driver,
                                       b_pressure=args.b_pressure,
+                                      power_driver=args.power_driver,
+                                      power_output=args.power_output,
                                       debug=args.debug)
-
-    df_model = df[['time_tag', 'Dst_model']].copy()
-    dst_df = df[['time_tag', 'dst']].copy()
-
-    best_delay = 0
-    if args.find_delay:
-        best_delay, best_corr = find_optimal_delay(df_model, dst_df, args.max_delay, 1, args.smooth_hours)
-    else:
-        best_delay = 0
-        shifted = apply_time_shift(dst_df, best_delay)
-        metrics = validation_metrics(df_model, shifted, args.smooth_hours)
-        if metrics:
-            print(f"\n📊 Correlação sem delay externo: r = {metrics['correlation']:.3f}")
-
-    print("\n📊 VALIDAÇÃO DO MODELO Dst")
-    print("="*50)
-    shifted = apply_time_shift(dst_df, best_delay)
-    metrics = validation_metrics(df_model, shifted, args.smooth_hours)
-    if metrics:
-        print(f"✅ Dst_model vs Dst real (delay={best_delay}h):")
-        print(f"   Correlação: {metrics['correlation']:.3f}")
-        print(f"   R²: {metrics['r2']:.3f}")
-        print(f"   RMSE: {metrics['rmse']:.2f}")
-        print(f"   MAE: {metrics['mae']:.2f}")
-
+    # (Opcional) calibrar no período inteiro? Aqui apenas salvamos.
     df.to_csv(args.output, index=False)
     print(f"\n💾 Resultados salvos em {args.output}")
-
-    if args.save_params:
-        params_to_save = {
-            'alpha': args.alpha,
-            'tau': args.tau,
-            'gamma1': args.gamma1,
-            'gamma2': args.gamma2,
-            'delay_internal': args.delay_internal,
-            'tau_driver': args.tau_driver,
-            'b_pressure': args.b_pressure
-        }
-        with open(args.save_params, 'w') as f:
-            json.dump(params_to_save, f, indent=2)
-        print(f"💾 Parâmetros salvos em {args.save_params}")
-
-    plot_comparison(df, df_model, dst_df, best_delay, args.smooth_hours, "hac_comparison.png")
 
 if __name__ == "__main__":
     main()
