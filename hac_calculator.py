@@ -2,16 +2,16 @@
 """
 HAC - Heliospheric Accumulated Coupling (Versão Final Corrigida)
 
-Modelo físico de anel de corrente com:
-- Driver principal: VBs = V * max(-Bz, 0) / 1000  (escala física)
-- Termos de memória: Hload, Hrel, C (acoplamento complementar)
+Modelo Dst baseado em Burton com:
+- Driver físico: VBs = V * max(-Bz,0) / 1000
+- Termos de memória: Hload, Hrel, C
+- Equação: dDst/dt = -driver - Dst/τ + b_pressure * sqrt(Pdyn)
 - Atraso interno no driver (delay_internal)
-- Equação diferencial direta: dDst/dt = driver - Dst/τ_eff
-- Calibração linear final (opcional)
-- Diagnóstico completo (correlação raw, scatter, resíduos, eventos)
+- Normalização opcional do driver
+- Validação treino/teste com calibração linear (opcional)
 
 Uso recomendado:
-    python hac_calculator.py --train_test --delay_internal 2 --normalize_driver --debug
+    python hac_calculator.py --train_test --delay_internal 2 --gamma6 0.02 --b_pressure 7 --normalize_driver
 """
 
 import pandas as pd
@@ -146,14 +146,15 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST DIRETO (COM ATRASO E ESCALA FÍSICA)
+# MODELO DST DIRETO (COM SINAL CORRETO E PRESSÃO)
 # ============================
-def compute_dst_direct(df, tau_R=6.0, alpha=1.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
-                       gamma4=0.0, gamma5=0.0, gamma6=0.002, threshold=1.5,
-                       delay_internal=2.0, tau_driver=0.0, b_pressure=0.0,
+def compute_dst_direct(df, tau_R=6.0, gamma1=0.5, gamma2=0.1, gamma3=0.1,
+                       gamma4=0.0, gamma5=0.0, gamma6=0.02, threshold=1.5,
+                       delay_internal=2.0, tau_driver=0.0, b_pressure=7.0,
                        normalize_driver=True, debug=False):
     """
-    Modelo Dst direto: dDst/dt = driver - Dst/τ_eff
+    Modelo Dst com equação física:
+        dDst/dt = -driver - Dst/τ + b_pressure * sqrt(Pdyn)
     driver = gamma1*Hload + gamma2*Hrel + gamma3*C + gamma4*interaction + gamma5*extra + gamma6*VBs_normalizado
     VBs = V * max(-Bz,0) / 1000 (escala física)
     delay_internal: atraso aplicado ao driver (horas)
@@ -168,7 +169,7 @@ def compute_dst_direct(df, tau_R=6.0, alpha=1.0, gamma1=0.5, gamma2=0.1, gamma3=
 
     # Driver físico: VBs normalizado (escala ~ centenas)
     Bs = np.maximum(-Bz, 0)
-    VBs = (V * Bs) / 1000.0   # agora VBs fica na faixa típica 0-400
+    VBs = (V * Bs) / 1000.0
 
     # Termos de memória (opcionais)
     interaction = (Hload * C) / (1 + Hload)
@@ -233,18 +234,14 @@ def compute_dst_direct(df, tau_R=6.0, alpha=1.0, gamma1=0.5, gamma2=0.1, gamma3=
     # Constante de tempo efetiva (depende de C)
     tau_eff = tau_R / (1 + 0.5 * C)   # k_tau fixo = 0.5
 
-    # Equação diferencial direta: dDst/dt = driver - Dst/τ_eff
+    # Equação diferencial correta: dDst/dt = -driver - Dst/τ + b_pressure * sqrt(Pdyn)
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
-        dDst = driver[i] - Dst[i-1] / tau_eff[i]
+        dDst = -driver[i] - Dst[i-1] / tau_eff[i] + b_pressure * np.sqrt(Pdyn[i])
         Dst[i] = Dst[i-1] + dDst * dt
         # Limite físico
         Dst[i] = max(-500, min(50, Dst[i]))
-
-    # Correção de pressão (opcional)
-    if b_pressure > 0:
-        Dst = Dst - b_pressure * np.sqrt(Pdyn)
 
     if debug:
         print(f"\n🔍 DEBUG APÓS INTEGRAÇÃO:")
@@ -375,7 +372,7 @@ def plot_event(df, event_name, start, end, pred_col='Dst_calib', fname=None):
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser(description='HAC - Modelo Dst Direto com Atraso')
+    parser = argparse.ArgumentParser(description='HAC - Modelo Dst Corrigido (Sinal + Pressão)')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
@@ -387,11 +384,11 @@ def main():
     parser.add_argument('--gamma3', type=float, default=0.1, help='Peso de C')
     parser.add_argument('--gamma4', type=float, default=0.0, help='Peso da interação Hload*C')
     parser.add_argument('--gamma5', type=float, default=0.0, help='Peso do termo extra (limiar)')
-    parser.add_argument('--gamma6', type=float, default=0.002, help='Peso do driver físico VBs')
+    parser.add_argument('--gamma6', type=float, default=0.02, help='Peso do driver físico VBs')
     parser.add_argument('--threshold', type=float, default=1.5)
     parser.add_argument('--delay_internal', type=float, default=2.0, help='Atraso interno (horas)')
     parser.add_argument('--tau_driver', type=float, default=0.0, help='Memória exponencial do driver')
-    parser.add_argument('--b_pressure', type=float, default=0.0, help='Correção de pressão')
+    parser.add_argument('--b_pressure', type=float, default=7.0, help='Coeficiente da pressão dinâmica')
     parser.add_argument('--normalize_driver', action='store_true', help='Normalizar o driver (recomendado)')
     parser.add_argument('--smooth_hours', type=float, default=1)
     parser.add_argument('--debug', action='store_true')
@@ -408,10 +405,10 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo Dst Direto com Atraso Físico")
+    print("🛰️  HAC - Modelo Dst Corrigido (Sinal + Pressão Dinâmica)")
     print(f"   tau_R = {args.tau_R} h, delay_internal = {args.delay_internal} h")
     print(f"   gamma1={args.gamma1}, gamma2={args.gamma2}, gamma3={args.gamma3}, gamma6={args.gamma6}")
-    print(f"   normalize_driver = {args.normalize_driver}")
+    print(f"   b_pressure = {args.b_pressure}, normalize_driver = {args.normalize_driver}")
     print("="*70)
 
     # Carregar OMNI
@@ -462,6 +459,9 @@ def main():
                                            normalize_driver=args.normalize_driver,
                                            debug=args.debug)
         df.to_csv(args.output, index=False)
+        print(f"💾 Resultados salvos em {args.output}")
+        return
+
     # ========== MODO TREINO/TESTE ==========
     print("\n📊 VALIDAÇÃO TREINO/TESTE (2000-2010 / 2010-2020)")
     omni_raw = pd.read_csv(args.omni, parse_dates=['time_tag'])
