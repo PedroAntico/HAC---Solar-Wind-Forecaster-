@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Científica Final v4)
-Correções finais:
-- Limpeza OMNI mais tolerante (speed >= 250 km/s)
-- Pesos ajustados (gamma1=0.6, gamma6=1.0, b_pressure=1.0)
-- Calibração linear automática no treino
-- Proteção contra overflow no Burton
-- Integração estável com solve_ivp
+HAC - Heliospheric Accumulated Coupling (Versão Científica Final v5)
+- Limpeza MÍNIMA (preserva > 95% dos dados)
+- Filtro de speed quase removido
+- Calibração linear automática
+- gammas ajustados para melhor escala
+- Proteções contra overflow
 """
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import warnings
 import argparse
 import os
 import json
 from scipy.stats import pearsonr
 from scipy.integrate import solve_ivp
-from scipy.optimize import differential_evolution
 from scipy.interpolate import interp1d
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 warnings.filterwarnings('ignore')
 
@@ -38,7 +35,7 @@ def compute_pdyn_nPa(N_cm3, V_kms):
     return M_P * N_m3 * V_ms**2 * 1e9
 
 # ============================
-# LIMPEZA ROBUSTA (VERSÃO TOLERANTE v2)
+# PREPARE OMNI - LIMPEZA MÍNIMA
 # ============================
 def prepare_omni(df):
     df = df.copy().sort_values('time_tag').reset_index(drop=True)
@@ -52,11 +49,11 @@ def prepare_omni(df):
             print(f"⚠️ Speed detectado em m/s (mediana={med:.0f}) → convertendo para km/s")
             df['speed'] /= 1000.0
 
-    # Filtro mais tolerante (preserva vento solar lento, speed >= 250 km/s)
+    # LIMPEZA MÍNIMA - apenas valores impossíveis fisicamente
     bad = (
         (df['bz_gsm'].abs() > 100) |
-        (df['speed'] < 250) | (df['speed'] > 2500) |
-        (df['density'] < 0.005) | (df['density'] > 3000) |
+        (df['speed'] < 100) | (df['speed'] > 3000) |
+        (df['density'] < 0.001) | (df['density'] > 5000) |
         (df['bx_gsm'].abs() > 100) |
         (df['by_gsm'].abs() > 100)
     )
@@ -64,10 +61,10 @@ def prepare_omni(df):
     df.loc[bad, ['bz_gsm', 'bx_gsm', 'by_gsm', 'density', 'speed']] = np.nan
 
     # Preenchimento generoso
-    df['bz_gsm'] = df['bz_gsm'].ffill(limit=8)
+    df['bz_gsm'] = df['bz_gsm'].ffill(limit=12)
     for col in ['bx_gsm', 'by_gsm', 'density', 'speed']:
         if col in df.columns:
-            df[col] = df[col].interpolate(method='linear', limit=15)
+            df[col] = df[col].interpolate(method='linear', limit=24)
 
     df = df.dropna(subset=['bz_gsm', 'speed', 'density']).reset_index(drop=True)
     after = len(df)
@@ -172,8 +169,8 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
 # MODELO DST (COM ESCALA AJUSTADA)
 # ============================
 def compute_dst_direct(df, tau_R=6.0, gamma1=0.6, gamma2=0.05, gamma3=0.05,
-                       gamma4=0.0, gamma5=0.0, gamma6=1.0, threshold=1.5,
-                       delay_internal=2.0, tau_driver=0.0, b_pressure=1.0,
+                       gamma4=0.0, gamma5=0.0, gamma6=1.2, threshold=1.5,
+                       delay_internal=2.0, tau_driver=0.0, b_pressure=1.5,
                        vbs_boost=2.0, debug=False):
     if len(df) == 0:
         return np.array([])
@@ -200,7 +197,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.6, gamma2=0.05, gamma3=0.05,
                   gamma4 * interaction + gamma5 * extra +
                   gamma6 * VBs * vbs_boost)
 
-    # Clipping suave
+    # Clipping suave (apenas extremos)
     if np.any(driver_raw > 100):
         cap = np.percentile(driver_raw[driver_raw > 0], 99.9)
         driver_raw = np.clip(driver_raw, 0, cap)
@@ -284,10 +281,8 @@ def compute_dst_burton(df, tau=6.0, alpha=4.5, delay_internal=2.0):
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
-        # Proteção contra valores extremos (overflow)
         vbs_val = np.clip(VBs_delayed[i], 0, 100)
         dDst = -alpha * vbs_val - Dst[i-1] / tau
-        # Limitar passo para evitar explosão
         dDst = np.clip(dDst, -500, 500)
         Dst[i] = Dst[i-1] + dDst * dt
         Dst[i] = np.clip(Dst[i], -500, 50)
@@ -340,6 +335,7 @@ def objective(params, train_df):
 
 def optimize_parameters(train_df):
     bounds = [(0.2, 1.5), (0.01, 0.5), (0.01, 0.5), (0.2, 1.5), (0, 6), (0.0, 2.0)]
+    from scipy.optimize import differential_evolution
     result = differential_evolution(objective, bounds, args=(train_df,), workers=1, tol=1e-4, popsize=8, maxiter=20)
     return result.x
 
@@ -358,11 +354,11 @@ def main():
     parser.add_argument('--gamma3', type=float, default=0.05)
     parser.add_argument('--gamma4', type=float, default=0.0)
     parser.add_argument('--gamma5', type=float, default=0.0)
-    parser.add_argument('--gamma6', type=float, default=1.0)
+    parser.add_argument('--gamma6', type=float, default=1.2)
     parser.add_argument('--threshold', type=float, default=1.5)
     parser.add_argument('--delay_internal', type=float, default=2.0)
     parser.add_argument('--tau_driver', type=float, default=0.0)
-    parser.add_argument('--b_pressure', type=float, default=1.0)
+    parser.add_argument('--b_pressure', type=float, default=1.5)
     parser.add_argument('--vbs_boost', type=float, default=2.0)
     parser.add_argument('--smooth_hours', type=float, default=0)
     parser.add_argument('--debug', action='store_true')
@@ -380,7 +376,7 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*80)
-    print("🛰️  HAC - Modelo Científico Final v4 (limpeza otimizada + calibração)")
+    print("🛰️  HAC - Modelo Científico Final v5 (limpeza mínima)")
     print("="*80)
 
     # Carregar OMNI
@@ -487,7 +483,7 @@ def main():
     train_df['Dst_hac'] = reg.predict(train_df['Dst_raw'].values.reshape(-1,1))
     test_df['Dst_hac'] = reg.predict(test_df['Dst_raw'].values.reshape(-1,1))
 
-    # Baseline Burton (com proteção)
+    # Baseline Burton
     train_df['Dst_burton'] = compute_dst_burton(train_df, tau=args.tau_R, alpha=4.5, delay_internal=args.delay_internal)
     test_df['Dst_burton'] = compute_dst_burton(test_df, tau=args.tau_R, alpha=4.5, delay_internal=args.delay_internal)
 
@@ -498,12 +494,12 @@ def main():
     burton_test = validation_metrics_direct(test_df, 'Dst_burton', smooth_hours=args.smooth_hours)
 
     print("\n📊 TREINO (2000-2010) - SEM SUAVIZAÇÃO:")
-    print(f"   HAC    : r={hac_train['correlation']:.3f}  R²={hac_train['r2']:.3f}  RMSE={hac_train['rmse']:.1f}  MAE_storm={hac_train['mae_storm']:.1f}")
-    print(f"   Burton : r={burton_train['correlation']:.3f}  R²={burton_train['r2']:.3f}  RMSE={burton_train['rmse']:.1f}  MAE_storm={burton_train['mae_storm']:.1f}")
+    print(f"   HAC    : r={hac_train['correlation']:.3f}  R²={hac_train['r2']:.3f}  RMSE={hac_train['rmse']:.1f}  MAE_storm={hac_train.get('mae_storm',0):.1f}")
+    print(f"   Burton : r={burton_train['correlation']:.3f}  R²={burton_train['r2']:.3f}  RMSE={burton_train['rmse']:.1f}  MAE_storm={burton_train.get('mae_storm',0):.1f}")
 
     print("\n📊 TESTE (2010-2020) - SUAVIZAÇÃO {}h:".format(args.smooth_hours))
-    print(f"   HAC    : r={hac_test['correlation']:.3f}  R²={hac_test['r2']:.3f}  RMSE={hac_test['rmse']:.1f}  MAE_storm={hac_test['mae_storm']:.1f}")
-    print(f"   Burton : r={burton_test['correlation']:.3f}  R²={burton_test['r2']:.3f}  RMSE={burton_test['rmse']:.1f}  MAE_storm={burton_test['mae_storm']:.1f}")
+    print(f"   HAC    : r={hac_test['correlation']:.3f}  R²={hac_test['r2']:.3f}  RMSE={hac_test['rmse']:.1f}  MAE_storm={hac_test.get('mae_storm',0):.1f}")
+    print(f"   Burton : r={burton_test['correlation']:.3f}  R²={burton_test['r2']:.3f}  RMSE={burton_test['rmse']:.1f}  MAE_storm={burton_test.get('mae_storm',0):.1f}")
 
     test_df.to_csv(args.output.replace('.csv', '_test.csv'), index=False)
     print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test.csv')}")
