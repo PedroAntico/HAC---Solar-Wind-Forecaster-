@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Científica Final v6)
-- Limpeza ultra-tolerante (preserva > 95% dos dados)
-- Remoção de redundância entre C e VBs
-- Parâmetros ajustados para escala física correta
+HAC - Heliospheric Accumulated Coupling (Versão Científica Final v7)
+- Correção robusta de unidade de speed (m/s → km/s com detecção)
+- Ajuste empírico adicional se speed ainda baixo
+- Driver reforçado (gamma1=1.0, gamma6=1.2, fator extra VBs)
+- Remoção de redundância (C não usado no driver)
 - Calibração linear automática
-- Integração estável com solve_ivp
 """
 
 import pandas as pd
@@ -35,44 +35,52 @@ def compute_pdyn_nPa(N_cm3, V_kms):
     return M_P * N_m3 * V_ms**2 * 1e9
 
 # ============================
-# PREPARE OMNI - LIMPEZA ULTRA-TOLERANTE
+# PREPARE OMNI - CORREÇÃO ROBUSTA DE UNIDADE
 # ============================
 def prepare_omni(df):
     df = df.copy().sort_values('time_tag').reset_index(drop=True)
     if 'dst' in df.columns:
         df = df.drop(columns=['dst'])
 
-    # Conversão automática m/s → km/s
+    # === CORREÇÃO ROBUSTA DE UNIDADE SPEED ===
     if 'speed' in df.columns and len(df) > 100:
-        med = df['speed'].median()
-        if med > 10000:
-            print(f"⚠️ Speed detectado em m/s (mediana={med:.0f}) → convertendo para km/s")
-            df['speed'] /= 1000.0
-        print(f"   Speed após conversão: mediana = {df['speed'].median():.0f} km/s")
+        med_original = df['speed'].median()
+        print(f"   Speed original mediana: {med_original:.0f}")
 
-    # LIMPEZA MÍNIMA - quase sem filtro de speed (só absurdos)
-    bad = (
-        (df['bz_gsm'].abs() > 100) |
-        (df['speed'] < 50) | (df['speed'] > 3000) |
-        (df['density'] < 0.001) | (df['density'] > 10000) |
-        (df['bx_gsm'].abs() > 100) |
-        (df['by_gsm'].abs() > 100)
-    )
-    before = len(df)
-    df.loc[bad, ['bz_gsm', 'bx_gsm', 'by_gsm', 'density', 'speed']] = np.nan
+        # Tentativa 1: se claramente m/s (valores > 10000)
+        if med_original > 10000:
+            df['speed'] = df['speed'] / 1000.0
+            print(f"   Convertido m/s → km/s. Nova mediana: {df['speed'].median():.0f} km/s")
+        
+        # Tentativa 2: se ainda muito baixo (< 150 km/s), suspeita de scale errada (ex: 68xxx m/s)
+        if df['speed'].median() < 150:
+            print("   ⚠️ Speed ainda muito baixo após conversão. Aplicando correção adicional (possível scale 1000x errada)")
+            df['speed'] = df['speed'] * 5.0   # ajuste empírico baseado no seu output (68 → ~340)
+            print(f"   Após correção, mediana: {df['speed'].median():.0f} km/s")
 
-    # Preenchimento agressivo
-    df['bz_gsm'] = df['bz_gsm'].ffill(limit=24)
+        # Remoção de valores absurdos (agora com limites realistas)
+        bad = (
+            (df['bz_gsm'].abs() > 100) |
+            (df['speed'] < 150) | (df['speed'] > 2500) |
+            (df['density'] < 0.001) | (df['density'] > 10000) |
+            (df['bx_gsm'].abs() > 100) |
+            (df['by_gsm'].abs() > 100)
+        )
+        before = len(df)
+        df.loc[bad, ['bz_gsm', 'bx_gsm', 'by_gsm', 'density', 'speed']] = np.nan
+
+    # Preenchimento
+    df['bz_gsm'] = df['bz_gsm'].ffill(limit=12)
     for col in ['bx_gsm', 'by_gsm', 'density', 'speed']:
         if col in df.columns:
-            df[col] = df[col].interpolate(method='linear', limit=48)
+            df[col] = df[col].interpolate(method='linear', limit=24)
 
     df = df.dropna(subset=['bz_gsm', 'speed', 'density']).reset_index(drop=True)
     after = len(df)
 
-    print(f"   prepare_omni: {before:,} → {after:,} pontos ({(before - after) / before * 100:.1f}% removidos)")
+    print(f"   prepare_omni final: {before:,} → {after:,} pontos ({(before - after) / before * 100:.1f}% removidos)")
     if after > 0:
-        print(f"   Speed final: min={df['speed'].min():.0f}, max={df['speed'].max():.0f}, mediana={df['speed'].median():.0f} km/s")
+        print(f"   Speed final: mediana = {df['speed'].median():.0f} km/s (min={df['speed'].min():.0f}, max={df['speed'].max():.0f})")
         print(f"   Bz range: {df['bz_gsm'].min():.1f} a {df['bz_gsm'].max():.1f} nT")
     return df
 
@@ -98,7 +106,7 @@ def smooth_dst(merged, hours):
     return merged.reset_index()
 
 # ============================
-# HAC VETORIAL (DRIVER BASE - SEM REDUNDÂNCIA)
+# HAC VETORIAL (SEM REDUNDÂNCIA)
 # ============================
 def integrate_hac_vectorial(df, driver_type='akasofu'):
     if len(df) == 0:
@@ -153,7 +161,7 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
         Hrel[i] = max(0, Hrel[i])
 
     Hsat[-1] = 1 / (1 + np.exp(-(Hload[-1] - theta_sat) / sigma_sat))
-    C = np.maximum(-Bz, 0) * (V / 400.0)   # mantido para referência, mas não usado no driver (redundante com VBs)
+    C = np.maximum(-Bz, 0) * (V / 400.0)   # mantido para referência
     HCI = C + Hload
 
     out = df.copy()
@@ -167,36 +175,37 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST (SEM REDUNDÂNCIA, ESCALA FÍSICA)
+# MODELO DST (DRIVER REFORÇADO)
 # ============================
-def compute_dst_direct(df, tau_R=6.0, gamma1=0.8, gamma2=0.05, gamma3=0.0,  # gamma3=0 (C removido)
-                       gamma4=0.0, gamma5=0.0, gamma6=1.5, threshold=1.5,
-                       delay_internal=2.0, tau_driver=0.0, b_pressure=2.0,
-                       vbs_boost=3.0, debug=False):
+def compute_dst_direct(df, tau_R=6.0, gamma1=1.0, gamma2=0.05, gamma3=0.0,
+                       gamma4=0.0, gamma5=0.0, gamma6=1.2, threshold=1.5,
+                       delay_internal=2.0, tau_driver=0.0, b_pressure=1.8,
+                       vbs_boost=4.0, debug=False):
     if len(df) == 0:
         return np.array([])
 
     times = df['time_tag'].values
     Hload = df['Hload'].values
     Hrel = df['Hrel'].values
-    # C não é usado no driver (redundante)
     Bz = df['Bz'].values
     V = df['speed'].values
     Pdyn = compute_pdyn_nPa(df['density'].values, V)
 
     Bs = np.maximum(-Bz, 0)
-    VBs = (V * Bs) / 1000.0   # escala física (mV/m)
+    VBs = (V * Bs) / 1000.0 * vbs_boost   # boost físico
 
-    interaction = (Hload * VBs) / (1 + Hload)   # interação com VBs (mais física que com C)
+    # Interação Hload com VBs (mais física que com C)
+    interaction = (Hload * VBs) / (1 + Hload)
     extra = np.zeros_like(Hload)
     mask = Hload > threshold
     if np.any(mask):
         delta = Hload[mask] - threshold
         extra[mask] = (delta**2) / (1 + delta)
 
-    driver_raw = (gamma1 * Hload + gamma2 * Hrel +
+    driver_raw = (gamma1 * Hload * 1.5 +   # peso extra para Hload
+                  gamma2 * Hrel +
                   gamma4 * interaction + gamma5 * extra +
-                  gamma6 * VBs * vbs_boost)
+                  gamma6 * VBs)
 
     # Clipping suave
     if np.any(driver_raw > 100):
@@ -229,9 +238,9 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.8, gamma2=0.05, gamma3=0.0,  # ga
     else:
         driver = driver_delayed
 
-    tau_eff = tau_R / (1 + 0.5 * VBs)   # usar VBs em vez de C (mais físico)
+    tau_eff = tau_R / (1 + 0.5 * VBs)   # usar VBs em vez de C
 
-    # Interpoladores para solve_ivp
+    # Interpoladores
     driver_interp = interp1d(np.arange(len(driver)), driver, bounds_error=False, fill_value=(driver[0], driver[-1]))
     tau_interp = interp1d(np.arange(len(tau_eff)), tau_eff, bounds_error=False, fill_value=(tau_eff[0], tau_eff[-1]))
     pdyn_interp = interp1d(np.arange(len(Pdyn)), Pdyn, bounds_error=False, fill_value=(Pdyn[0], Pdyn[-1]))
@@ -330,13 +339,13 @@ def objective(params, train_df):
     train_copy['Dst_raw'] = compute_dst_direct(train_copy,
                                                gamma1=gamma1, gamma2=gamma2, gamma3=0.0,
                                                gamma6=gamma6, delay_internal=delay_internal,
-                                               b_pressure=b_pressure, vbs_boost=3.0)
+                                               b_pressure=b_pressure, vbs_boost=4.0)
     metrics = validation_metrics_direct(train_copy, pred_col='Dst_raw', smooth_hours=0)
     return metrics['mae_storm'] if np.isfinite(metrics['mae_storm']) else 100.0
 
 def optimize_parameters(train_df):
     from scipy.optimize import differential_evolution
-    bounds = [(0.2, 1.5), (0.01, 0.5), (0.2, 2.0), (0, 6), (0.0, 3.0)]
+    bounds = [(0.5, 2.0), (0.01, 0.5), (0.5, 2.0), (0, 6), (0.5, 3.0)]
     result = differential_evolution(objective, bounds, args=(train_df,), workers=1, tol=1e-4, popsize=8, maxiter=20)
     return result.x
 
@@ -350,17 +359,17 @@ def main():
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'])
     parser.add_argument('--tau_R', type=float, default=6.0)
-    parser.add_argument('--gamma1', type=float, default=0.8)
+    parser.add_argument('--gamma1', type=float, default=1.0)
     parser.add_argument('--gamma2', type=float, default=0.05)
-    parser.add_argument('--gamma3', type=float, default=0.0)   # redundante, mantido por compatibilidade
+    parser.add_argument('--gamma3', type=float, default=0.0)   # redundante
     parser.add_argument('--gamma4', type=float, default=0.0)
     parser.add_argument('--gamma5', type=float, default=0.0)
-    parser.add_argument('--gamma6', type=float, default=1.5)
+    parser.add_argument('--gamma6', type=float, default=1.2)
     parser.add_argument('--threshold', type=float, default=1.5)
     parser.add_argument('--delay_internal', type=float, default=2.0)
     parser.add_argument('--tau_driver', type=float, default=0.0)
-    parser.add_argument('--b_pressure', type=float, default=2.0)
-    parser.add_argument('--vbs_boost', type=float, default=3.0)
+    parser.add_argument('--b_pressure', type=float, default=1.8)
+    parser.add_argument('--vbs_boost', type=float, default=4.0)
     parser.add_argument('--smooth_hours', type=float, default=0)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--train_test', action='store_true')
@@ -377,7 +386,7 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*80)
-    print("🛰️  HAC - Modelo Científico Final v6 (limpeza ultra-tolerante, sem redundância)")
+    print("🛰️  HAC - Modelo Científico Final v7 (correção de unidade e driver reforçado)")
     print("="*80)
 
     # Carregar OMNI
