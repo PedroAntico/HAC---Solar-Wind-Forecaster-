@@ -384,6 +384,7 @@ class ProductionHACModel:
 
         # Derivada
         if len(hac_total) < 7:
+            # Para séries muito curtas, usa derivada simples
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
             try:
@@ -402,15 +403,16 @@ class ProductionHACModel:
                 print(f"⚠️ Fallback derivada simples: {e}")
                 dHAC_dt = np.gradient(hac_total) / dt_hours
 
+        # Remove NaNs
         dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
         raw_dhdt = dHAC_dt.copy()
 
-# Log para debug
-if np.max(np.abs(raw_dhdt)) > 200:
-    print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f}")
+        # Log para debug
+        if np.max(np.abs(raw_dhdt)) > 200:
+            print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
-# Soft clipping (melhor que cortar seco)
-dHAC_dt = 200 * np.tanh(raw_dhdt / 200)
+        # Soft clipping (melhor que cortar seco)
+        dHAC_dt = 200 * np.tanh(raw_dhdt / 200)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
