@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Final Aprimorada)
+HAC - Heliospheric Accumulated Coupling (Versão Final com Física Não-Linear)
 
 Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) com:
 - Driver normalizado por percentil 90
-- Transformação de potência opcional (para corrigir compressão de amplitude)
-- Validação treino/teste com calibração linear direta (sem inversões de sinal)
-- Diagnósticos: scatter plot, resíduos por magnitude, análise de eventos extremos
+- Termos de interação e limiar (não-linearidades físicas)
+- Constante de tempo dependente do estado (τ_eff = τ * (1 + k_tau * Hrel))
+- Calibração linear direta e validação treino/teste
+- Diagnósticos: scatter, resíduos por magnitude, eventos extremos
 
 Uso:
     python hac_calculator.py --train_test
-    python hac_calculator.py --train_test --power_driver 1.3
-    python hac_calculator.py --train_test --power_output 1.5
+    python hac_calculator.py --train_test --gamma4 0.1 --gamma5 0.2 --threshold 1.5 --k_tau 0.5
 """
 
 import pandas as pd
@@ -21,11 +21,9 @@ import warnings
 import argparse
 import os
 import json
-from scipy.signal import savgol_filter
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
 
 warnings.filterwarnings('ignore')
 
@@ -147,14 +145,18 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST (COM TRANSFORMAÇÃO DE POTÊNCIA OPCIONAL)
+# MODELO DST COM NÃO-LINEARIDADES FÍSICAS
 # ============================
 def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
+                    gamma3=0.1, gamma4=0.0, gamma5=0.0, threshold=1.5, k_tau=0.0,
                     delay_internal=0.0, tau_driver=3.0, b_pressure=0.0,
-                    power_driver=1.0, power_output=1.0, debug=False):
+                    debug=False):
     """
-    Se power_driver != 1.0, aplica (|driver|^power_driver)*sinal(driver)
-    Se power_output != 1.0, aplica transformação análoga na saída (útil para corrigir compressão)
+    Driver com termos não-lineares:
+        interaction = (Hload * C) / (1 + Hload)
+        extra = (Hload - threshold)^2 / (1 + (Hload - threshold)) para Hload > threshold
+        driver = gamma1*Hload + gamma2*Hrel + gamma3*C + gamma4*interaction + gamma5*extra
+    Constante de tempo dependente de Hrel: tau_eff = tau * (1 + k_tau * Hrel)
     """
     times = df['time_tag'].values
     Hload = df['Hload'].values
@@ -162,13 +164,22 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
     C     = df['C'].values
     Pdyn  = compute_pdyn_nPa(df['density'].values, df['speed'].values)
 
-    gamma3 = 1.0 - gamma1 - gamma2
-    driver_raw = gamma1 * Hload + gamma2 * Hrel + gamma3 * C
+    # Termos não-lineares
+    interaction = (Hload * C) / (1 + Hload)          # interação normalizada
+    extra = np.zeros_like(Hload)
+    mask = Hload > threshold
+    if np.any(mask):
+        delta = Hload[mask] - threshold
+        extra[mask] = (delta**2) / (1 + delta)       # crescimento suave com saturação
 
-    # Transformação de potência no driver (corrige não-linearidade na injeção)
-    if power_driver != 1.0:
-        driver_raw = np.sign(driver_raw) * (np.abs(driver_raw) ** power_driver)
+    # Driver combinado
+    driver_raw = (gamma1 * Hload +
+                  gamma2 * Hrel +
+                  gamma3 * C +
+                  gamma4 * interaction +
+                  gamma5 * extra)
 
+    # Atraso interno (shift)
     dt_sec_arr = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec_arr[1:] = diffs
@@ -186,6 +197,7 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
     else:
         driver_delayed = driver_raw
 
+    # Memória exponencial no driver
     if tau_driver > 0:
         driver_eff = np.zeros_like(driver_delayed)
         for i in range(1, len(driver_eff)):
@@ -199,22 +211,25 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
         print(f"DEBUG: driver médio = {np.mean(driver):.3f}, max = {np.max(driver):.3f}")
         print(f"DEBUG: Hload médio = {np.mean(Hload):.3f}, max = {np.max(Hload):.3f}")
 
+    # Integração do Dst com τ dependente de Hrel
     Dst = np.zeros(len(times))
     for i in range(1, len(times)):
         dt = dt_h[i]
+        # Dst corrigido pela pressão (se ativada)
         if b_pressure > 0:
             Dst_star = Dst[i-1] - b_pressure * np.sqrt(Pdyn[i])
         else:
             Dst_star = Dst[i-1]
+        # Injeção
         injection = -alpha * driver[i]
-        decay = Dst_star / tau
+        # Constante de tempo efetiva: depende de Hrel (energia liberada)
+        tau_eff = tau * (1 + k_tau * Hrel[i-1])
+        # Decaimento com clipping para evitar overshoot numérico
+        decay = Dst_star / tau_eff
+        decay = np.clip(decay, -50, 50)   # segurança
         dDst = injection - decay
         Dst[i] = Dst[i-1] + dDst * dt
         Dst[i] = max(-500, min(50, Dst[i]))
-
-    # Transformação de potência na saída (corrige compressão de amplitude)
-    if power_output != 1.0:
-        Dst = np.sign(Dst) * (np.abs(Dst) ** power_output)
     return Dst
 
 # ============================
@@ -227,8 +242,8 @@ def validation_metrics_direct(df, dst_col='dst', pred_col='Dst_calib', smooth_ho
         df[['time_tag', pred_col]].sort_values('time_tag'),
         on='time_tag', direction='nearest'
     ).dropna()
-    y_true = df_aligned['dst_smooth'].values  # Dst real (negativo)
-    y_pred = df_aligned[pred_col].values       # Dst previsto (negativo)
+    y_true = df_aligned['dst_smooth'].values
+    y_pred = df_aligned[pred_col].values
     corr = pearsonr(y_true, y_pred)[0] if len(y_true) > 1 else np.nan
     r2 = r2_score(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
@@ -261,7 +276,6 @@ def plot_scatter(train_aligned, test_aligned, train_metrics, test_metrics, fname
 
 def plot_residuals_by_magnitude(test_aligned, fname='residuals_magnitude.png'):
     test_aligned = test_aligned.copy()
-    # Criar bins de magnitude (Dst real)
     bins = [-np.inf, -200, -100, -50, 0]
     labels = ['Extremo (<-200)', 'G3 (-200 a -100)', 'G1/G2 (-100 a -50)', 'Quiet (-50 a 0)']
     test_aligned['bin'] = pd.cut(test_aligned['dst_smooth'], bins=bins, labels=labels, right=False)
@@ -291,7 +305,7 @@ def plot_event(df, event_name, start, end, fname=None):
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
     event = df[mask].copy()
     if len(event) == 0:
-        print(f"⚠️ Evento {event_name} não encontrado no período.")
+        print(f"⚠️ Evento {event_name} não encontrado.")
         return
     plt.figure(figsize=(12, 5))
     plt.plot(event['time_tag'], event['dst'], 'k-', label='Dst Real', lw=2)
@@ -312,26 +326,28 @@ def plot_event(df, event_name, start, end, fname=None):
 # MAIN
 # ============================
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='HAC - Modelo Vetorial com Física Não-Linear')
     parser.add_argument('--omni', default='data/omni_2000_2020.csv')
     parser.add_argument('--dst', default='data/dst_kyoto_2000_2020.csv')
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'])
-    parser.add_argument('--alpha', type=float, default=1.5)
-    parser.add_argument('--tau', type=float, default=12.0)
-    parser.add_argument('--gamma1', type=float, default=0.8)
-    parser.add_argument('--gamma2', type=float, default=0.1)
-    parser.add_argument('--delay_internal', type=float, default=0.0)
-    parser.add_argument('--tau_driver', type=float, default=3.0)
-    parser.add_argument('--b_pressure', type=float, default=0.0)
-    parser.add_argument('--power_driver', type=float, default=1.0, help='Expoente para transformação do driver (corrige não-linearidade)')
-    parser.add_argument('--power_output', type=float, default=1.0, help='Expoente para transformação da saída (corrige compressão)')
-    parser.add_argument('--smooth_hours', type=float, default=1)
-    parser.add_argument('--find_delay', action='store_true')
+    parser.add_argument('--alpha', type=float, default=1.5, help='Coeficiente de injeção')
+    parser.add_argument('--tau', type=float, default=12.0, help='Constante de decaimento base (horas)')
+    parser.add_argument('--gamma1', type=float, default=0.8, help='Peso de Hload')
+    parser.add_argument('--gamma2', type=float, default=0.1, help='Peso de Hrel')
+    parser.add_argument('--gamma3', type=float, default=0.1, help='Peso de C')
+    parser.add_argument('--gamma4', type=float, default=0.0, help='Peso da interação Hload*C')
+    parser.add_argument('--gamma5', type=float, default=0.0, help='Peso do termo extra (limiar)')
+    parser.add_argument('--threshold', type=float, default=1.5, help='Limiar para termo extra')
+    parser.add_argument('--k_tau', type=float, default=0.0, help='Dependência de τ com Hrel')
+    parser.add_argument('--delay_internal', type=float, default=0.0, help='Atraso interno (horas)')
+    parser.add_argument('--tau_driver', type=float, default=3.0, help='Memória exponencial do driver')
+    parser.add_argument('--b_pressure', type=float, default=0.0, help='Correção de pressão')
+    parser.add_argument('--smooth_hours', type=float, default=1, help='Suavização do Dst')
+    parser.add_argument('--find_delay', action='store_true', help='Busca delay externo (não usado no modo treino/teste)')
     parser.add_argument('--max_delay', type=int, default=24)
     parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--train_test', action='store_true')
-    parser.add_argument('--grid_search', action='store_true')
+    parser.add_argument('--train_test', action='store_true', help='Validação treino/teste (recomendado)')
     parser.add_argument('--save_params', type=str, default=None)
     parser.add_argument('--load_params', type=str, default=None)
     args = parser.parse_args()
@@ -344,10 +360,10 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*70)
-    print("🛰️  HAC - Modelo Vetorial Aprimorado")
-    print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}")
+    print("🛰️  HAC - Modelo Vetorial com Física Não-Linear")
+    print(f"   Parâmetros: alpha={args.alpha}, tau={args.tau}, gamma1={args.gamma1}, gamma2={args.gamma2}, gamma3={args.gamma3}")
+    print(f"   gamma4={args.gamma4}, gamma5={args.gamma5}, threshold={args.threshold}, k_tau={args.k_tau}")
     print(f"   delay_internal={args.delay_internal}, tau_driver={args.tau_driver}, b_pressure={args.b_pressure}")
-    print(f"   power_driver={args.power_driver}, power_output={args.power_output}")
     print("="*70)
 
     # Carregar OMNI
@@ -386,125 +402,122 @@ def main():
     # Integração HAC
     df = integrate_hac_vectorial(df, driver_type=args.driver_type)
 
-    # Se grid search, implementar aqui (opcional, por brevidade omitido, mas pode ser adicionado)
-    if args.grid_search:
-        print("Grid search não implementado neste script para manter clareza. Use --train_test para validação.")
+    # Se não for modo treino/teste, apenas calcula e salva
+    if not args.train_test:
+        df['Dst_model'] = compute_dst_hac(df, alpha=args.alpha, tau=args.tau,
+                                          gamma1=args.gamma1, gamma2=args.gamma2,
+                                          gamma3=args.gamma3, gamma4=args.gamma4,
+                                          gamma5=args.gamma5, threshold=args.threshold,
+                                          k_tau=args.k_tau,
+                                          delay_internal=args.delay_internal,
+                                          tau_driver=args.tau_driver,
+                                          b_pressure=args.b_pressure,
+                                          debug=args.debug)
+        df.to_csv(args.output, index=False)
+        print(f"💾 Resultados salvos em {args.output}")
         return
 
-    # Validação treino/teste
-    if args.train_test:
-        print("\n📊 VALIDAÇÃO TREINO/TESTE (2000-2010 / 2010-2020)")
-        # Recarregar dados crus para dividir antes da integração HAC
-        omni_raw = pd.read_csv(args.omni, parse_dates=['time_tag'])
-        omni_raw = prepare_omni(omni_raw)
-        dst_raw = pd.read_csv(args.dst, parse_dates=['time_tag']).sort_values('time_tag')
-        dst_raw = dst_raw[dst_raw['time_tag'] <= omni_raw['time_tag'].max()]
-        dst_interp_raw = pd.merge_asof(
-            omni_raw[['time_tag']].sort_values('time_tag'),
-            dst_raw[['time_tag', 'dst']].sort_values('time_tag'),
-            on='time_tag', direction='nearest', tolerance=pd.Timedelta('2h')
-        ).set_index('time_tag').interpolate(method='time', limit=3).reset_index()
-        df_raw = pd.merge(omni_raw, dst_interp_raw, on='time_tag', how='left').dropna(subset=['dst'])
-        train_df, test_df = split_data(df_raw, split_date='2010-01-01')
-        print(f"Treino: {len(train_df)} pontos ({train_df['time_tag'].min()} a {train_df['time_tag'].max()})")
-        print(f"Teste: {len(test_df)} pontos ({test_df['time_tag'].min()} a {test_df['time_tag'].max()})")
+    # ========== MODO TREINO/TESTE ==========
+    print("\n📊 VALIDAÇÃO TREINO/TESTE (2000-2010 / 2010-2020)")
+    # Recarregar dados crus para divisão antes da integração HAC
+    omni_raw = pd.read_csv(args.omni, parse_dates=['time_tag'])
+    omni_raw = prepare_omni(omni_raw)
+    dst_raw = pd.read_csv(args.dst, parse_dates=['time_tag']).sort_values('time_tag')
+    dst_raw = dst_raw[dst_raw['time_tag'] <= omni_raw['time_tag'].max()]
+    dst_interp_raw = pd.merge_asof(
+        omni_raw[['time_tag']].sort_values('time_tag'),
+        dst_raw[['time_tag', 'dst']].sort_values('time_tag'),
+        on='time_tag', direction='nearest', tolerance=pd.Timedelta('2h')
+    ).set_index('time_tag').interpolate(method='time', limit=3).reset_index()
+    df_raw = pd.merge(omni_raw, dst_interp_raw, on='time_tag', how='left').dropna(subset=['dst'])
+    train_df, test_df = split_data(df_raw, split_date='2010-01-01')
+    print(f"Treino: {len(train_df)} pontos ({train_df['time_tag'].min()} a {train_df['time_tag'].max()})")
+    print(f"Teste: {len(test_df)} pontos ({test_df['time_tag'].min()} a {test_df['time_tag'].max()})")
 
-        # Integrar HAC separadamente
-        train_df = integrate_hac_vectorial(train_df, driver_type=args.driver_type)
-        test_df = integrate_hac_vectorial(test_df, driver_type=args.driver_type)
+    # Integrar HAC separadamente
+    train_df = integrate_hac_vectorial(train_df, driver_type=args.driver_type)
+    test_df = integrate_hac_vectorial(test_df, driver_type=args.driver_type)
 
-        # Calcular Dst_model (sem calibração)
-        train_df['Dst_model'] = compute_dst_hac(train_df, alpha=args.alpha, tau=args.tau,
-                                                gamma1=args.gamma1, gamma2=args.gamma2,
-                                                delay_internal=args.delay_internal,
-                                                tau_driver=args.tau_driver,
-                                                b_pressure=args.b_pressure,
-                                                power_driver=args.power_driver,
-                                                power_output=args.power_output,
-                                                debug=args.debug)
-        test_df['Dst_model'] = compute_dst_hac(test_df, alpha=args.alpha, tau=args.tau,
-                                               gamma1=args.gamma1, gamma2=args.gamma2,
-                                               delay_internal=args.delay_internal,
-                                               tau_driver=args.tau_driver,
-                                               b_pressure=args.b_pressure,
-                                               power_driver=args.power_driver,
-                                               power_output=args.power_output,
-                                               debug=args.debug)
+    # Calcular Dst_model (sem calibração)
+    train_df['Dst_model'] = compute_dst_hac(train_df, alpha=args.alpha, tau=args.tau,
+                                            gamma1=args.gamma1, gamma2=args.gamma2,
+                                            gamma3=args.gamma3, gamma4=args.gamma4,
+                                            gamma5=args.gamma5, threshold=args.threshold,
+                                            k_tau=args.k_tau,
+                                            delay_internal=args.delay_internal,
+                                            tau_driver=args.tau_driver,
+                                            b_pressure=args.b_pressure,
+                                            debug=args.debug)
+    test_df['Dst_model'] = compute_dst_hac(test_df, alpha=args.alpha, tau=args.tau,
+                                           gamma1=args.gamma1, gamma2=args.gamma2,
+                                           gamma3=args.gamma3, gamma4=args.gamma4,
+                                           gamma5=args.gamma5, threshold=args.threshold,
+                                           k_tau=args.k_tau,
+                                           delay_internal=args.delay_internal,
+                                           tau_driver=args.tau_driver,
+                                           b_pressure=args.b_pressure,
+                                           debug=args.debug)
 
-        # Calibração linear direta (sem inversões)
-        # Alinhar Dst suavizado com Dst_model no treino
-        train_smooth = smooth_dst(train_df[['time_tag', 'dst']], args.smooth_hours)
-        train_aligned = pd.merge_asof(
-            train_smooth.sort_values('time_tag'),
-            train_df[['time_tag', 'Dst_model']].sort_values('time_tag'),
-            on='time_tag', direction='nearest'
-        ).dropna(subset=['dst_smooth', 'Dst_model'])
-        X_train = train_aligned['Dst_model'].values.reshape(-1, 1)
-        y_train = train_aligned['dst_smooth'].values  # ambos negativos
+    # Calibração linear direta (usando treino)
+    train_smooth = smooth_dst(train_df[['time_tag', 'dst']], args.smooth_hours)
+    train_aligned = pd.merge_asof(
+        train_smooth.sort_values('time_tag'),
+        train_df[['time_tag', 'Dst_model']].sort_values('time_tag'),
+        on='time_tag', direction='nearest'
+    ).dropna(subset=['dst_smooth', 'Dst_model'])
+    X_train = train_aligned['Dst_model'].values.reshape(-1, 1)
+    y_train = train_aligned['dst_smooth'].values
+    reg = LinearRegression().fit(X_train, y_train)
+    coef = reg.coef_[0]
+    interc = reg.intercept_
+    print(f"\n📐 Calibração linear (treino): Dst_real = {coef:.3f} * Dst_modelo + {interc:.2f}")
 
-        # Regressão linear (com intercept)
-        reg = LinearRegression().fit(X_train, y_train)
-        coef = reg.coef_[0]
-        interc = reg.intercept_
-        print(f"\n📐 Calibração linear (treino): Dst_real = {coef:.3f} * Dst_modelo + {interc:.2f}")
-        # Aplicar calibração
-        train_df['Dst_calib'] = coef * train_df['Dst_model'] + interc
-        test_df['Dst_calib']  = coef * test_df['Dst_model']  + interc
+    train_df['Dst_calib'] = coef * train_df['Dst_model'] + interc
+    test_df['Dst_calib']  = coef * test_df['Dst_model']  + interc
 
-        # Métricas
-        train_metrics = validation_metrics_direct(train_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
-        test_metrics = validation_metrics_direct(test_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
+    # Realinhar dados para diagnóstico (após calibração)
+    train_aligned = pd.merge_asof(
+        train_smooth.sort_values('time_tag'),
+        train_df[['time_tag', 'Dst_calib']].sort_values('time_tag'),
+        on='time_tag', direction='nearest'
+    ).dropna(subset=['dst_smooth', 'Dst_calib'])
 
-        print("\n📊 TREINO (2000-2010) - CALIBRADO:")
-        if train_metrics:
-            print(f"   Correlação: {train_metrics['correlation']:.3f}")
-            print(f"   R²: {train_metrics['r2']:.3f}")
-            print(f"   RMSE: {train_metrics['rmse']:.2f}")
-            print(f"   MAE: {train_metrics['mae']:.2f}")
+    test_smooth = smooth_dst(test_df[['time_tag', 'dst']], args.smooth_hours)
+    test_aligned = pd.merge_asof(
+        test_smooth.sort_values('time_tag'),
+        test_df[['time_tag', 'Dst_calib']].sort_values('time_tag'),
+        on='time_tag', direction='nearest'
+    ).dropna(subset=['dst_smooth', 'Dst_calib'])
 
-        print("\n📊 TESTE (2010-2020) - CALIBRADO:")
-        if test_metrics:
-            print(f"   Correlação: {test_metrics['correlation']:.3f}")
-            print(f"   R²: {test_metrics['r2']:.3f}")
-            print(f"   RMSE: {test_metrics['rmse']:.2f}")
-            print(f"   MAE: {test_metrics['mae']:.2f}")
+    # Métricas
+    train_metrics = validation_metrics_direct(train_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
+    test_metrics = validation_metrics_direct(test_df, pred_col='Dst_calib', smooth_hours=args.smooth_hours)
 
-        # Diagnósticos
-        # Alinhar teste para gráficos
-        test_smooth = smooth_dst(test_df[['time_tag', 'dst']], args.smooth_hours)
-        test_aligned = pd.merge_asof(
-            test_smooth.sort_values('time_tag'),
-            test_df[['time_tag', 'Dst_calib']].sort_values('time_tag'),
-            on='time_tag', direction='nearest'
-        ).dropna(subset=['dst_smooth', 'Dst_calib'])
-        # Scatter
-        plot_scatter(train_aligned, test_aligned, train_metrics, test_metrics)
-        # Resíduos por magnitude
-        plot_residuals_by_magnitude(test_aligned)
-        # Eventos específicos (Halloween 2003, St. Patrick 2015)
-        # Nota: Os eventos podem estar no treino ou teste dependendo da divisão.
-        # Vamos extrair do DataFrame original (df) que contém todo o período.
-        plot_event(df, 'Halloween Storm 2003', '2003-10-28', '2003-11-02')
-        plot_event(df, 'St. Patrick Storm 2015', '2015-03-17', '2015-03-19')
-        plot_event(df, 'Quase Carrington 2012', '2012-07-23', '2012-07-25')
+    print("\n📊 TREINO (2000-2010) - CALIBRADO:")
+    if train_metrics:
+        print(f"   Correlação: {train_metrics['correlation']:.3f}")
+        print(f"   R²: {train_metrics['r2']:.3f}")
+        print(f"   RMSE: {train_metrics['rmse']:.2f}")
+        print(f"   MAE: {train_metrics['mae']:.2f}")
 
-        # Salvar resultados
-        test_df.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
-        print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test_calib.csv')}")
-        return
+    print("\n📊 TESTE (2010-2020) - CALIBRADO:")
+    if test_metrics:
+        print(f"   Correlação: {test_metrics['correlation']:.3f}")
+        print(f"   R²: {test_metrics['r2']:.3f}")
+        print(f"   RMSE: {test_metrics['rmse']:.2f}")
+        print(f"   MAE: {test_metrics['mae']:.2f}")
 
-    # Execução normal (sem treino/teste)
-    df['Dst_model'] = compute_dst_hac(df, alpha=args.alpha, tau=args.tau,
-                                      gamma1=args.gamma1, gamma2=args.gamma2,
-                                      delay_internal=args.delay_internal,
-                                      tau_driver=args.tau_driver,
-                                      b_pressure=args.b_pressure,
-                                      power_driver=args.power_driver,
-                                      power_output=args.power_output,
-                                      debug=args.debug)
-    # (Opcional) calibrar no período inteiro? Aqui apenas salvamos.
-    df.to_csv(args.output, index=False)
-    print(f"\n💾 Resultados salvos em {args.output}")
+    # Diagnósticos
+    plot_scatter(train_aligned, test_aligned, train_metrics, test_metrics)
+    plot_residuals_by_magnitude(test_aligned)
+    # Eventos (usar o dataframe original completo para garantir que os eventos existam)
+    plot_event(df, 'Halloween Storm 2003', '2003-10-28', '2003-11-02')
+    plot_event(df, 'St. Patrick Storm 2015', '2015-03-17', '2015-03-19')
+    plot_event(df, 'Quase Carrington 2012', '2012-07-23', '2012-07-25')
+
+    # Salvar resultados do teste
+    test_df.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
+    print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test_calib.csv')}")
 
 if __name__ == "__main__":
     main()
