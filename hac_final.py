@@ -439,7 +439,7 @@ class ProductionHACModel:
         v_crit = self.config.VSW_CRITICAL
         
         # Janela temporal para condições sustentadas (15 minutos)
-        window_size = 15  # pontos (1 minuto cada)
+        window_size = 30  # pontos (1 minuto cada)
         
         for i in range(window_size, n):
             # Verificar condições simultâneas
@@ -450,8 +450,8 @@ class ProductionHACModel:
             bz_window = Bz[max(0, i-window_size):i+1]
             v_window = Vsw[max(0, i-window_size):i+1]
             
-            condition3 = np.mean(bz_window) < bz_crit  # Bz < -8 nT sustentado
-            condition4 = np.mean(v_window) > v_crit    # V > 700 km/s sustentado
+            condition3 = np.median(bz_window) < bz_crit  # Bz < -8 nT sustentado
+            condition4 = np.median(v_window) > v_crit    # V > 700 km/s sustentado
             
             if condition1 and condition2 and condition3 and condition4:
                 escalation_flags[i] = True
@@ -609,7 +609,7 @@ class ProductionHACModel:
             hac_increase = hac_values[i] - hac_values[i-window]
             
             # Boost para G5 se crescimento extremo
-            if max_dhdt > 200 and mean_dhdt > 50 and hac_increase > 100:
+            if max_dhdt > 220 and mean_dhdt > 70 and hac_increase > 100:
                 current = storm_levels[i]
                 if "G5" not in current:
                     enhanced_levels[i] = "G5 (Trend Boost)"
@@ -640,14 +640,10 @@ class ProductionHACModel:
         print("\n🌍 Predizendo indicadores (com Nowcast)...")
         
         # 1. Kp COM SATURAÇÃO
-        kp_pred = self.config.KP_SCALE * np.tanh(
-            hac_values / self.config.HAC_SCALE_MAX * 2
-        )
+        kp_pred = 9 * np.tanh(hac_values / 180)
         
         # 2. Dst EQUIVALENTE
-        dst_pred = -self.config.RING_CURRENT_MAX * (
-            hac_values / self.config.HAC_SCALE_MAX
-        ) ** 1.3
+        dst_pred = -350 * (hac_values / 300) ** 1.2
         
         # 3. CLASSIFICAÇÃO HÍBRIDA NOAA + NOWCAST
         storm_levels = []
