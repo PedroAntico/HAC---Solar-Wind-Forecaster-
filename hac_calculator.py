@@ -6,7 +6,7 @@ Modelo vetorial de acumulação de energia (Hload, Hrel, Hsat) com:
 - Driver normalizado por percentil 90 (robusto a outliers)
 - Parâmetros calibrados (r≈0.5 em validação temporal)
 - Validação treino/teste (2000-2010 / 2010-2020)
-- Calibração linear final para corrigir escala/offset
+- Calibração linear final usando dados suavizados (alinhada com validação)
 - Opção de grid search e salvamento de parâmetros
 
 Uso:
@@ -74,13 +74,32 @@ def split_data(df, split_date='2010-01-01'):
     return train, test
 
 # ============================
+# SUAVIZAÇÃO DO DST (MESMA USADA NA VALIDAÇÃO)
+# ============================
+def smooth_dst(merged, hours):
+    """
+    merged: DataFrame com colunas 'time_tag' e 'dst'
+    Retorna DataFrame com colunas 'time_tag' e 'dst_smooth'
+    """
+    if hours <= 0:
+        merged = merged.copy()
+        merged['dst_smooth'] = merged['dst']
+        return merged
+    merged = merged.set_index('time_tag')
+    if len(merged) > 1:
+        med_dt = merged.index.to_series().diff().median().total_seconds()
+        win = max(3, int(hours * 3600 / med_dt))
+        win = win + 1 if win % 2 == 0 else win
+        merged['dst_smooth'] = merged['dst'].rolling(win, center=True, min_periods=1).mean()
+    else:
+        merged['dst_smooth'] = merged['dst']
+    merged = merged.dropna(subset=['dst_smooth'])
+    return merged.reset_index()
+
+# ============================
 # HAC VETORIAL (NORMALIZAÇÃO POR PERCENTIL 90)
 # ============================
 def integrate_hac_vectorial(df, driver_type='akasofu'):
-    """
-    Calcula os estados Hload, Hrel, Hsat e HCI.
-    driver_type: 'akasofu' (normalizado por percentil 90) ou 'hybrid' (antigo)
-    """
     times = df['time_tag'].values
     Bz = df['bz_gsm'].values
     V = df['speed'].values
@@ -88,7 +107,6 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     Bx = df['bx_gsm'].values
     By = df['by_gsm'].values
 
-    # ----- Driver φ(t) -----
     Btot = np.sqrt(Bx**2 + By**2 + Bz**2)
     theta = np.arctan2(By, Bz)
     sin4 = np.sin(theta / 2)**4
@@ -103,19 +121,16 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
         phi = 0.7 * (Pdyn * Btot) + 0.3 * (V * Btot**2 * sin4)
         phi = phi / 1000.0
 
-    # ----- Tempo -----
     dt_sec = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec[1:] = diffs
     dt_sec[0] = np.median(diffs) if len(diffs) > 0 else 60.0
     dt_h = dt_sec / 3600.0
 
-    # ----- Estados -----
     Hload = np.zeros(len(times))
     Hrel  = np.zeros(len(times))
     Hsat  = np.zeros(len(times))
 
-    # ----- Parâmetros fixos (do paper) -----
     alpha_L = 1.2e-5
     beta_L  = 0.15
     alpha_R = 0.08
@@ -207,40 +222,22 @@ def compute_dst_hac(df, alpha=1.5, tau=12.0, gamma1=0.8, gamma2=0.1,
     return Dst
 
 # ============================
-# VALIDAÇÃO E MÉTRICAS
+# VALIDAÇÃO E MÉTRICAS (ESPERA COLUNA 'Dst_model')
 # ============================
-def smooth_dst(merged, hours):
-    if hours <= 0:
-        merged = merged.copy()
-        merged['dst_smooth'] = merged['dst']
-        return merged
-    merged = merged.set_index('time_tag')
-    if len(merged) > 1:
-        med_dt = merged.index.to_series().diff().median().total_seconds()
-        win = max(3, int(hours * 3600 / med_dt))
-        win = win + 1 if win % 2 == 0 else win
-        merged['dst_smooth'] = merged['dst'].rolling(win, center=True, min_periods=1).mean()
-    else:
-        merged['dst_smooth'] = merged['dst']
-    merged = merged.dropna(subset=['dst_smooth'])
-    return merged.reset_index()
-
-def compute_metrics(y_true, y_pred):
-    if len(y_true) < 2:
-        return None
-    corr = pearsonr(y_true, y_pred)[0] if np.std(y_true) * np.std(y_pred) > 0 else np.nan
-    r2 = r2_score(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    return {'correlation': corr, 'r2': r2, 'rmse': rmse, 'mae': mae}
-
 def validation_metrics(df_model, dst_series, smooth_hours):
+    """
+    df_model: DataFrame com colunas 'time_tag' e 'Dst_model'
+    dst_series: DataFrame com colunas 'time_tag' e 'dst'
+    """
     if dst_series is None or len(dst_series) == 0:
         return None
     df_model = df_model.copy()
     dst = dst_series.copy()
     df_model['time_tag'] = pd.to_datetime(df_model['time_tag'])
     dst['time_tag'] = pd.to_datetime(dst['time_tag'])
+    # Verifica se a coluna esperada existe
+    if 'Dst_model' not in df_model.columns:
+        raise KeyError("validation_metrics: coluna 'Dst_model' não encontrada em df_model")
     df_model = df_model.dropna(subset=['time_tag', 'Dst_model'])
     dst = dst.dropna(subset=['time_tag', 'dst'])
     if len(df_model) < 10 or len(dst) < 10:
@@ -253,6 +250,15 @@ def validation_metrics(df_model, dst_series, smooth_hours):
     y_true = -merged['dst_smooth'].values
     y_pred = -merged['Dst_model'].values
     return compute_metrics(y_true, y_pred)
+
+def compute_metrics(y_true, y_pred):
+    if len(y_true) < 2:
+        return None
+    corr = pearsonr(y_true, y_pred)[0] if np.std(y_true) * np.std(y_pred) > 0 else np.nan
+    r2 = r2_score(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    return {'correlation': corr, 'r2': r2, 'rmse': rmse, 'mae': mae}
 
 def find_optimal_delay(df_model, dst_series, max_delay, step, smooth_hours):
     best_corr = -1
@@ -428,9 +434,9 @@ def main():
                 print(f"💾 Parâmetros salvos em {args.save_params}")
         else:
             print("❌ Grid search falhou")
-        return  # Após grid search, encerra
+        return
 
-    # Validação treino/teste (com calibração linear)
+    # Validação treino/teste (com calibração linear alinhada)
     if args.train_test:
         print("\n📊 VALIDAÇÃO TREINO/TESTE (2000-2010 / 2010-2020)")
         # Recarregar dados crus para dividir antes da integração HAC
@@ -466,31 +472,55 @@ def main():
                                               b_pressure=args.b_pressure,
                                               debug=args.debug)
 
-        # Calibração linear usando treino
-        X_train = train_df['Dst_model'].values.reshape(-1, 1)
-        y_train = train_df['dst'].values
-        reg = LinearRegression().fit(X_train, y_train)
+        # Calibração linear usando dados suavizados do treino (mesmo critério da validação)
+        # Primeiro, obtemos a série suavizada do Dst no treino
+        train_smooth = smooth_dst(train_df[['time_tag', 'dst']], args.smooth_hours)
+        # Alinhar índices: precisamos dos valores de Dst_model nos mesmos instantes em que o Dst suavizado está definido
+        # Para isso, mesclamos por tempo
+        train_aligned = pd.merge_asof(
+            train_smooth.sort_values('time_tag'),
+            train_df[['time_tag', 'Dst_model']].sort_values('time_tag'),
+            on='time_tag',
+            direction='nearest'
+        ).dropna(subset=['dst_smooth', 'Dst_model'])
+        X_train = train_aligned['Dst_model'].values.reshape(-1, 1)
+        y_train = train_aligned['dst_smooth'].values  # Dst suavizado positivo? Cuidado: dst_smooth é negativo (Dst real)
+        # Vamos usar o valor negativo para alinhar com a métrica (y_true = -dst_smooth)
+        # A regressão linear será: (-dst_smooth) = coef * Dst_model + interc
+        y_train_neg = -y_train
+        reg = LinearRegression().fit(X_train, y_train_neg)
         coef = reg.coef_[0]
         interc = reg.intercept_
-        print(f"\n📐 Calibração linear (usando treino): Dst_calib = {coef:.3f} * Dst_model + {interc:.2f}")
+        print(f"\n📐 Calibração linear (usando treino suavizado): -Dst_smooth = {coef:.3f} * Dst_model + {interc:.2f}")
 
-        train_df['Dst_calib'] = coef * train_df['Dst_model'] + interc
-        test_df['Dst_calib']  = coef * test_df['Dst_model']  + interc
+        # Aplicar calibração: Dst_calib = (coef * Dst_model + interc)  (já é o negativo do Dst suavizado)
+        # Mas para comparar com a métrica, que espera Dst_model como o próprio valor do modelo (negativo do Dst previsto),
+        # vamos manter a convenção: Dst_model_calib = coef * Dst_model + interc
+        # Isso torna Dst_model_calib diretamente comparável a -dst_smooth (positivo para tempestades).
+        # Contudo, a função validation_metrics espera que Dst_model seja o valor previsto do Dst (não o negativo).
+        # Nossa definição original: Dst_model é o Dst previsto (negativo em tempestades). Para manter a coerência,
+        # devemos inverter a calibração: queremos que Dst_model_calib (previsto) seja aproximadamente igual a dst_real (negativo).
+        # Como a regressão foi feita sobre -dst_smooth (positivo), temos: prev_pos = coef * Dst_model_original + interc.
+        # Então o Dst previsto calibrado (negativo) será: -prev_pos = -coef * Dst_model_original - interc.
+        # Vamos adotar essa forma.
+        Dst_calib = -coef * train_df['Dst_model'] - interc
+        # Para o teste, usar os mesmos coeficientes
+        test_Dst_calib = -coef * test_df['Dst_model'] - interc
+
+        # Renomear para 'Dst_model' para a função de validação
+        train_eval = pd.DataFrame({'time_tag': train_df['time_tag'], 'Dst_model': Dst_calib})
+        test_eval  = pd.DataFrame({'time_tag': test_df['time_tag'], 'Dst_model': test_Dst_calib})
 
         # Métricas treino (calibrado)
-        train_metrics = validation_metrics(train_df[['time_tag', 'Dst_calib']],
-                                           train_df[['time_tag', 'dst']],
-                                           args.smooth_hours)
+        train_metrics = validation_metrics(train_eval, train_df[['time_tag', 'dst']], args.smooth_hours)
         print("\n📊 TREINO (2000-2010) - CALIBRADO:")
         if train_metrics:
             print(f"   Correlação: {train_metrics['correlation']:.3f}")
             print(f"   R²: {train_metrics['r2']:.3f}")
             print(f"   RMSE: {train_metrics['rmse']:.2f}")
 
-         # Métricas teste (calibrado)
-        test_metrics = validation_metrics(test_df[['time_tag', 'Dst_calib']],
-                                          test_df[['time_tag', 'dst']],
-                                          args.smooth_hours)
+        # Métricas teste (calibrado)
+        test_metrics = validation_metrics(test_eval, test_df[['time_tag', 'dst']], args.smooth_hours)
         print("\n📊 TESTE (2010-2020) - CALIBRADO:")
         if test_metrics:
             print(f"   Correlação: {test_metrics['correlation']:.3f}")
@@ -498,7 +528,7 @@ def main():
             print(f"   RMSE: {test_metrics['rmse']:.2f}")
 
         # Salvar resultados do teste
-        test_df.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
+        test_eval.to_csv(args.output.replace('.csv', '_test_calib.csv'), index=False)
         print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test_calib.csv')}")
         return
 
