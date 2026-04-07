@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-HAC - Heliospheric Accumulated Coupling (Versão Científica Final v2)
+HAC - Heliospheric Accumulated Coupling (Versão Científica Final v3)
 Correções aplicadas:
-- Detecção automática de unidade de speed (m/s → km/s)
-- Limpeza física robusta + proteção contra DF vazio
-- Interpolação correta no solve_ivp
-- Proteções em todos os pontos críticos
-- Otimização + baseline Burton
+- Limpeza OMNI mais tolerante (preserva mais dados)
+- Driver com escala física aumentada (gamma1, gamma6 maiores, fator extra VBs)
+- Calibração linear pós-modelo (obrigatória para escala)
+- Pressão dinâmica desativada por padrão (evita mascarar)
+- Otimização + baseline Burton + validação treino/teste
 """
 
 import pandas as pd
@@ -21,6 +21,7 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import differential_evolution
 from scipy.interpolate import interp1d
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.linear_model import LinearRegression
 
 warnings.filterwarnings('ignore')
 
@@ -37,47 +38,44 @@ def compute_pdyn_nPa(N_cm3, V_kms):
     return M_P * N_m3 * V_ms**2 * 1e9
 
 # ============================
-# LIMPEZA ROBUSTA + CORREÇÃO DE UNIDADES
+# LIMPEZA ROBUSTA (VERSÃO TOLERANTE)
 # ============================
 def prepare_omni(df):
     df = df.copy().sort_values('time_tag').reset_index(drop=True)
     if 'dst' in df.columns:
         df = df.drop(columns=['dst'])
-    
-    # === DETECÇÃO AUTOMÁTICA DE UNIDADE DE SPEED ===
+
+    # Detecção automática de unidade de speed
     if 'speed' in df.columns and len(df) > 100:
-        med_speed = df['speed'].median()
-        if med_speed > 10000:  # claramente m/s
-            print(f"⚠️ Speed detectado em m/s (mediana = {med_speed:.0f}) → convertendo para km/s")
-            df['speed'] = df['speed'] / 1000.0
-        elif med_speed > 2000:
-            print(f"⚠️ Speed muito alto (mediana = {med_speed:.0f} km/s) — possível erro de escala")
-    
-    # Limpeza física
+        med = df['speed'].median()
+        if med > 10000:
+            print(f"⚠️ Speed detectado em m/s (mediana={med:.0f}) → convertendo para km/s")
+            df['speed'] /= 1000.0
+
+    # Filtro MUITO mais tolerante (evita remover dados válidos)
     bad = (
         (df['bz_gsm'].abs() > 100) |
-        (df['speed'] < 100) | (df['speed'] > 2000) |
-        (df['density'] < 0.01) | (df['density'] > 2000) |
+        (df['speed'] < 200) | (df['speed'] > 2500) |
+        (df['density'] < 0.005) | (df['density'] > 3000) |
         (df['bx_gsm'].abs() > 100) |
         (df['by_gsm'].abs() > 100)
     )
     before = len(df)
     df.loc[bad, ['bz_gsm', 'bx_gsm', 'by_gsm', 'density', 'speed']] = np.nan
-    
-    # Preenchimento conservador
-    df['bz_gsm'] = df['bz_gsm'].ffill(limit=4)
+
+    # Preenchimento conservador (mais pontos)
+    df['bz_gsm'] = df['bz_gsm'].ffill(limit=6)
     for col in ['bx_gsm', 'by_gsm', 'density', 'speed']:
-        df[col] = df[col].interpolate(method='linear', limit=8)
-    
+        if col in df.columns:
+            df[col] = df[col].interpolate(method='linear', limit=12)
+
     df = df.dropna(subset=['bz_gsm', 'speed', 'density']).reset_index(drop=True)
     after = len(df)
-    
-    print(f"   prepare_omni: {before} → {after} pontos ({(before - after) / before * 100:.1f}% removidos)")
-    if after == 0:
-        print("❌ ERRO CRÍTICO: Nenhum dado válido após limpeza!")
-    else:
-        print(f"   Exemplo speed (km/s): min={df['speed'].min():.0f}, max={df['speed'].max():.0f}, mediana={df['speed'].median():.0f}")
-    
+
+    print(f"   prepare_omni: {before:,} → {after:,} pontos ({(before - after) / before * 100:.1f}% removidos)")
+    if after > 0:
+        print(f"   Speed: min={df['speed'].min():.0f}, max={df['speed'].max():.0f}, mediana={df['speed'].median():.0f} km/s")
+        print(f"   Bz: min={df['bz_gsm'].min():.1f}, max={df['bz_gsm'].max():.1f} nT")
     return df
 
 def split_data(df, split_date='2010-01-01'):
@@ -107,7 +105,6 @@ def smooth_dst(merged, hours):
 def integrate_hac_vectorial(df, driver_type='akasofu'):
     if len(df) == 0:
         return df.copy()
-    
     times = df['time_tag'].values
     Bz = df['bz_gsm'].values
     V = df['speed'].values
@@ -172,15 +169,15 @@ def integrate_hac_vectorial(df, driver_type='akasofu'):
     return out
 
 # ============================
-# MODELO DST (COM INTEGRAÇÃO ESTÁVEL)
+# MODELO DST (COM ESCALA AUMENTADA)
 # ============================
-def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
-                       gamma4=0.0, gamma5=0.0, gamma6=0.05, threshold=1.5,
-                       delay_internal=2.0, tau_driver=0.0, b_pressure=2.0,
-                       debug=False):
+def compute_dst_direct(df, tau_R=6.0, gamma1=0.8, gamma2=0.05, gamma3=0.05,
+                       gamma4=0.0, gamma5=0.0, gamma6=0.8, threshold=1.5,
+                       delay_internal=2.0, tau_driver=0.0, b_pressure=0.0,
+                       vbs_boost=2.0, debug=False):
     if len(df) == 0:
         return np.array([])
-    
+
     times = df['time_tag'].values
     Hload = df['Hload'].values
     Hrel = df['Hrel'].values
@@ -199,13 +196,17 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
         delta = Hload[mask] - threshold
         extra[mask] = (delta**2) / (1 + delta)
 
+    # Driver com escala aumentada (gamma1, gamma6 maiores + fator extra VBs)
     driver_raw = (gamma1 * Hload + gamma2 * Hrel + gamma3 * C +
-                  gamma4 * interaction + gamma5 * extra + gamma6 * VBs)
+                  gamma4 * interaction + gamma5 * extra +
+                  gamma6 * VBs * vbs_boost)
 
+    # Clipping suave (apenas extremos)
     if np.any(driver_raw > 100):
         cap = np.percentile(driver_raw[driver_raw > 0], 99.9)
         driver_raw = np.clip(driver_raw, 0, cap)
 
+    # Atraso
     dt_sec_arr = np.zeros(len(times))
     diffs = np.diff(times).astype('timedelta64[s]').astype(float)
     dt_sec_arr[1:] = diffs
@@ -234,7 +235,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
 
     tau_eff = tau_R / (1 + 0.5 * C)
 
-    # Interpoladores lineares para solve_ivp
+    # Interpoladores para solve_ivp
     driver_interp = interp1d(np.arange(len(driver)), driver, bounds_error=False, fill_value=(driver[0], driver[-1]))
     tau_interp = interp1d(np.arange(len(tau_eff)), tau_eff, bounds_error=False, fill_value=(tau_eff[0], tau_eff[-1]))
     pdyn_interp = interp1d(np.arange(len(Pdyn)), Pdyn, bounds_error=False, fill_value=(Pdyn[0], Pdyn[-1]))
@@ -248,7 +249,7 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
 
     if debug:
         print(f"\n🔍 DEBUG compute_dst_direct:")
-        print(f"   driver: min={np.min(driver):.3f}, max={np.max(driver):.3f}")
+        print(f"   driver: min={np.min(driver):.3f}, max={np.max(driver):.3f}, mean={np.mean(driver):.3f}")
         print(f"   Dst_raw: min={np.min(Dst):.1f}, max={np.max(Dst):.1f}, mean={np.mean(Dst):.1f}")
 
     return Dst
@@ -259,7 +260,6 @@ def compute_dst_direct(df, tau_R=6.0, gamma1=0.2, gamma2=0.05, gamma3=0.05,
 def compute_dst_burton(df, tau=6.0, alpha=4.5, delay_internal=2.0):
     if len(df) == 0:
         return np.array([])
-    # ... (código idêntico ao anterior, mantido igual)
     times = df['time_tag'].values
     Bz = df['Bz'].values
     V = df['speed'].values
@@ -331,12 +331,13 @@ def objective(params, train_df):
     train_copy['Dst_raw'] = compute_dst_direct(train_copy,
                                                gamma1=gamma1, gamma2=gamma2, gamma3=gamma3,
                                                gamma6=gamma6, delay_internal=delay_internal,
-                                               b_pressure=b_pressure)
+                                               b_pressure=b_pressure, vbs_boost=2.0)
     metrics = validation_metrics_direct(train_copy, pred_col='Dst_raw', smooth_hours=0)
+    # Minimizar MAE em tempestades (se houver)
     return metrics['mae_storm'] if np.isfinite(metrics['mae_storm']) else 100.0
 
 def optimize_parameters(train_df):
-    bounds = [(0.01, 1.0), (0.001, 0.5), (0.001, 0.5), (0.001, 0.5), (0, 6), (0.5, 5)]
+    bounds = [(0.2, 1.5), (0.01, 0.5), (0.01, 0.5), (0.2, 1.5), (0, 6), (0.0, 2.0)]
     result = differential_evolution(objective, bounds, args=(train_df,), workers=1, tol=1e-4, popsize=8, maxiter=20)
     return result.x
 
@@ -350,16 +351,17 @@ def main():
     parser.add_argument('--output', default='hac_results.csv')
     parser.add_argument('--driver_type', default='akasofu', choices=['akasofu', 'hybrid'])
     parser.add_argument('--tau_R', type=float, default=6.0)
-    parser.add_argument('--gamma1', type=float, default=0.2)
+    parser.add_argument('--gamma1', type=float, default=0.8)
     parser.add_argument('--gamma2', type=float, default=0.05)
     parser.add_argument('--gamma3', type=float, default=0.05)
     parser.add_argument('--gamma4', type=float, default=0.0)
     parser.add_argument('--gamma5', type=float, default=0.0)
-    parser.add_argument('--gamma6', type=float, default=0.05)
+    parser.add_argument('--gamma6', type=float, default=0.8)
     parser.add_argument('--threshold', type=float, default=1.5)
     parser.add_argument('--delay_internal', type=float, default=2.0)
     parser.add_argument('--tau_driver', type=float, default=0.0)
-    parser.add_argument('--b_pressure', type=float, default=2.0)
+    parser.add_argument('--b_pressure', type=float, default=0.0)
+    parser.add_argument('--vbs_boost', type=float, default=2.0, help='Fator multiplicativo para VBs')
     parser.add_argument('--smooth_hours', type=float, default=0)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--train_test', action='store_true')
@@ -376,7 +378,7 @@ def main():
         print(f"📂 Parâmetros carregados de {args.load_params}")
 
     print("\n" + "="*80)
-    print("🛰️  HAC - Modelo Científico Final v2")
+    print("🛰️  HAC - Modelo Científico Final v3 (escala ajustada + calibração)")
     print("="*80)
 
     # Carregar OMNI
@@ -410,7 +412,19 @@ def main():
     df = integrate_hac_vectorial(df, driver_type=args.driver_type)
 
     if not args.train_test:
-        df['Dst_model'] = compute_dst_direct(df, debug=args.debug, **{k: getattr(args, k) for k in ['tau_R','gamma1','gamma2','gamma3','gamma4','gamma5','gamma6','threshold','delay_internal','tau_driver','b_pressure']})
+        df['Dst_raw'] = compute_dst_direct(df, debug=args.debug,
+                                           tau_R=args.tau_R,
+                                           gamma1=args.gamma1, gamma2=args.gamma2, gamma3=args.gamma3,
+                                           gamma4=args.gamma4, gamma5=args.gamma5, gamma6=args.gamma6,
+                                           threshold=args.threshold,
+                                           delay_internal=args.delay_internal,
+                                           tau_driver=args.tau_driver,
+                                           b_pressure=args.b_pressure,
+                                           vbs_boost=args.vbs_boost)
+        # Calibração linear para escala final
+        reg = LinearRegression().fit(df['Dst_raw'].values.reshape(-1,1), df['dst'].values)
+        df['Dst_model'] = reg.predict(df['Dst_raw'].values.reshape(-1,1))
+        print(f"📐 Calibração linear: Dst = {reg.coef_[0]:.4f} * Dst_raw + {reg.intercept_:.2f}")
         df.to_csv(args.output, index=False)
         print(f"💾 Resultados salvos em {args.output}")
         return
@@ -429,6 +443,9 @@ def main():
     df_raw = pd.merge(omni_raw, dst_interp_raw, on='time_tag', how='left').dropna(subset=['dst'])
     train_df, test_df = split_data(df_raw)
 
+    print(f"Treino: {len(train_df)} pontos ({train_df['time_tag'].min()} a {train_df['time_tag'].max()})")
+    print(f"Teste:  {len(test_df)} pontos ({test_df['time_tag'].min()} a {test_df['time_tag'].max()})")
+
     train_df = integrate_hac_vectorial(train_df, driver_type=args.driver_type)
     test_df = integrate_hac_vectorial(test_df, driver_type=args.driver_type)
 
@@ -438,32 +455,56 @@ def main():
         print(f"✅ Parâmetros otimizados: {opt_params}")
         args.gamma1, args.gamma2, args.gamma3, args.gamma6, args.delay_internal, args.b_pressure = opt_params
         if args.save_params:
-            params_to_save = {k: getattr(args, k) for k in ['gamma1','gamma2','gamma3','gamma6','delay_internal','b_pressure','tau_R']}
+            params_to_save = {k: getattr(args, k) for k in ['gamma1','gamma2','gamma3','gamma6','delay_internal','b_pressure','tau_R','vbs_boost']}
             with open(args.save_params, 'w') as f:
                 json.dump(params_to_save, f, indent=2)
             print(f"💾 Parâmetros salvos em {args.save_params}")
 
-    # Rodar modelos
-    train_df['Dst_hac'] = compute_dst_direct(train_df, debug=args.debug, **{k: getattr(args, k) for k in ['tau_R','gamma1','gamma2','gamma3','gamma4','gamma5','gamma6','threshold','delay_internal','tau_driver','b_pressure']})
-    test_df['Dst_hac'] = compute_dst_direct(test_df, debug=args.debug, **{k: getattr(args, k) for k in ['tau_R','gamma1','gamma2','gamma3','gamma4','gamma5','gamma6','threshold','delay_internal','tau_driver','b_pressure']})
+    # Calcular Dst_raw para treino e teste
+    train_df['Dst_raw'] = compute_dst_direct(train_df, debug=args.debug,
+                                             tau_R=args.tau_R,
+                                             gamma1=args.gamma1, gamma2=args.gamma2, gamma3=args.gamma3,
+                                             gamma4=args.gamma4, gamma5=args.gamma5, gamma6=args.gamma6,
+                                             threshold=args.threshold,
+                                             delay_internal=args.delay_internal,
+                                             tau_driver=args.tau_driver,
+                                             b_pressure=args.b_pressure,
+                                             vbs_boost=args.vbs_boost)
+    test_df['Dst_raw'] = compute_dst_direct(test_df, debug=args.debug,
+                                            tau_R=args.tau_R,
+                                            gamma1=args.gamma1, gamma2=args.gamma2, gamma3=args.gamma3,
+                                            gamma4=args.gamma4, gamma5=args.gamma5, gamma6=args.gamma6,
+                                            threshold=args.threshold,
+                                            delay_internal=args.delay_internal,
+                                            tau_driver=args.tau_driver,
+                                            b_pressure=args.b_pressure,
+                                            vbs_boost=args.vbs_boost)
 
-    train_df['Dst_burton'] = compute_dst_burton(train_df, delay_internal=args.delay_internal)
-    test_df['Dst_burton'] = compute_dst_burton(test_df, delay_internal=args.delay_internal)
+    # Calibração linear usando treino
+    reg = LinearRegression().fit(train_df['Dst_raw'].values.reshape(-1,1), train_df['dst'].values)
+    print(f"\n📐 Calibração linear (treino): Dst = {reg.coef_[0]:.4f} * Dst_raw + {reg.intercept_:.2f}")
+    train_df['Dst_hac'] = reg.predict(train_df['Dst_raw'].values.reshape(-1,1))
+    test_df['Dst_hac'] = reg.predict(test_df['Dst_raw'].values.reshape(-1,1))
+
+    # Baseline Burton (sem calibração, apenas para referência)
+    train_df['Dst_burton'] = compute_dst_burton(train_df, tau=args.tau_R, alpha=4.5, delay_internal=args.delay_internal)
+    test_df['Dst_burton'] = compute_dst_burton(test_df, tau=args.tau_R, alpha=4.5, delay_internal=args.delay_internal)
 
     # Métricas
-    hac_train = validation_metrics_direct(train_df, 'Dst_hac')
+    hac_train = validation_metrics_direct(train_df, 'Dst_hac', smooth_hours=0)
     hac_test = validation_metrics_direct(test_df, 'Dst_hac', smooth_hours=args.smooth_hours)
-    burton_train = validation_metrics_direct(train_df, 'Dst_burton')
+    burton_train = validation_metrics_direct(train_df, 'Dst_burton', smooth_hours=0)
     burton_test = validation_metrics_direct(test_df, 'Dst_burton', smooth_hours=args.smooth_hours)
 
-    print("\n📊 TREINO (2000-2010):")
-    print(f"   HAC    : r={hac_train['correlation']:.3f}  R²={hac_train['r2']:.3f}  MAE_storm={hac_train['mae_storm']:.1f}")
-    print(f"   Burton : r={burton_train['correlation']:.3f}  R²={burton_train['r2']:.3f}  MAE_storm={burton_train['mae_storm']:.1f}")
+    print("\n📊 TREINO (2000-2010) - SEM SUAVIZAÇÃO:")
+    print(f"   HAC    : r={hac_train['correlation']:.3f}  R²={hac_train['r2']:.3f}  RMSE={hac_train['rmse']:.1f}  MAE_storm={hac_train['mae_storm']:.1f}")
+    print(f"   Burton : r={burton_train['correlation']:.3f}  R²={burton_train['r2']:.3f}  RMSE={burton_train['rmse']:.1f}  MAE_storm={burton_train['mae_storm']:.1f}")
 
-    print("\n📊 TESTE (2010-2020):")
-    print(f"   HAC    : r={hac_test['correlation']:.3f}  R²={hac_test['r2']:.3f}  MAE_storm={hac_test['mae_storm']:.1f}")
-    print(f"   Burton : r={burton_test['correlation']:.3f}  R²={burton_test['r2']:.3f}  MAE_storm={burton_test['mae_storm']:.1f}")
+    print("\n📊 TESTE (2010-2020) - SUAVIZAÇÃO {}h:".format(args.smooth_hours))
+    print(f"   HAC    : r={hac_test['correlation']:.3f}  R²={hac_test['r2']:.3f}  RMSE={hac_test['rmse']:.1f}  MAE_storm={hac_test['mae_storm']:.1f}")
+    print(f"   Burton : r={burton_test['correlation']:.3f}  R²={burton_test['r2']:.3f}  RMSE={burton_test['rmse']:.1f}  MAE_storm={burton_test['mae_storm']:.1f}")
 
+    # Salvar resultados
     test_df.to_csv(args.output.replace('.csv', '_test.csv'), index=False)
     print(f"\n💾 Resultados do teste salvos em {args.output.replace('.csv', '_test.csv')}")
 
