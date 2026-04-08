@@ -70,9 +70,9 @@ class HACPhysicsConfig:
     """Configuração física validada para dados OMNI reais"""
     
     # TEMPOS CARACTERÍSTICOS (horas)
-    TAU_RING_CURRENT = 3.0      # Tempo de decaimento da corrente de anel
-    TAU_SUBSTORM = 1.5          # Tempo de injeção por subtempestades  
-    TAU_IONOSPHERE = 0.5        # Tempo de resposta ionosférica
+    TAU_RING_CURRENT = 2.0      # Tempo de decaimento da corrente de anel
+    TAU_SUBSTORM = 1.0          # Tempo de injeção por subtempestades  
+    TAU_IONOSPHERE = 0.3        # Tempo de resposta ionosférica
     TAU_EFFECTIVE = 2.0         # τ_eff para modelo Nowcast+Inércia
     
     # PARÂMETROS DE SATURAÇÃO FÍSICA
@@ -376,7 +376,7 @@ class ProductionHACModel:
         dt = np.diff(times).astype("timedelta64[s]").astype(float)
         dt = np.insert(dt, 0, dt[0])
         dt[dt <= 0] = 1.0
-        dt_hours = dt / 3600.0
+        dt_hours = np.maximum(dt / 3600.0, 1e-3)
 
         # Derivada
         if len(hac_total) < 7:
@@ -393,7 +393,7 @@ class ProductionHACModel:
                     window_length=window,
                     polyorder=2,
                     deriv=1
-                ) / np.median(dt_hours)
+                ) / dt_hours
 
             except Exception as e:
                 print(f"⚠️ Fallback derivada simples: {e}")
