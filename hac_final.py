@@ -389,7 +389,6 @@ class ProductionHACModel:
                     window -= 1
 
                 dt_median = np.median(dt_hours)
-
                    dHAC_dt = savgol_filter(
                     hac_total,
                     window_length=window,
