@@ -32,26 +32,63 @@ EVENTS = {
 # LOAD DE DADOS ROBUSTO
 # =========================
 def load_data(
-    omni_path="data/omni_data.csv",
+    omni_path="data/omni_2000_2020.csv",
     dst_path="data/dst_kyoto_2000_2020.csv"
 ):
     print("📥 Carregando dados...")
 
+    # ===== OMNI =====
     omni = pd.read_csv(omni_path)
-    dst = pd.read_csv(dst_path)
-
-    # Normalizar nomes
     omni = normalize_omni_columns(omni, allow_partial=True)
 
-    # Converter tempo
     omni['time_tag'] = pd.to_datetime(omni['time_tag'], errors='coerce')
-    dst['time_tag'] = pd.to_datetime(dst['time_tag'], errors='coerce')
+    omni = omni.dropna(subset=['time_tag']).sort_values('time_tag')
 
-    omni = omni.sort_values('time_tag').dropna(subset=['time_tag'])
-    dst = dst.sort_values('time_tag').dropna(subset=['time_tag'])
+    # ===== DST =====
+    dst = pd.read_csv(dst_path)
+
+    # 🔥 Garantir nomes corretos
+    dst.columns = [c.strip().lower() for c in dst.columns]
+
+    if 'time_tag' not in dst.columns:
+        raise ValueError(f"❌ DST sem 'time_tag': {dst.columns}")
+
+    if 'dst' not in dst.columns:
+        raise ValueError(f"❌ DST sem 'dst': {dst.columns}")
+
+    dst['time_tag'] = pd.to_datetime(dst['time_tag'], errors='coerce')
+    dst = dst.dropna(subset=['time_tag']).sort_values('time_tag')
 
     print(f"   OMNI: {len(omni)} pontos")
     print(f"   DST : {len(dst)} pontos")
+
+    # ===== MERGE ROBUSTO =====
+    print("🔗 Fazendo merge...")
+
+    df = pd.merge_asof(
+        omni,
+        dst,
+        on="time_tag",
+        direction="nearest",
+        tolerance=pd.Timedelta("1h")  # 🔥 importante pro DST (horário)
+    )
+
+    # ===== DEBUG INTELIGENTE =====
+    print(f"   Colunas após merge: {list(df.columns)}")
+
+    if 'dst' not in df.columns:
+        raise ValueError("❌ Merge falhou: 'dst' não apareceu")
+
+    before = len(df)
+    df = df.dropna(subset=['dst'])
+    after = len(df)
+
+    print(f"   ✅ Merge válido: {after}/{before} pontos com DST")
+
+    if after < 100:
+        raise ValueError("❌ Poucos dados após merge — verifique timestamps")
+
+    return df
 
     # =========================
     # MERGE ROBUSTO
