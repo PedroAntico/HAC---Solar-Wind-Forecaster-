@@ -619,22 +619,22 @@ class ProductionHACModel:
         return enhanced_levels
 
     def apply_persistence_filter(levels, min_duration=30):
-    filtered = levels.copy()
+        filtered = levels.copy()
     
-    current = levels[0]
-    count = 1
+        current = levels[0]
+        count = 1
     
-    for i in range(1, len(levels)):
-        if levels[i] == current:
+       for i in range(1, len(levels)):
+           if levels[i] == current:
             count += 1
-        else:
-            if count < min_duration:
+          else:
+              if count < min_duration:
                 fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
                 filtered[i-count:i] = [fill] * count
             current = levels[i]
             count = 1
 
-    return filtered
+        return filtered
     
     def _validate_output(self, hac_values):
         """Validação rigorosa dos resultados"""
