@@ -388,12 +388,14 @@ class ProductionHACModel:
                 if window % 2 == 0:
                     window -= 1
 
-                dHAC_dt = savgol_filter(
+                dt_median = np.median(dt_hours)
+
+                   dHAC_dt = savgol_filter(
                     hac_total,
                     window_length=window,
                     polyorder=2,
                     deriv=1
-                ) / dt_hours
+                ) / dt_median
 
             except Exception as e:
                 print(f"⚠️ Fallback derivada simples: {e}")
@@ -408,7 +410,7 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        dHAC_dt = np.clip(raw_dhdt, -300, 300)
+        dHAC_dt = np.clip(raw_dhdt, -400, 400)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
