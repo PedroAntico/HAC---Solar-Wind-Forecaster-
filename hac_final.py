@@ -76,7 +76,7 @@ class HACPhysicsConfig:
     TAU_EFFECTIVE = 2.0         # τ_eff para modelo Nowcast+Inércia
     
     # PARÂMETROS DE SATURAÇÃO FÍSICA
-    E_FIELD_SATURATION = 15.0   # mV/m - Saturação OBSERVACIONAL
+    E_FIELD_SATURATION = 25.0   # mV/m - Saturação OBSERVACIONAL
     KP_SATURATION = 8.0         # Saturação do índice Kp
     RING_CURRENT_MAX = 500.0    # nT - Saturação da corrente de anel
     
@@ -90,7 +90,7 @@ class HACPhysicsConfig:
     COUPLING_THRESHOLD = 5.0   # mV/m - Limiar para não-linearidade
     
     # ESCALAS OPERACIONAIS
-    HAC_SCALE_MAX = 300.0
+    HAC_SCALE_MAX = 500.0
     KP_SCALE = 9.0
     
     # LIMITES FÍSICOS
@@ -408,7 +408,7 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        dHAC_dt = 200 * np.tanh(raw_dhdt / 200)
+        dHAC_dt = np.clip(raw_dhdt, -300, 300)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
