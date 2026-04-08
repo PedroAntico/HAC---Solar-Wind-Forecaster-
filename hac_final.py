@@ -1375,6 +1375,34 @@ def main():
         print(f"   4. nowcast_inertia_report.txt - Relatório específico")
     
     print("\n" + "="*70)
+    
+# ==========================================================
+# 🔌 WRAPPERS PARA VALIDAÇÃO (compatível com validate_events)
+# ==========================================================
+
+def prepare_omni(df):
+    """
+    Adapter para validação.
+    Normaliza + calcula campos físicos.
+    """
+    df = normalize_omni_columns(df)
+    df = PhysicalFieldsCalculator.compute_all_fields(df)
+    return df
+
+
+def euler_dst(df, alpha=5.5, tau=8.0):
+    """
+    Adapter: usa HAC no lugar do Burton.
+    Retorna proxy de Dst baseado no HAC.
+    """
+    model = ProductionHACModel()
+    hac = model.compute_hac_system(df)
+
+    # 🔴 Conversão HAC → Dst (proxy físico)
+    dst_proxy = -350 * (hac / 300) ** 1.2
+
+    return dst_proxy
+
 
 # ============================
 # EXECUÇÃO
