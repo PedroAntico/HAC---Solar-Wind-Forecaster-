@@ -624,8 +624,8 @@ class ProductionHACModel:
         current = levels[0]
         count = 1
     
-       for i in range(1, len(levels)):
-           if levels[i] == current:
+        for i in range(1, len(levels)):
+         if levels[i] == current:
             count += 1
           else:
               if count < min_duration:
