@@ -96,12 +96,12 @@ def load_data(
     print("🔗 Fazendo merge temporal...")
 
     df = pd.merge_asof(
-        omni,
-        dst,
-        on="time_tag",
-        direction="nearest",
-        tolerance=pd.Timedelta("10min")  # 🔥 crítico
-    )
+    omni.sort_values('time_tag'),
+    dst.sort_values('time_tag'),
+    on='time_tag',
+    direction='backward',  # 🔥 ESSENCIAL
+    tolerance=pd.Timedelta("2h")  # 🔥 mais folga
+)
 
     # Garantir coluna
     if 'dst' not in df.columns:
