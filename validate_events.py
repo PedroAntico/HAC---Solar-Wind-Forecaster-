@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação robusta do modelo HAC em eventos históricos
+validate_events.py - Validação robusta do modelo HAC++ em eventos históricos
 """
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
 from scipy.stats import pearsonr
 
 # =========================
-# IMPORT DO SEU MODELO
+# IMPORTA O MODELO HAC++
 # =========================
 try:
-    from hac_final import normalize_omni_columns
-except ImportError:
-    raise ImportError("❌ Não foi possível importar hac_final.py")
+    from hac_final import (
+        RobustOMNIProcessor,
+        PhysicalFieldsCalculator,
+        ProductionHACModel,
+        HACPhysicsConfig
+    )
+except ImportError as e:
+    raise ImportError("❌ Não foi possível importar hac_final.py. Verifique o nome do arquivo.") from e
 
 # =========================
 # EVENTOS HISTÓRICOS
@@ -29,123 +35,115 @@ EVENTS = {
 }
 
 # =========================
-# LOAD DE DADOS ROBUSTO
+# CARREGAMENTO ROBUSTO (OMNI + DST)
 # =========================
-def load_data(
-    omni_path="data/omni_2000_2020.csv",
-    dst_path="data/dst_kyoto_2000_2020.csv"
-):
+def load_data(omni_path="data/omni_2000_2020.csv",
+              dst_path="data/dst_kyoto_2000_2020.csv"):
+    """
+    Carrega OMNI e DST, faz merge temporal e retorna DataFrame unificado.
+    """
     print("📥 Carregando dados...")
 
-    # ===== OMNI =====
-    omni = pd.read_csv(omni_path)
-    omni = normalize_omni_columns(omni, allow_partial=True)
+    # ----- OMNI -----
+    processor = RobustOMNIProcessor()
+    omni = processor.load_and_clean(omni_path)
+    if omni is None:
+        raise FileNotFoundError(f"Arquivo OMNI não encontrado: {omni_path}")
+    print(f"   OMNI: {len(omni)} pontos")
 
-    omni['time_tag'] = pd.to_datetime(omni['time_tag'], errors='coerce')
-    omni = omni.dropna(subset=['time_tag']).sort_values('time_tag')
-
-    # ===== DST =====
+    # ----- DST -----
     dst = pd.read_csv(dst_path)
-
-    # 🔥 Garantir nomes corretos
     dst.columns = [c.strip().lower() for c in dst.columns]
 
+    # Garantir nomes das colunas
     if 'time_tag' not in dst.columns:
-        raise ValueError(f"❌ DST sem 'time_tag': {dst.columns}")
-
+        raise KeyError(f"Coluna 'time_tag' não encontrada no DST. Colunas: {dst.columns}")
     if 'dst' not in dst.columns:
-        raise ValueError(f"❌ DST sem 'dst': {dst.columns}")
+        raise KeyError(f"Coluna 'dst' não encontrada no DST. Colunas: {dst.columns}")
 
     dst['time_tag'] = pd.to_datetime(dst['time_tag'], errors='coerce')
-    dst = dst.dropna(subset=['time_tag']).sort_values('time_tag')
-
-    print(f"   OMNI: {len(omni)} pontos")
+    dst = dst.dropna(subset=['time_tag', 'dst']).sort_values('time_tag')
     print(f"   DST : {len(dst)} pontos")
 
-    # ===== MERGE ROBUSTO =====
-    print("🔗 Fazendo merge...")
-
+    # ----- MERGE TEMPORAL -----
+    print("🔗 Fazendo merge OMNI + DST...")
+    # Merge asof: para cada timestamp OMNI, pega o DST mais próximo (atrás ou igual)
     df = pd.merge_asof(
-        omni,
-        dst,
-        on="time_tag",
-        direction="nearest",
-        tolerance=pd.Timedelta("1h")  # 🔥 importante pro DST (horário)
+        omni.sort_values('time_tag'),
+        dst.sort_values('time_tag'),
+        on='time_tag',
+        direction='backward',            # Usa o valor de DST imediatamente anterior
+        tolerance=pd.Timedelta("2h")     # Até 2 horas de diferença
     )
 
-    # ===== DEBUG INTELIGENTE =====
-    print(f"   Colunas após merge: {list(df.columns)}")
-
-    if 'dst' not in df.columns:
-        raise ValueError("❌ Merge falhou: 'dst' não apareceu")
-
-    before = len(df)
+    # Remove linhas sem DST
     df = df.dropna(subset=['dst'])
-    after = len(df)
-
-    print(f"   ✅ Merge válido: {after}/{before} pontos com DST")
-
-    if after < 100:
-        raise ValueError("❌ Poucos dados após merge — verifique timestamps")
-
-    return df
-
-    # =========================
-    # MERGE ROBUSTO
-    # =========================
-    print("🔗 Fazendo merge temporal...")
-
-    df = pd.merge_asof(
-    omni.sort_values('time_tag'),
-    dst.sort_values('time_tag'),
-    on='time_tag',
-    direction='backward',  # 🔥 ESSENCIAL
-    tolerance=pd.Timedelta("2h")  # 🔥 mais folga
-)
-
-    # Garantir coluna
-    if 'dst' not in df.columns:
-        raise ValueError(f"❌ Coluna 'dst' não encontrada: {df.columns}")
-
-    # Remover NaN após merge
-    df = df.dropna(subset=['dst'])
-
-    print(f"   ✅ Merge final: {len(df)} pontos válidos")
+    print(f"   ✅ Merge final: {len(df)} pontos com DST")
 
     if len(df) < 100:
-        raise ValueError("❌ Poucos dados após merge")
+        raise ValueError("❌ Poucos pontos após merge. Verifique os arquivos de entrada.")
 
     return df
 
-
 # =========================
-# MODELO SIMPLES DST (BASELINE)
+# EXECUTA MODELO HAC++ NO DATAFRAME
 # =========================
-def simple_dst_model(df):
+def run_hac_model(df):
     """
-    Modelo simplificado tipo Burton (baseline físico)
+    Aplica o modelo HAC++ completo ao DataFrame.
+    Retorna o DataFrame original acrescido das colunas HAC_total, dHAC_dt, etc.
     """
-    bz = df['bz_gsm'].fillna(0).values
-    v = df['speed'].fillna(400).values
+    print("⚙️ Executando modelo HAC++...")
 
-    bz_south = np.maximum(0, -bz)
-    Ey = bz_south * v * 1e-3
+    # Calcula campos físicos (E_field, coupling)
+    df = PhysicalFieldsCalculator.compute_all_fields(df)
 
-    # Integração simples
-    dst = np.zeros(len(Ey))
+    # Instancia e executa modelo
+    config = HACPhysicsConfig()
+    model = ProductionHACModel(config)
+    hac_total = model.compute_hac_system(df)
 
-    for i in range(1, len(Ey)):
-        dst[i] = dst[i-1] + (Ey[i] - dst[i-1] / 7)
+    # Adiciona resultados ao DataFrame
+    for key, values in model.results.items():
+        # 'time' já existe, vamos pular
+        if key != 'time':
+            df[key] = values
 
-    return -dst * 20
-
+    # Ajuste de escala: HAC_total está normalizado para 0-300
+    # Podemos manter assim ou calibrar para DST posteriormente
+    return df, model
 
 # =========================
-# VALIDAÇÃO POR EVENTO
+# CALIBRAÇÃO LINEAR HAC → DST
 # =========================
-def validate_event(df, name, start, end):
+def calibrate_hac_to_dst(hac_values, dst_values):
+    """
+    Ajusta regressão linear para converter HAC_total em estimativa de DST.
+    Retorna coeficientes (slope, intercept) e o DST predito.
+    """
+    # Remove NaNs
+    mask = ~(np.isnan(hac_values) | np.isnan(dst_values))
+    X = hac_values[mask].reshape(-1, 1)
+    y = dst_values[mask]
+
+    if len(X) < 10:
+        raise ValueError("Poucos pontos para calibração.")
+
+    reg = LinearRegression().fit(X, y)
+    slope = reg.coef_[0]
+    intercept = reg.intercept_
+
+    # Aplica a todos os pontos (inclusive NaNs, mas depois tratamos)
+    dst_pred = slope * hac_values + intercept
+    return dst_pred, slope, intercept
+
+# =========================
+# VALIDAÇÃO DE UM EVENTO
+# =========================
+def validate_event(df, name, start, end, output_dir="."):
     print(f"\n🌌 EVENTO: {name}")
 
+    # Filtra período do evento
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
     event_df = df[mask].copy()
 
@@ -153,41 +151,74 @@ def validate_event(df, name, start, end):
         print("⚠️ Poucos dados, pulando...")
         return
 
-    # Modelo
-    pred = simple_dst_model(event_df)
+    # HAC já está calculado para todo o DataFrame
+    if 'HAC_total' not in event_df.columns:
+        print("❌ Coluna HAC_total não encontrada. Execute run_hac_model primeiro.")
+        return
 
-    # Calibração linear
-    reg = LinearRegression().fit(pred.reshape(-1,1), event_df['dst'])
-    pred_cal = reg.predict(pred.reshape(-1,1))
+    # Calibração HAC -> DST usando APENAS dados do evento
+    try:
+        dst_pred, slope, intercept = calibrate_hac_to_dst(
+            event_df['HAC_total'].values,
+            event_df['dst'].values
+        )
+        event_df['Dst_pred'] = dst_pred
+    except ValueError as e:
+        print(f"⚠️ Falha na calibração: {e}")
+        return
 
     # Métricas
-    corr = pearsonr(event_df['dst'], pred_cal)[0]
-    mae = mean_absolute_error(event_df['dst'], pred_cal)
+    corr, p_val = pearsonr(event_df['dst'], event_df['Dst_pred'])
+    mae = mean_absolute_error(event_df['dst'], event_df['Dst_pred'])
 
-    print(f"   Dst real min : {event_df['dst'].min():.1f}")
-    print(f"   Dst pred min : {pred_cal.min():.1f}")
+    # Resultados
+    print(f"   Dst real min : {event_df['dst'].min():.1f} nT")
+    print(f"   Dst pred min : {event_df['Dst_pred'].min():.1f} nT")
     print(f"   Correlação   : {corr:.3f}")
     print(f"   MAE          : {mae:.1f} nT")
     print(f"   Pontos       : {len(event_df)}")
+    print(f"   Calibração   : Dst = {slope:.2f} * HAC + {intercept:.1f}")
 
-    # Salvar
-    event_df['Dst_pred'] = pred_cal
-    event_df.to_csv(f"event_{name}.csv", index=False)
+    # Salva CSV
+    event_df.to_csv(f"{output_dir}/event_{name}.csv", index=False)
 
+    # Gera gráfico
+    plt.figure(figsize=(12, 6))
+    plt.plot(event_df['time_tag'], event_df['dst'], 'k-', label='Dst Real', linewidth=2)
+    plt.plot(event_df['time_tag'], event_df['Dst_pred'], 'r--', label='HAC++ (calibrado)', linewidth=2)
+    plt.axhline(y=-50, color='gray', linestyle=':', alpha=0.7)
+    plt.axhline(y=-100, color='orange', linestyle=':', alpha=0.7)
+    plt.xlabel('Tempo')
+    plt.ylabel('Dst (nT)')
+    plt.title(f'Validação HAC++ - Evento {name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/event_{name}.png", dpi=150)
+    plt.close()
+
+    return event_df
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("🔬 VALIDANDO EVENTOS HISTÓRICOS\n")
+    print("🔬 VALIDAÇÃO DO MODELO HAC++ EM EVENTOS HISTÓRICOS\n")
 
-    df = load_data()
+    # 1. Carrega todos os dados (OMNI + DST)
+    df = load_data(
+        omni_path="data/omni_2000_2020.csv",      # ajuste para seu caminho
+        dst_path="data/dst_kyoto_2000_2020.csv"   # ajuste para seu caminho
+    )
 
+    # 2. Executa modelo HAC++ uma única vez (para todos os dados)
+    df, model = run_hac_model(df)
+
+    # 3. Valida cada evento
     for name, (start, end) in EVENTS.items():
-        validate_event(df, name, start, end)
+        validate_event(df, name, start, end, output_dir=".")
 
-    print("\n✅ Validação concluída")
-
+    print("\n✅ Validação concluída. Arquivos CSV e gráficos salvos.")
 
 if __name__ == "__main__":
     main()
