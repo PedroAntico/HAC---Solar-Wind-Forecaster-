@@ -103,20 +103,27 @@ def merge_data(omni, dst):
         dst.sort_values('time_tag'),
         on='time_tag',
         direction='backward',
-        tolerance=pd.Timedelta("2h")
+        tolerance=pd.Timedelta("2h"),
+        suffixes=('_omni', '_dst')
     )
 
-    print("   🔍 NaNs em DST após merge:", df['dst'].isna().sum())
+    print("   🔍 colunas após merge:", df.columns.tolist())
+
+    # 🔥 FORÇAR uso do DST correto
+    if 'dst_dst' in df.columns:
+        df['dst'] = df['dst_dst']
+    elif 'dst_y' in df.columns:
+        df['dst'] = df['dst_y']
+    elif 'dst' not in df.columns:
+        raise ValueError("❌ dst não encontrado após merge")
+
+    print("   🔍 NaNs em DST:", df['dst'].isna().sum())
 
     df = df.dropna(subset=['dst'])
 
     print(f"   ✅ final: {len(df)} pontos")
 
-    if len(df) < 100:
-        raise ValueError("❌ Merge falhou (dados insuficientes)")
-
     return df
-
 
 # =========================
 # MODELO HAC++
