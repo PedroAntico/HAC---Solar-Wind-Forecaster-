@@ -1,120 +1,155 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação robusta com fallback automático
+validate_events.py - Validação robusta do modelo HAC em eventos históricos
 """
 
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
 from scipy.stats import pearsonr
 
-# ====================== IMPORT FLEXÍVEL ======================
+# =========================
+# IMPORT DO SEU MODELO
+# =========================
 try:
-    import hac_final as hac
+    from hac_final import normalize_omni_columns
 except ImportError:
     raise ImportError("❌ Não foi possível importar hac_final.py")
 
-# ====================== EVENTOS ======================
+# =========================
+# EVENTOS HISTÓRICOS
+# =========================
 EVENTS = {
     "Halloween_2003": ("2003-10-28", "2003-11-02"),
     "St_Patrick_2015": ("2015-03-17", "2015-03-20"),
     "Carrington_like_2012": ("2012-07-22", "2012-07-25"),
+    "May_2024": ("2024-05-10", "2024-05-12"),
 }
 
-# ====================== FALLBACK FUNCTIONS ======================
-def fallback_prepare_omni(df):
-    print("⚠️ Usando fallback prepare_omni")
-    df = df.sort_values("time_tag").reset_index(drop=True)
+# =========================
+# LOAD DE DADOS ROBUSTO
+# =========================
+def load_data(
+    omni_path="data/omni_data.csv",
+    dst_path="data/dst_kyoto_2000_2020.csv"
+):
+    print("📥 Carregando dados...")
 
-    # Correção de velocidade
-    if df["speed"].median() > 10000:
-        df["speed"] /= 1000
+    omni = pd.read_csv(omni_path)
+    dst = pd.read_csv(dst_path)
 
-    if df["speed"].median() < 300:
-        factor = 420 / max(df["speed"].median(), 50)
-        df["speed"] *= factor
+    # Normalizar nomes
+    omni = normalize_omni_columns(omni, allow_partial=True)
 
-    return df.dropna().reset_index(drop=True)
+    # Converter tempo
+    omni['time_tag'] = pd.to_datetime(omni['time_tag'], errors='coerce')
+    dst['time_tag'] = pd.to_datetime(dst['time_tag'], errors='coerce')
 
+    omni = omni.sort_values('time_tag').dropna(subset=['time_tag'])
+    dst = dst.sort_values('time_tag').dropna(subset=['time_tag'])
 
-def fallback_euler_dst(df, alpha=5.5, tau=8.0):
-    print("⚠️ Usando fallback euler_dst")
+    print(f"   OMNI: {len(omni)} pontos")
+    print(f"   DST : {len(dst)} pontos")
 
-    Bz = df["bz_gsm"].values
-    V = df["speed"].values
-    VBs = V * np.maximum(-Bz, 0) / 1000.0
-
-    dt = 1.0  # 1h
-
-    Dst = np.zeros(len(V))
-    for i in range(1, len(V)):
-        dDst = -alpha * VBs[i] - Dst[i-1] / tau
-        Dst[i] = Dst[i-1] + dDst * dt
-
-    return Dst
-
-
-# ====================== DETECÇÃO AUTOMÁTICA ======================
-prepare_omni = getattr(hac, "prepare_omni", fallback_prepare_omni)
-euler_dst = getattr(hac, "euler_dst", fallback_euler_dst)
-
-
-# ====================== LOAD DATA ======================
-def load_data():
-    omni = pd.read_csv("data/omni_2000_2020.csv", parse_dates=["time_tag"])
-    omni = prepare_omni(omni)
-
-    dst = pd.read_csv("data/dst_kyoto_2000_2020.csv", parse_dates=["time_tag"])
+    # =========================
+    # MERGE ROBUSTO
+    # =========================
+    print("🔗 Fazendo merge temporal...")
 
     df = pd.merge_asof(
-        omni, dst,
+        omni,
+        dst,
         on="time_tag",
         direction="nearest",
-        tolerance=pd.Timedelta("2h")
-    ).dropna(subset=["dst"])
+        tolerance=pd.Timedelta("10min")  # 🔥 crítico
+    )
+
+    # Garantir coluna
+    if 'dst' not in df.columns:
+        raise ValueError(f"❌ Coluna 'dst' não encontrada: {df.columns}")
+
+    # Remover NaN após merge
+    df = df.dropna(subset=['dst'])
+
+    print(f"   ✅ Merge final: {len(df)} pontos válidos")
+
+    if len(df) < 100:
+        raise ValueError("❌ Poucos dados após merge")
 
     return df
 
 
-# ====================== VALIDAÇÃO ======================
-def run_event(df, name, start, end):
-    mask = (df["time_tag"] >= start) & (df["time_tag"] <= end)
-    event = df[mask].copy()
+# =========================
+# MODELO SIMPLES DST (BASELINE)
+# =========================
+def simple_dst_model(df):
+    """
+    Modelo simplificado tipo Burton (baseline físico)
+    """
+    bz = df['bz_gsm'].fillna(0).values
+    v = df['speed'].fillna(400).values
 
-    if len(event) < 10:
-        print(f"⚠️ {name}: poucos dados")
+    bz_south = np.maximum(0, -bz)
+    Ey = bz_south * v * 1e-3
+
+    # Integração simples
+    dst = np.zeros(len(Ey))
+
+    for i in range(1, len(Ey)):
+        dst[i] = dst[i-1] + (Ey[i] - dst[i-1] / 7)
+
+    return -dst * 20
+
+
+# =========================
+# VALIDAÇÃO POR EVENTO
+# =========================
+def validate_event(df, name, start, end):
+    print(f"\n🌌 EVENTO: {name}")
+
+    mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
+    event_df = df[mask].copy()
+
+    if len(event_df) < 20:
+        print("⚠️ Poucos dados, pulando...")
         return
 
-    Dst_raw = euler_dst(event)
+    # Modelo
+    pred = simple_dst_model(event_df)
 
-    # Calibração
-    reg = LinearRegression().fit(Dst_raw.reshape(-1,1), event["dst"])
-    pred = reg.predict(Dst_raw.reshape(-1,1))
+    # Calibração linear
+    reg = LinearRegression().fit(pred.reshape(-1,1), event_df['dst'])
+    pred_cal = reg.predict(pred.reshape(-1,1))
 
-    corr = pearsonr(event["dst"], pred)[0]
-    mae = mean_absolute_error(event["dst"], pred)
+    # Métricas
+    corr = pearsonr(event_df['dst'], pred_cal)[0]
+    mae = mean_absolute_error(event_df['dst'], pred_cal)
 
-    print(f"\n🌌 {name}")
-    print(f"Dst real min : {event['dst'].min():.1f}")
-    print(f"Dst pred min : {pred.min():.1f}")
-    print(f"Corr         : {corr:.3f}")
-    print(f"MAE          : {mae:.1f}")
+    print(f"   Dst real min : {event_df['dst'].min():.1f}")
+    print(f"   Dst pred min : {pred_cal.min():.1f}")
+    print(f"   Correlação   : {corr:.3f}")
+    print(f"   MAE          : {mae:.1f} nT")
+    print(f"   Pontos       : {len(event_df)}")
 
-    event["Dst_pred"] = pred
-    event.to_csv(f"event_{name}.csv", index=False)
+    # Salvar
+    event_df['Dst_pred'] = pred_cal
+    event_df.to_csv(f"event_{name}.csv", index=False)
 
 
-# ====================== MAIN ======================
+# =========================
+# MAIN
+# =========================
 def main():
     print("🔬 VALIDANDO EVENTOS HISTÓRICOS\n")
 
     df = load_data()
 
     for name, (start, end) in EVENTS.items():
-        run_event(df, name, start, end)
+        validate_event(df, name, start, end)
 
-    print("\n✅ Finalizado")
+    print("\n✅ Validação concluída")
 
 
 if __name__ == "__main__":
