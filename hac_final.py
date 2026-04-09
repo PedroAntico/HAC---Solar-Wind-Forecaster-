@@ -338,31 +338,31 @@ class ProductionHACModel:
     # 3. Armazenar todos os resultados
     # ------------------------------------------------------------
     self.results.update({
-        'time': times,
-        'HAC_total': hac_total,
-        'HAC_ring': hac_ring,
-        'HAC_substorm': hac_substorm,
-        'HAC_ionosphere': hac_ionosphere,
-        'Bz': Bz,
-        'Vsw': Vsw,
-        'coupling_signal': coupling,
-        'dHAC_dt': dHAC_dt,
-        'escalation_alert': escalation_flags,
-        'nowcast_inertia_growth': nowcast_growth,
+            'time': times,
+            'HAC_total': hac_total,
+            'HAC_ring': hac_ring,
+            'HAC_substorm': hac_substorm,
+            'HAC_ionosphere': hac_ionosphere,
+            'Bz': Bz,
+            'Vsw': Vsw,
+            'coupling_signal': coupling,
+            'dHAC_dt': dHAC_dt,
+            'escalation_alert': escalation_flags,
+            'nowcast_inertia_growth': nowcast_growth,
 
-        # Novos campos vindos do core
-        'Dst_physical': core_results['Dst_pred'],
-        'Dst_min_physical': core_results['Dst_min'],
-        'Dst_now': core_results['Dst_now'],
-        'dDst_dt': core_results['dDst_dt'],
-        'forecast': core_results['forecast'],
-        'core_probabilities': core_results['probabilities'],
-        'core_severity': core_results['severity']
-      })
+            # Novos campos vindos do core
+            'Dst_physical': core_results['Dst_pred'],
+            'Dst_min_physical': core_results['Dst_min'],
+            'Dst_now': core_results['Dst_now'],
+            'dDst_dt': core_results['dDst_dt'],
+            'forecast': core_results['forecast'],
+            'core_probabilities': core_results['probabilities'],
+            'core_severity': core_results['severity']
+        })
 
-      self._validate_output(hac_total)
-      return hac_total
-    
+        self._validate_output(hac_total)
+        return hac_total
+
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
         n = len(times)
