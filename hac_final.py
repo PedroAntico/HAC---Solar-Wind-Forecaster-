@@ -767,7 +767,7 @@ class ProductionHACModel:
 return kp_pred, dst_pred, enhanced_levels   # <-- Deve estar indentado aqui
 
     def generate_nowcast_report(self):
-         """Gera relatório específico do modelo Nowcast + Inércia"""
+        """Gera relatório específico do modelo Nowcast + Inércia"""
         if not self.nowcast_alerts:
             nowcast_summary = "Nenhum alerta de escalação detectado."
         else:
