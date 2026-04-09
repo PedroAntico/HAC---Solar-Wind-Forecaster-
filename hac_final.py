@@ -652,7 +652,7 @@ class ProductionHACModel:
         
         return enhanced_levels
 
-    def apply_persistence_filter(levels, min_duration=30):
+    def apply_persistence_filter(self, levels, min_duration=30):
         filtered = levels.copy()
     
         current = levels[0]
@@ -683,7 +683,7 @@ class ProductionHACModel:
         
         print("   ✅ Validação passada")
     
-def predict_storm_indicators(self, hac_values):
+    def predict_storm_indicators(self, hac_values):
     """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
     print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
@@ -766,7 +766,7 @@ def predict_storm_indicators(self, hac_values):
 
     return kp_pred, dst_pred, enhanced_levels
 
-def generate_nowcast_report(self):
+    def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
 
         if not self.nowcast_alerts:
@@ -826,7 +826,7 @@ def generate_nowcast_report(self):
 
         return report
     
-def get_current_assessment(self):
+    def get_current_assessment(self):
         """Retorna avaliação detalhada do momento atual"""
         if not self.results or 'Storm_level' not in self.results:
             return None
