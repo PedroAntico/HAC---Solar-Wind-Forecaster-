@@ -683,8 +683,8 @@ class ProductionHACModel:
         
         print("   ✅ Validação passada")
     
-    def predict_storm_indicators(self, hac_values):
-        """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+def predict_storm_indicators(self, hac_values):
+    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
     print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
@@ -764,7 +764,7 @@ class ProductionHACModel:
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
 
-        return kp_pred, dst_pred, enhanced_levels   # <-- Deve estar indentado aqui
+    return kp_pred, dst_pred, enhanced_levels
 
 def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
