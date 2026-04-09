@@ -684,18 +684,19 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-        """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+
     print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
     # 1. Kp com saturação (mantido)
     kp_pred = 9 * np.tanh(hac_values / 180)
 
-    # 2. Dst físico (vindo do core) – substitui a fórmula antiga
+    # 2. Dst físico (vindo do core)
     dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
     dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
     dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
 
-    # 3. Classificação híbrida (combinando severidade do core e nowcast)
+    # 3. Classificação híbrida
     storm_levels = []
     decision_logs = []
 
@@ -706,18 +707,14 @@ class ProductionHACModel:
     escalation_count = 0
     g4g5_nowcast_count = 0
 
-    # Se o core já forneceu severidade (0-5), podemos usá-la como base
     core_severity = self.results.get('core_severity', 0)
 
     for i in range(len(hac_values)):
-        # Classificação híbrida original (pode ser mantida ou simplificada)
         level, decision_info = self._classify_storm_with_nowcast(
             hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
         )
 
-        # Opção: substituir pela severidade do core quando disponível
         if core_severity > 0:
-            # Mapear severidade numérica para label
             severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
             level = severity_map.get(core_severity, level)
 
@@ -729,13 +726,11 @@ class ProductionHACModel:
         if "G4" in level or "G5" in level:
             g4g5_nowcast_count += 1
 
-    # Análise de tendência (boost)
     enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
-    # Armazenar resultados
     self.results.update({
         'Kp_pred': kp_pred,
-        'Dst_pred': dst_pred,               # agora é o Dst físico
+        'Dst_pred': dst_pred,
         'Dst_min': dst_min,
         'Dst_now': dst_now,
         'Storm_level': enhanced_levels,
@@ -745,7 +740,6 @@ class ProductionHACModel:
 
     self.classification_logs = decision_logs
 
-    # Estatísticas
     g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
     g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
     g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
@@ -758,14 +752,12 @@ class ProductionHACModel:
     print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
     print(f"   • Escalações Nowcast: {escalation_count}")
 
-    # Previsão (forecast) do core
     forecast = self.results.get('forecast', {})
     if forecast:
         print("   • Previsão Dst:")
         for h, val in forecast.items():
             print(f"       {h}: {val:.1f} nT")
 
-    # Probabilidades do core
     probs = self.results.get('core_probabilities', {})
     if probs:
         print("   • Probabilidades (softmax):")
