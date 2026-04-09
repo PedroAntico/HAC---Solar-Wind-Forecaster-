@@ -361,7 +361,7 @@ class ProductionHACModel:
     })
 
     self._validate_output(hac_total)
-          return hac_total
+        return hac_total
     
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
