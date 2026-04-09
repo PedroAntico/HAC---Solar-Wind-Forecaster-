@@ -96,7 +96,7 @@ class HACPhysicsConfig:
     
     # LIMITES FÍSICOS
     VSW_MIN, VSW_MAX = 200, 1500 # km/s200, 1500      # km/s
-    DENSIDADE_MÍNIMA, DENSIDADE_MÁXIMA = 0,1, 100 # cm⁻³0.1, 100  # cm⁻³
+    DENSIDADE_MÍNIMA, DENSIDADE_MÁXIMA = 0.1, 100 # cm⁻³0.1, 100  # cm⁻³
     BZ_MIN, BZ_MAX = -100, 100 # nT100, 100        # nT
     
     # NOWCAST + PARÂMETROS DE INÉRCIA# NOWCAST + INÉRCIA PARAMETERS
