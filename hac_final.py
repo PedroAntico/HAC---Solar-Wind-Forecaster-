@@ -361,8 +361,7 @@ class ProductionHACModel:
     })
 
     self._validate_output(hac_total)
-
-    return hac_total
+        return hac_total
     
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
@@ -379,7 +378,7 @@ class ProductionHACModel:
             
             dt[0] = dt[1] if n > 1 else 60.0
         
-        return dt
+       return dt
     
     def _safe_normalization(self, values):
         """Normalização que NUNCA gera NaN"""
