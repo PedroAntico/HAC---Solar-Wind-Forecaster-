@@ -272,7 +272,8 @@ class ProductionHACModel:
         self.classification_logs = []
     
     def compute_hac_system(self, df):
-    """Sistema HAC+ completo com integração ao modelo físico unificado (hac_core)"""
+    """Sistema HAC completo com integração ao modelo físico unificado (hac_core)"""
+
     print("\n⚡ Calculando sistema HAC+...")
 
     # ------------------------------------------------------------
