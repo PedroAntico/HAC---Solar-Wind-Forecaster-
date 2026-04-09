@@ -360,7 +360,7 @@ class ProductionHACModel:
         'core_severity': core_results['severity']
     })
 
-    self._validate_output(hac_total)
+        self._validate_output(hac_total)
         return hac_total
     
     def _safe_deltat(self, times):
