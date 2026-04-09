@@ -265,7 +265,7 @@ class ProductionHACModel:
     
     def __init__(self, config=None):
         self.config = config or HACPhysicsConfig()
-        self.core = HACCoreModel()          # ← novo
+        self.core = HACCoreModel()
         self.results = {}
         self.nowcast_alerts = []
         self.escalation_triggers = []
@@ -274,70 +274,68 @@ class ProductionHACModel:
     def compute_hac_system(self, df):
         """Sistema HAC completo com integração ao modelo físico unificado (hac_core)"""
 
-    print("\n⚡ Calculando sistema HAC+...")
+        print("\n⚡ Calculando sistema HAC+...")
 
-    # ------------------------------------------------------------
-    # 1. Cálculo tradicional do HAC (reservatórios)
-    # ------------------------------------------------------------
-    times = pd.to_datetime(df['time_tag']).values
-    coupling = df['coupling_signal'].fillna(0).values
-    Bz = df['bz_gsm'].fillna(0).values
-    Vsw = df['speed'].fillna(400).values
-    density = df['density'].fillna(5).values if 'density' in df.columns else None
+        # ------------------------------------------------------------
+        # 1. Cálculo tradicional do HAC (reservatórios)
+        # ------------------------------------------------------------
+        times = pd.to_datetime(df['time_tag']).values
+        coupling = df['coupling_signal'].fillna(0).values
+        Bz = df['bz_gsm'].fillna(0).values
+        Vsw = df['speed'].fillna(400).values
+        density = df['density'].fillna(5).values if 'density' in df.columns else None
 
-    dt = self._safe_deltat(times)
+        dt = self._safe_deltat(times)
 
-    n = len(times)
-    hac_ring = np.zeros(n)
-    hac_substorm = np.zeros(n)
-    hac_ionosphere = np.zeros(n)
+        n = len(times)
+        hac_ring = np.zeros(n)
+        hac_substorm = np.zeros(n)
+        hac_ionosphere = np.zeros(n)
 
-    tau_rc = self.config.TAU_RING_CURRENT * 3600
-    tau_sub = self.config.TAU_SUBSTORM * 3600
-    tau_ion = self.config.TAU_IONOSPHERE * 3600
+        tau_rc = self.config.TAU_RING_CURRENT * 3600
+        tau_sub = self.config.TAU_SUBSTORM * 3600
+        tau_ion = self.config.TAU_IONOSPHERE * 3600
 
-    print("   Simulando reservatórios...")
-    for i in range(1, n):
-        alpha_rc = np.exp(-dt[i] / tau_rc) if dt[i] > 0 else 0
-        alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
-        alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
+        print("   Simulando reservatórios...")
+        for i in range(1, n):
+            alpha_rc = np.exp(-dt[i] / tau_rc) if dt[i] > 0 else 0
+            alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
+            alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
 
-        injection = coupling[i] if not np.isnan(coupling[i]) else 0
+            injection = coupling[i] if not np.isnan(coupling[i]) else 0
 
-        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
-        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
-        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
+            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
+            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
+            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
 
-    hac_total = hac_ring + hac_substorm + hac_ionosphere
-    hac_total = self._safe_normalization(hac_total)
+        hac_total = hac_ring + hac_substorm + hac_ionosphere
+        hac_total = self._safe_normalization(hac_total)
 
-    # Derivada robusta
-    dHAC_dt = self._compute_robust_derivative(hac_total, times)
+        # Derivada robusta
+        dHAC_dt = self._compute_robust_derivative(hac_total, times)
 
-    # Alertas de escalação (mantidos por compatibilidade)
-    escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
-    nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
+        # Alertas
+        escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
+        nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
 
-    # ------------------------------------------------------------
-    # 2. Integração com o modelo físico unificado (hac_core)
-    # ------------------------------------------------------------
-    # Configurar parâmetros calibrados (devem vir de arquivo ou constantes)
-    self.core.config.HAC_REF = 1_250_000.0      # Exemplo – substituir pelo valor calibrado
-    self.core.config.Q_FACTOR = -0.72           # Exemplo – substituir pelo valor calibrado
+        # ------------------------------------------------------------
+        # 2. Modelo físico (HAC CORE)
+        # ------------------------------------------------------------
+        self.core.config.HAC_REF = 1_250_000.0
+        self.core.config.Q_FACTOR = -0.72
 
-    # Processar com o core no modo nowcast
-    core_results = self.core.process(
-        time=times,
-        bz=Bz,
-        v=Vsw,
-        density=density,
-        mode='nowcast'
-    )
+        core_results = self.core.process(
+            time=times,
+            bz=Bz,
+            v=Vsw,
+            density=density,
+            mode='nowcast'
+        )
 
-    # ------------------------------------------------------------
-    # 3. Armazenar todos os resultados
-    # ------------------------------------------------------------
-    self.results.update({
+        # ------------------------------------------------------------
+        # 3. Armazenar resultados
+        # ------------------------------------------------------------
+        self.results.update({
             'time': times,
             'HAC_total': hac_total,
             'HAC_ring': hac_ring,
@@ -350,7 +348,7 @@ class ProductionHACModel:
             'escalation_alert': escalation_flags,
             'nowcast_inertia_growth': nowcast_growth,
 
-            # Novos campos vindos do core
+            # Core físico
             'Dst_physical': core_results['Dst_pred'],
             'Dst_min_physical': core_results['Dst_min'],
             'Dst_now': core_results['Dst_now'],
@@ -367,7 +365,7 @@ class ProductionHACModel:
         """Calcula delta-t com proteção"""
         n = len(times)
         dt = np.full(n, 60.0)
-        
+
         if n > 1:
             for i in range(1, n):
                 try:
@@ -375,25 +373,30 @@ class ProductionHACModel:
                     dt[i] = max(delta, 1.0)
                 except:
                     dt[i] = 60.0
-            
-            dt[0] = dt[1] if n > 1 else 60.0
-        
-       return dt
-    
+
+            dt[0] = dt[1]
+
+        return dt
+
     def _safe_normalization(self, values):
         """Normalização que NUNCA gera NaN"""
         max_val = np.nanmax(values) if len(values) > 0 else 1.0
-        
+
         if max_val > 0:
             normalized = values / max_val * self.config.HAC_SCALE_MAX
         else:
             normalized = np.zeros_like(values)
-        
-        normalized = np.nan_to_num(normalized, nan=0.0, posinf=self.config.HAC_SCALE_MAX, neginf=0.0)
-        
+
+        normalized = np.nan_to_num(
+            normalized,
+            nan=0.0,
+            posinf=self.config.HAC_SCALE_MAX,
+            neginf=0.0
+        )
+
         print(f"   • HAC máximo: {np.max(normalized):.1f}")
         print(f"   • HAC médio: {np.mean(normalized):.1f}")
-        
+
         return normalized
     
     def _compute_robust_derivative(self, hac_total, times):
