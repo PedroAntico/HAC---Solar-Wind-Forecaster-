@@ -334,10 +334,10 @@ class ProductionHACModel:
         mode='nowcast'
     )
 
-        # ------------------------------------------------------------
-        # 3. Armazenar todos os resultados
-        # ------------------------------------------------------------
-        self.results.update({
+    # ------------------------------------------------------------
+    # 3. Armazenar todos os resultados
+    # ------------------------------------------------------------
+    self.results.update({
             'time': times,
             'HAC_total': hac_total,
             'HAC_ring': hac_ring,
