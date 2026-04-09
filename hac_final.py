@@ -766,47 +766,49 @@ class ProductionHACModel:
 
 return kp_pred, dst_pred, enhanced_levels   # <-- Deve estar indentado aqui
 
-    def generate_nowcast_report(self):
+def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
+
         if not self.nowcast_alerts:
             nowcast_summary = "Nenhum alerta de escalação detectado."
         else:
             nowcast_summary = f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
             nowcast_summary += f"Triggers principais: {len(self.escalation_triggers)}\n\n"
-        
+
         # Análise de classificação Nowcast
         if self.classification_logs:
             nowcast_escalations = sum(1 for log in self.classification_logs if log['escalation'])
             nowcast_g4g5 = sum(1 for log in self.classification_logs if log['severity'] >= 4)
-            
+
             nowcast_summary += f"CLASSIFICAÇÃO NOWCAST:\n"
             nowcast_summary += f"• Escalações Nowcast: {nowcast_escalations}\n"
             nowcast_summary += f"• Eventos G4/G5 Nowcast: {nowcast_g4g5}\n"
-            
-            # Últimas escalações
+
             recent_escalations = [log for log in self.classification_logs[-10:] if log['escalation']]
             if recent_escalations:
                 nowcast_summary += "\nÚLTIMAS ESCALAÇÕES:\n"
                 for log in recent_escalations[-3:]:
-                    nowcast_summary += (f"• HAC={log['hac']:.1f}, dH/dt={log['dhdt']:.1f} nT/h, "
-                                      f"Bz={log['bz']:.1f} nT: {log['base_level']} → {log['final_level']}\n")
-        
-        report = "="*70 + "\n"
+                    nowcast_summary += (
+                        f"• HAC={log['hac']:.1f}, dH/dt={log['dhdt']:.1f} nT/h, "
+                        f"Bz={log['bz']:.1f} nT: {log['base_level']} → {log['final_level']}\n"
+                    )
+
+        report = "=" * 70 + "\n"
         report += "🚨 RELATÓRIO NOWCAST + INÉRCIA (Escalação de Tempestades)\n"
-        report += "="*70 + "\n\n"
-        
+        report += "=" * 70 + "\n\n"
+
         report += nowcast_summary + "\n"
-        
+
         report += "PARÂMETROS CRÍTICOS:\n"
         report += f"  • τ_eff (tempo de resposta): {self.config.TAU_EFFECTIVE} horas\n"
         report += f"  • Θ (limiar crescimento): {self.config.THETA_CRITICAL} nT/h\n"
         report += f"  • H_G3 threshold: {self.config.HG3_THRESHOLD}\n"
         report += f"  • Bz crítico: < {self.config.BZ_CRITICAL} nT\n"
         report += f"  • V crítico: > {self.config.VSW_CRITICAL} km/s\n\n"
-        
+
         if self.escalation_triggers:
             report += "ALERTAS PRINCIPAIS:\n"
-            report += "-"*40 + "\n"
+            report += "-" * 40 + "\n"
             for i, alert in enumerate(self.escalation_triggers, 1):
                 report += f"{i}. {alert['time']}:\n"
                 report += f"   HAC = {alert['HAC']:.1f} (abaixo de G3)\n"
@@ -814,14 +816,14 @@ return kp_pred, dst_pred, enhanced_levels   # <-- Deve estar indentado aqui
                 report += f"   Bz médio = {alert['Bz_avg']:.1f} nT\n"
                 report += f"   V médio = {alert['V_avg']:.1f} km/s\n"
                 report += f"   Horizonte de previsão: {alert['forecast_horizon_hours']:.1f} horas\n\n"
-        
+
         report += "EXPLICAÇÃO FÍSICA:\n"
         report += "O modelo Nowcast + Inércia detecta condições onde o reservatório\n"
         report += "magnetosférico está abaixo do limiar G3 mas com taxa de crescimento\n"
         report += "crítica, indicando carregamento rápido que pode evoluir para\n"
         report += "tempestades severas (G4/G5) em 2-6 horas.\n"
-        report += "="*70
-        
+        report += "=" * 70
+
         return report
     
     def get_current_assessment(self):
