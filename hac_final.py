@@ -334,10 +334,10 @@ class ProductionHACModel:
         mode='nowcast'
     )
 
-    # ------------------------------------------------------------
-    # 3. Armazenar todos os resultados
-    # ------------------------------------------------------------
-    self.results.update({
+        # ------------------------------------------------------------
+        # 3. Armazenar todos os resultados
+        # ------------------------------------------------------------
+        self.results.update({
             'time': times,
             'HAC_total': hac_total,
             'HAC_ring': hac_ring,
@@ -361,7 +361,8 @@ class ProductionHACModel:
         })
 
         self._validate_output(hac_total)
-            return hac_total
+        
+        return hac_total 
 
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
