@@ -764,7 +764,7 @@ class ProductionHACModel:
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
 
-        return kp_pred, dst_pred, enhanced_levels
+    return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
