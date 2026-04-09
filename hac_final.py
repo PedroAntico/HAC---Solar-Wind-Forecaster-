@@ -826,7 +826,7 @@ def generate_nowcast_report(self):
 
         return report
     
-    def get_current_assessment(self):
+def get_current_assessment(self):
         """Retorna avaliação detalhada do momento atual"""
         if not self.results or 'Storm_level' not in self.results:
             return None
