@@ -77,9 +77,9 @@ class HACPhysicsConfig:
     TAU_EFFECTIVE = 2.0          # τ_eff para modelo Nowcast+Inércia
     
     #PARÂMETROS DE SATURAÇÃO FÍSICA
-    E_FIELD_SATURATION = 25,0    # mV/m - Saturação OBSERVACIONAL
+    E_FIELD_SATURATION = 25.0    # mV/m - Saturação OBSERVACIONAL
     KP_SATURATION = 8.0          # Saturação do índice Kp
-    RING_CURRENT_MAX = 500,0     # nT - Saturação da corrente do anel
+    RING_CURRENT_MAX = 500.0     # nT - Saturação da corrente do anel
     
     # COEFICIENTES DE PARTICIONAMENTO (soma = 1,0)
     ALPHA_RING = 0.4            # Fração para corrente de anel
@@ -91,8 +91,8 @@ class HACPhysicsConfig:
     COUPLING_THRESHOLD = 5.0    # mV/m - Limiar para não-linearidade
     
     # ESCALAS OPERACIONAIS
-    HAC_SCALE_MAX = 500,0
-    KP_SCALE = 9,0
+    HAC_SCALE_MAX = 500.0
+    KP_SCALE = 9.0
     
     # LIMITES FÍSICOS
     VSW_MIN, VSW_MAX = 200, 1500 # km/s200, 1500      # km/s
@@ -100,8 +100,8 @@ class HACPhysicsConfig:
     BZ_MIN, BZ_MAX = -100, 100 # nT100, 100        # nT
     
     # NOWCAST + PARÂMETROS DE INÉRCIA# NOWCAST + INÉRCIA PARAMETERS
-    THETA_CRITICAL = 50,0 # nT/h - Limiar de crescimento crítico50.0      # nT/h - Limiar de crescimento crítico
-    HG3_THRESHOLD = 150,0 # Limiar G3150.0      # Limiar G3
+    THETA_CRITICAL = 50.0 # nT/h - Limiar de crescimento crítico50.0      # nT/h - Limiar de crescimento crítico
+    HG3_THRESHOLD = 150.0 # Limiar G3150.0      # Limiar G3
     VSW_CRITICAL = 700.0       # km/s
     BZ_CRITICAL = -8.0         # nT
     
