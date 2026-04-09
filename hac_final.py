@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
 from scipy.signal import savgol_filter
+from hac_core import HACCoreModel, HACCoreConfig
 warnings.filterwarnings('ignore')
 
 # ============================
@@ -264,75 +265,103 @@ class ProductionHACModel:
     
     def __init__(self, config=None):
         self.config = config or HACPhysicsConfig()
+        self.core = HACCoreModel()          # ← novo
         self.results = {}
         self.nowcast_alerts = []
         self.escalation_triggers = []
         self.classification_logs = []
     
     def compute_hac_system(self, df):
-        """Sistema HAC+ completo com tratamento numérico robusto"""
-        print("\n⚡ Calculando sistema HAC+...")
-        
-        times = pd.to_datetime(df['time_tag']).values
-        coupling = df['coupling_signal'].fillna(0).values
-        Bz = df['bz_gsm'].fillna(0).values
-        Vsw = df['speed'].fillna(400).values
-        
-        dt = self._safe_deltat(times)
-        
-        n = len(times)
-        hac_ring = np.zeros(n)
-        hac_substorm = np.zeros(n)
-        hac_ionosphere = np.zeros(n)
-        
-        tau_rc = self.config.TAU_RING_CURRENT * 3600
-        tau_sub = self.config.TAU_SUBSTORM * 3600
-        tau_ion = self.config.TAU_IONOSPHERE * 3600
-        
-        print("   Simulando reservatórios...")
-        for i in range(1, n):
-            alpha_rc = np.exp(-dt[i] / tau_rc) if dt[i] > 0 else 0
-            alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
-            alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
-            
-            injection = coupling[i] if not np.isnan(coupling[i]) else 0
-            
-            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
-            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
-            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
-        
-        hac_total = hac_ring + hac_substorm + hac_ionosphere
-        
-        hac_total = self._safe_normalization(hac_total)
-        
-        # NOWCAST + INÉRCIA: Calcular derivada robusta
-        dHAC_dt = self._compute_robust_derivative(hac_total, times)
-        
-        # Detectar alertas de escalação
-        escalation_flags = self._detect_escalation_triggers(
-            hac_total, dHAC_dt, Bz, Vsw, times
-        )
-        
-        # Calcular crescimento Nowcast + Inércia
-        nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
-        
-        self.results.update({
-            'time': times,
-            'HAC_total': hac_total,
-            'HAC_ring': hac_ring,
-            'HAC_substorm': hac_substorm,
-            'HAC_ionosphere': hac_ionosphere,
-            'Bz': Bz,
-            'Vsw': Vsw,
-            'coupling_signal': coupling,
-            'dHAC_dt': dHAC_dt,
-            'escalation_alert': escalation_flags,
-            'nowcast_inertia_growth': nowcast_growth
-        })
-        
-        self._validate_output(hac_total)
-        
-        return hac_total
+    """Sistema HAC+ completo com integração ao modelo físico unificado (hac_core)"""
+    print("\n⚡ Calculando sistema HAC+...")
+
+    # ------------------------------------------------------------
+    # 1. Cálculo tradicional do HAC (reservatórios)
+    # ------------------------------------------------------------
+    times = pd.to_datetime(df['time_tag']).values
+    coupling = df['coupling_signal'].fillna(0).values
+    Bz = df['bz_gsm'].fillna(0).values
+    Vsw = df['speed'].fillna(400).values
+    density = df['density'].fillna(5).values if 'density' in df.columns else None
+
+    dt = self._safe_deltat(times)
+
+    n = len(times)
+    hac_ring = np.zeros(n)
+    hac_substorm = np.zeros(n)
+    hac_ionosphere = np.zeros(n)
+
+    tau_rc = self.config.TAU_RING_CURRENT * 3600
+    tau_sub = self.config.TAU_SUBSTORM * 3600
+    tau_ion = self.config.TAU_IONOSPHERE * 3600
+
+    print("   Simulando reservatórios...")
+    for i in range(1, n):
+        alpha_rc = np.exp(-dt[i] / tau_rc) if dt[i] > 0 else 0
+        alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
+        alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
+
+        injection = coupling[i] if not np.isnan(coupling[i]) else 0
+
+        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
+        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
+        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
+
+    hac_total = hac_ring + hac_substorm + hac_ionosphere
+    hac_total = self._safe_normalization(hac_total)
+
+    # Derivada robusta
+    dHAC_dt = self._compute_robust_derivative(hac_total, times)
+
+    # Alertas de escalação (mantidos por compatibilidade)
+    escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
+    nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
+
+    # ------------------------------------------------------------
+    # 2. Integração com o modelo físico unificado (hac_core)
+    # ------------------------------------------------------------
+    # Configurar parâmetros calibrados (devem vir de arquivo ou constantes)
+    self.core.config.HAC_REF = 1_250_000.0      # Exemplo – substituir pelo valor calibrado
+    self.core.config.Q_FACTOR = -0.72           # Exemplo – substituir pelo valor calibrado
+
+    # Processar com o core no modo nowcast
+    core_results = self.core.process(
+        time=times,
+        bz=Bz,
+        v=Vsw,
+        density=density,
+        mode='nowcast'
+    )
+
+    # ------------------------------------------------------------
+    # 3. Armazenar todos os resultados
+    # ------------------------------------------------------------
+    self.results.update({
+        'time': times,
+        'HAC_total': hac_total,
+        'HAC_ring': hac_ring,
+        'HAC_substorm': hac_substorm,
+        'HAC_ionosphere': hac_ionosphere,
+        'Bz': Bz,
+        'Vsw': Vsw,
+        'coupling_signal': coupling,
+        'dHAC_dt': dHAC_dt,
+        'escalation_alert': escalation_flags,
+        'nowcast_inertia_growth': nowcast_growth,
+
+        # Novos campos vindos do core
+        'Dst_physical': core_results['Dst_pred'],
+        'Dst_min_physical': core_results['Dst_min'],
+        'Dst_now': core_results['Dst_now'],
+        'dDst_dt': core_results['dDst_dt'],
+        'forecast': core_results['forecast'],
+        'core_probabilities': core_results['probabilities'],
+        'core_severity': core_results['severity']
+    })
+
+    self._validate_output(hac_total)
+
+    return hac_total
     
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
@@ -652,79 +681,95 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-        """Predição robusta de indicadores de tempestade COM CLASSIFICAÇÃO HÍBRIDA"""
-        print("\n🌍 Predizendo indicadores (com Nowcast)...")
-        
-        # 1. Kp COM SATURAÇÃO
-        kp_pred = 9 * np.tanh(hac_values / 180)
-        
-        # 2. Dst EQUIVALENTE
-        dst_pred = -350 * (hac_values / 300) ** 1.2
-        
-        # 3. CLASSIFICAÇÃO HÍBRIDA NOAA + NOWCAST
-        storm_levels = []
-        decision_logs = []
-        
-        # Obter arrays necessários
-        dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
-        Bz = self.results.get('Bz', np.zeros_like(hac_values))
-        Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
-        
-        escalation_count = 0
-        g4g5_nowcast_count = 0
-        
-        for i in range(len(hac_values)):
-            # Classificação híbrida
-            level, decision_info = self._classify_storm_with_nowcast(
-                hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
-            )
-            
-            storm_levels.append(level)
-            decision_logs.append(decision_info)
-            
-            if decision_info['escalation']:
-                escalation_count += 1
-            
-            if "G4" in level or "G5" in level:
-                g4g5_nowcast_count += 1
-        
-        # 4. ANÁLISE DE TENDÊNCIA (look-ahead de 3 horas)
-        # Se crescimento acelerado, aplicar boost adicional
-        enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
-        
-        # 5. ARMAZENAR
-        self.results.update({
-            'Kp_pred': kp_pred,
-            'Dst_pred': dst_pred,
-            'Storm_level': enhanced_levels,  # Usa níveis com boost de tendência
-            'Storm_level_base': storm_levels,  # Mantém versão base
-            'Decision_logs': decision_logs
-        })
-        
-        self.classification_logs = decision_logs
-        
-        # 6. ESTATÍSTICAS DETALHADAS
-        g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
-        g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
-        g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
-        
-        print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
-        print(f"   • Dst mínimo: {np.min(dst_pred):.1f} nT")
-        print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
-        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
-        print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
-        print(f"   • Escalações Nowcast: {escalation_count}")
-        
-        # Detectar picos de crescimento extremo
-        extreme_growth = np.where(dHAC_dt > 100)[0]
-        if len(extreme_growth) > 0:
-            print(f"   ⚠️  {len(extreme_growth)} pontos com dH/dt > 100 nT/h")
-            for idx in extreme_growth[-3:]:  # Últimos 3 picos
-                print(f"     → {self.results['time'][idx]}: "
-                      f"dH/dt={dHAC_dt[idx]:.0f} nT/h, "
-                      f"Bz={Bz[idx]:.1f} nT")
-        
-        return kp_pred, dst_pred, enhanced_levels
+    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+    print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
+
+    # 1. Kp com saturação (mantido)
+    kp_pred = 9 * np.tanh(hac_values / 180)
+
+    # 2. Dst físico (vindo do core) – substitui a fórmula antiga
+    dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
+    dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
+    dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
+
+    # 3. Classificação híbrida (combinando severidade do core e nowcast)
+    storm_levels = []
+    decision_logs = []
+
+    dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
+    Bz = self.results.get('Bz', np.zeros_like(hac_values))
+    Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
+
+    escalation_count = 0
+    g4g5_nowcast_count = 0
+
+    # Se o core já forneceu severidade (0-5), podemos usá-la como base
+    core_severity = self.results.get('core_severity', 0)
+
+    for i in range(len(hac_values)):
+        # Classificação híbrida original (pode ser mantida ou simplificada)
+        level, decision_info = self._classify_storm_with_nowcast(
+            hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
+        )
+
+        # Opção: substituir pela severidade do core quando disponível
+        if core_severity > 0:
+            # Mapear severidade numérica para label
+            severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
+            level = severity_map.get(core_severity, level)
+
+        storm_levels.append(level)
+        decision_logs.append(decision_info)
+
+        if decision_info['escalation']:
+            escalation_count += 1
+        if "G4" in level or "G5" in level:
+            g4g5_nowcast_count += 1
+
+    # Análise de tendência (boost)
+    enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
+
+    # Armazenar resultados
+    self.results.update({
+        'Kp_pred': kp_pred,
+        'Dst_pred': dst_pred,               # agora é o Dst físico
+        'Dst_min': dst_min,
+        'Dst_now': dst_now,
+        'Storm_level': enhanced_levels,
+        'Storm_level_base': storm_levels,
+        'Decision_logs': decision_logs
+    })
+
+    self.classification_logs = decision_logs
+
+    # Estatísticas
+    g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
+    g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+    g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+
+    print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
+    print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
+    print(f"   • Dst atual: {dst_now:.1f} nT")
+    print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
+    print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
+    print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
+    print(f"   • Escalações Nowcast: {escalation_count}")
+
+    # Previsão (forecast) do core
+    forecast = self.results.get('forecast', {})
+    if forecast:
+        print("   • Previsão Dst:")
+        for h, val in forecast.items():
+            print(f"       {h}: {val:.1f} nT")
+
+    # Probabilidades do core
+    probs = self.results.get('core_probabilities', {})
+    if probs:
+        print("   • Probabilidades (softmax):")
+        for k, v in probs.items():
+            print(f"       {k}: {v*100:.1f}%")
+
+    return kp_pred, dst_pred, enhanced_levels
     
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
