@@ -726,7 +726,7 @@ class ProductionHACModel:
         if "G4" in level or "G5" in level:
             g4g5_nowcast_count += 1
 
-    enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
+        enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
     self.results.update({
         'Kp_pred': kp_pred,
@@ -738,27 +738,27 @@ class ProductionHACModel:
         'Decision_logs': decision_logs
     })
 
-    self.classification_logs = decision_logs
+      self.classification_logs = decision_logs
 
-    g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
-    g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
-    g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+        g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
+        g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+        g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
 
-    print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
-    print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
-    print(f"   • Dst atual: {dst_now:.1f} nT")
-    print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
-    print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
-    print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
-    print(f"   • Escalações Nowcast: {escalation_count}")
+        print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
+        print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
+        print(f"   • Dst atual: {dst_now:.1f} nT")
+        print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
+        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
+        print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
+        print(f"   • Escalações Nowcast: {escalation_count}")
 
-    forecast = self.results.get('forecast', {})
+        forecast = self.results.get('forecast', {})
         if forecast:
         print("   • Previsão Dst:")
             for h, val in forecast.items():
             print(f"       {h}: {val:.1f} nT")
 
-    probs = self.results.get('core_probabilities', {})
+        probs = self.results.get('core_probabilities', {})
         if probs:
         print("   • Probabilidades (softmax):")
             for k, v in probs.items():
