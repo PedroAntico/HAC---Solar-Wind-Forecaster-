@@ -360,7 +360,7 @@ class ProductionHACModel:
 
             core_results['Dst_min'] = np.min(core_results['Dst_pred'])
             core_results['Dst_now'] = core_results['Dst_pred'][-1]
-
+)
         # ------------------------------------------------------------
         # 3. Armazenar resultados
         # ------------------------------------------------------------
