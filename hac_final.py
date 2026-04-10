@@ -684,84 +684,84 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+        """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
-    print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
+        print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
-    kp_pred = 9 * np.tanh(hac_values / 180)
+        kp_pred = 9 * np.tanh(hac_values / 180)
 
-    dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
-    dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
-    dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
+        dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
+        dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
+        dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
 
-    storm_levels = []
-    decision_logs = []
+        storm_levels = []
+        decision_logs = []
 
-    dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
-    Bz = self.results.get('Bz', np.zeros_like(hac_values))
-    Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
+        dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
+        Bz = self.results.get('Bz', np.zeros_like(hac_values))
+        Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
-    escalation_count = 0
-    g4g5_nowcast_count = 0
+        escalation_count = 0
+        g4g5_nowcast_count = 0
 
-    core_severity = self.results.get('core_severity', 0)
+        core_severity = self.results.get('core_severity', 0)
 
-    for i in range(len(hac_values)):
-        level, decision_info = self._classify_storm_with_nowcast(
-            hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
+        for i in range(len(hac_values)):
+            level, decision_info = self._classify_storm_with_nowcast(
+                hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
         )
 
-        if core_severity > 0:
-            severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
-            level = severity_map.get(core_severity, level)
+            if core_severity > 0:
+                severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
+                level = severity_map.get(core_severity, level)
 
-        storm_levels.append(level)
-        decision_logs.append(decision_info)
+            storm_levels.append(level)
+            decision_logs.append(decision_info)
 
-        if decision_info['escalation']:
+            if decision_info['escalation']:
             escalation_count += 1
-        if "G4" in level or "G5" in level:
+            if "G4" in level or "G5" in level:
             g4g5_nowcast_count += 1
 
-    enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
+        enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
-    self.results.update({
-        'Kp_pred': kp_pred,
-        'Dst_pred': dst_pred,
-        'Dst_min': dst_min,
-        'Dst_now': dst_now,
-        'Storm_level': enhanced_levels,
-        'Storm_level_base': storm_levels,
-        'Decision_logs': decision_logs
+        self.results.update({
+            'Kp_pred': kp_pred,
+            'Dst_pred': dst_pred,
+            'Dst_min': dst_min,
+            'Dst_now': dst_now,
+            'Storm_level': enhanced_levels,
+            'Storm_level_base': storm_levels,
+            'Decision_logs': decision_logs
     })
 
-    self.classification_logs = decision_logs
+        self.classification_logs = decision_logs
 
-    g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
-    g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
-    g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+        g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
+        g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+        g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
 
-    print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
-    print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
-    print(f"   • Dst atual: {dst_now:.1f} nT")
-    print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
-    print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
-    print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
-    print(f"   • Escalações Nowcast: {escalation_count}")
+        print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
+        print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
+        print(f"   • Dst atual: {dst_now:.1f} nT")
+        print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
+        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
+        print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
+        print(f"   • Escalações Nowcast: {escalation_count}")
 
-    forecast = self.results.get('forecast', {})
-    if forecast:
-        print("   • Previsão Dst:")
-        for h, val in forecast.items():
-            print(f"       {h}: {val:.1f} nT")
+        forecast = self.results.get('forecast', {})
+        if forecast:
+            print("   • Previsão Dst:")
+            for h, val in forecast.items():
+                print(f"       {h}: {val:.1f} nT")
 
-    probs = self.results.get('core_probabilities', {})
-    if probs:
-        print("   • Probabilidades (softmax):")
-        for k, v in probs.items():
-            print(f"       {k}: {v*100:.1f}%")
+        probs = self.results.get('core_probabilities', {})
+        if probs:
+            print("   • Probabilidades (softmax):")
+            for k, v in probs.items():
+                print(f"       {k}: {v*100:.1f}%")
 
-    return kp_pred, dst_pred, enhanced_levels
+        return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
