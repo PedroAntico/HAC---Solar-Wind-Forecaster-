@@ -87,7 +87,7 @@ class HACPhysicsConfig:
     ALPHA_IONOSPHERE = 0.3      # Fração para ionosfera
     
     # PARÂMETROS NÃO LINEARES
-    BETA_NONLINEAR = 1.5        # Expoente de resposta não linear
+    BETA_NONLINEAR = 1.8        # Expoente de resposta não linear
     COUPLING_THRESHOLD = 5.0    # mV/m - Limiar para não-linearidade
     
     # ESCALAS OPERACIONAIS
@@ -302,7 +302,15 @@ class ProductionHACModel:
             alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
             alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
 
-            injection = coupling[i] if not np.isnan(coupling[i]) else 0
+            injection = coupling[i]
+
+            # 🔥 BOOST NÃO LINEAR REALISTA
+            if Bz[i] < -10 and Vsw[i] > 600:
+            injection *= 1.8
+
+            if Bz[i] < -15 and Vsw[i] > 700:
+            injection *= 2.5
+            
 
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
@@ -321,8 +329,8 @@ class ProductionHACModel:
         # ------------------------------------------------------------
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
-        self.core.config.HAC_REF = 8e8
-        self.core.config.Q_FACTOR = -0.0025
+        self.core.config.HAC_REF = 300.0
+        self.core.config.Q_FACTOR = -0.0015
 
         core_results = self.core.process(
             time=times,
