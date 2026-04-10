@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.0002
+        self.core.config.Q_FACTOR = -0.002
 
         core_results = self.core.process(
             time=times,
@@ -417,6 +417,8 @@ class ProductionHACModel:
         else:
             try:
                 window = min(7, len(hac_total))
+                if window < 3:
+                    return np.gradient(hac_total) / dt_hours
                 if window % 2 == 0:
                     window -= 1
 
@@ -639,13 +641,13 @@ class ProductionHACModel:
             hac_increase = hac_values[i] - hac_values[i-window]
             
             # Boost para G5 se crescimento extremo
-            if max_dhdt > 220 and mean_dhdt > 70 and hac_increase > 120:
+            if max_dhdt > 220 and mean_dhdt > 100 and hac_increase > 150:
                 current = storm_levels[i]
                 if "G5" not in current:
                     enhanced_levels[i] = "G5 (Trend Boost)"
             
             # Boost para G4 se crescimento forte
-            elif max_dhdt > 200 and mean_dhdt > 60 and hac_increase > 100:
+            elif max_dhdt > 200 and mean_dhdt > 80 and hac_increase > 120:
                 current = storm_levels[i]
                 if "G4" not in current and "G5" not in current:
                     enhanced_levels[i] = "G4 (Trend Boost)"
@@ -659,7 +661,7 @@ class ProductionHACModel:
         count = 1
     
         for i in range(1, len(levels)):
-         if levels[i] == current:
+            if levels[i] == current:
             count += 1
          else:
               if count < min_duration:
@@ -707,9 +709,18 @@ class ProductionHACModel:
         core_severity = self.results.get('core_severity', 0)
 
         for i in range(len(hac_values)):
-            level, decision_info = self._classify_storm_with_nowcast(
-                hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
-        )
+    level, decision_info = self._classify_storm_with_nowcast(
+        hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
+    )
+
+        dst = self.results['Dst_physical'][i]
+
+        if dst < -250:
+            level = "G5 (Dst Override)"
+        elif dst < -150:
+            level = "G4 (Dst Override)"
+        elif dst < -100:
+            level = "G3 (Dst Override)"
 
             if core_severity > 0:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
