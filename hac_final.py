@@ -356,10 +356,9 @@ class ProductionHACModel:
         hac = hac_total
         dhdt = dHAC_dt
 
-        dst_from_hac = -0.25 * hac - 1.2 * np.abs(dhdt) - 20.0
+        dst_from_hac = -0.45 * hac - 1.5 * np.abs(dhdt) - 25.0
 
-        core_results['Dst_pred'] = np.clip(core_results['Dst_pred'], -1500, 50)
-
+        core_results['Dst_pred'] = (0.15 * core_results['Dst_pred'] + 0.85 * dst_from_hac)
         core_results['Dst_min'] = np.min(core_results['Dst_pred'])
         core_results['Dst_now'] = core_results['Dst_pred'][-1]
         # ------------------------------------------------------------
