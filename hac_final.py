@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.01
+        self.core.config.Q_FACTOR = -0.004
 
         core_results = self.core.process(
             time=times,
@@ -723,7 +723,7 @@ class ProductionHACModel:
             elif dst < -100:
                 level = "G3 (Dst Override)"
 
-            if core_severity > 0:
+            if core_severity > 0 and "Dst Override" not in level:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
                 level = severity_map.get(core_severity, level)
 
@@ -1395,7 +1395,7 @@ def main():
     try:
         results_df = df.copy()
         for key, value in model.results.items():
-            if key != 'time' and (value) == len(results_df):
+            if key != 'time' and hasattr(value, "__len__") and len(value) == len(results_df):
                 results_df[key] = value
         
         output_file = "hac_nowcast_results.csv"
