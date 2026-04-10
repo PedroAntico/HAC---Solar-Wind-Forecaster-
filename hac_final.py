@@ -762,11 +762,12 @@ class ProductionHACModel:
         print(f"   • Escalações Nowcast: {escalation_count}")
 
         forecast = self.results.get('forecast', {})
-        if forecast:
+
+        if isinstance(forecast, dict) and len(forecast) > 0:
             print("   • Previsão Dst:")
             for h, val in forecast.items():
                 print(f"       {h}: {val:.1f} nT")
-
+        
         probs = self.results.get('core_probabilities', {})
         if probs:
             print("   • Probabilidades (softmax):")
