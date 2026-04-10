@@ -645,7 +645,7 @@ class ProductionHACModel:
                     enhanced_levels[i] = "G5 (Trend Boost)"
             
             # Boost para G4 se crescimento forte
-            elif max_dhdt > 150 and mean_dhdt > 30 and hac_increase > 50:
+            elif max_dhdt > 200 and mean_dhdt > 60 and hac_increase > 100:
                 current = storm_levels[i]
                 if "G4" not in current and "G5" not in current:
                     enhanced_levels[i] = "G4 (Trend Boost)"
