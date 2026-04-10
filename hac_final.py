@@ -400,7 +400,7 @@ class ProductionHACModel:
         max_val = np.nanmax(values) if values.size > 0 else 1.0
 
         if max_val > 0:
-            normalized = values / HAC_REF * self.config.HAC_SCALE_MAX
+            normalized = values / self.config.HAC_REF * self.config.HAC_SCALE_MAX
         else:
             normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
 
