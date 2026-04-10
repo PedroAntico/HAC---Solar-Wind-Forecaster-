@@ -662,7 +662,7 @@ class ProductionHACModel:
     
         for i in range(1, len(levels)):
             if levels[i] == current:
-            count += 1
+                count += 1
          else:
               if count < min_duration:
                 fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
