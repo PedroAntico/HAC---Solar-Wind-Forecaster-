@@ -738,7 +738,7 @@ class ProductionHACModel:
         'Decision_logs': decision_logs
     })
 
-        self.classification_logs = decision_logs
+    self.classification_logs = decision_logs
 
         g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
         g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
