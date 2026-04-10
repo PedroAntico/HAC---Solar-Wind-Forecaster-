@@ -89,6 +89,7 @@ class HACPhysicsConfig:
     # PARÂMETROS NÃO LINEARES
     BETA_NONLINEAR = 1.8        # Expoente de resposta não linear
     COUPLING_THRESHOLD = 5.0    # mV/m - Limiar para não-linearidade
+    HAC_REF = 300.00
     
     # ESCALAS OPERACIONAIS
     HAC_SCALE_MAX = 1200.0
@@ -313,12 +314,12 @@ class ProductionHACModel:
             # Peso menor e controlado
             injection += 0.25 * forcing
 
-            if Bz[i] < -10:
-                injection *= 1.3
+            if Bz[i] < -20:
+                injection *= 2.0
             elif Bz[i] < -15:
                 injection *= 1.6
-            elif Bz[i] < -20:
-                injection *= 2.0
+            elif Bz[i] < -10:
+                injection *= 1.3
             
 
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
@@ -347,7 +348,18 @@ class ProductionHACModel:
             v=Vsw,
             density=density,
             mode='nowcast'
-        )
+            hac = hac_total
+            dhdt = dHAC_dt
+
+            dst_from_hac = -0.95 * hac - 2.2 * np.abs(dhdt) - 35.0
+
+            core_results['Dst_pred'] = (
+                0.3 * core_results['Dst_pred'] +
+                0.7 * dst_from_hac
+)
+
+            core_results['Dst_min'] = np.min(core_results['Dst_pred'])
+            core_results['Dst_now'] = core_results['Dst_pred'][-1]
 
         # ------------------------------------------------------------
         # 3. Armazenar resultados
@@ -402,7 +414,7 @@ class ProductionHACModel:
         if max_val > 0:
             normalized = values / self.config.HAC_REF * self.config.HAC_SCALE_MAX
         else:
-            normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
+            normalized = np.zeros_like(values)
 
         normalized = np.nan_to_num(
             normalized,
