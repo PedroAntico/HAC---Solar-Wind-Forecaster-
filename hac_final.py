@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.0001
+        self.core.config.Q_FACTOR = -0.0005
 
         core_results = self.core.process(
             time=times,
@@ -569,17 +569,17 @@ class ProductionHACModel:
         final_severity = base_severity
         
         # Escalação baseada no score Nowcast
-        if nowcast_score >= 12:
+        if nowcast_score >= 13:
             # Condições extremas - forçar G5
             if base_severity < 5:
                 final_level = "G5 (Nowcast Override)"
                 final_severity = 5
-        elif nowcast_score >= 9:
+        elif nowcast_score >= 12:
             # Condições muito fortes - forçar G4
             if base_severity < 4:
                 final_level = "G4 (Nowcast Override)"
                 final_severity = 4
-        elif nowcast_score >= 7:
+        elif nowcast_score >= 10:
             # Condições fortes - forçar G3
             if base_severity < 3:
                 final_level = "G3 (Nowcast Override)"
@@ -900,7 +900,7 @@ class ProductionVisualizer:
                     else:
                         colors.append('#1E90FF')  # Azul dodger
             else:
-                colors = ['#d62728'] * len(hac)
+                colors = ['#d62728'] * (hac)
             
             # Plotar com cores variadas
             for i in range(len(hac)-1):
@@ -1382,7 +1382,7 @@ def main():
     try:
         results_df = df.copy()
         for key, value in model.results.items():
-            if key != 'time' and len(value) == len(results_df):
+            if key != 'time' and (value) == len(results_df):
                 results_df[key] = value
         
         output_file = "hac_nowcast_results.csv"
