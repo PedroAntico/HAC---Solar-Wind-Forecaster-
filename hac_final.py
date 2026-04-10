@@ -307,18 +307,18 @@ class ProductionHACModel:
             # 🔥 FORÇANTE DIRETA (ESSENCIAL)
             forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
 
-            # Peso da forçante
-            injection += 0.5 * forcing
+            # Normaliza a forçante (ESSENCIAL)
+            forcing = forcing / self.config.E_FIELD_SATURATION
 
-            # NÃO LINEARIDADE REALISTA
+            # Peso menor e controlado
+            injection += 0.25 * forcing
+
             if Bz[i] < -10:
-                injection *= 1.5
-
-            if Bz[i] < -15:
-                injection *= 2.2
-
-            if Bz[i] < -20:
-                injection *= 3.0
+                injection *= 1.3
+            elif Bz[i] < -15:
+                injection *= 1.6
+            elif Bz[i] < -20:
+                injection *= 2.0
             
 
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
@@ -400,9 +400,9 @@ class ProductionHACModel:
         max_val = np.nanmax(values) if values.size > 0 else 1.0
 
         if max_val > 0:
-            normalized = values / max_val * self.config.HAC_SCALE_MAX
+            normalized = values / HAC_REF * self.config.HAC_SCALE_MAX
         else:
-            normalized = np.zeros_like(values)
+            normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
 
         normalized = np.nan_to_num(
             normalized,
@@ -433,7 +433,7 @@ class ProductionHACModel:
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
             try:
-                window = min(5, len(hac_total))
+                window = min(7, len(hac_total))
                 if window < 3:
                     return np.gradient(hac_total) / dt_hours
                 if window % 2 == 0:
@@ -461,7 +461,7 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        dHAC_dt = np.clip(raw_dhdt, -600, 600)
+        dHAC_dt = np.clip(raw_dhdt, -400, 400)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
@@ -588,22 +588,22 @@ class ProductionHACModel:
         final_severity = base_severity
         
         # Escalação baseada no score Nowcast
-        if nowcast_score >= 18:
+        if nowcast_score >= 20:
             # Condições extremas - forçar G5
             if base_severity < 5:
                 final_level = "G5 (Nowcast Override)"
                 final_severity = 5
-        elif nowcast_score >= 15:
+        elif nowcast_score >= 18:
             # Condições muito fortes - forçar G4
             if base_severity < 4:
                 final_level = "G4 (Nowcast Override)"
                 final_severity = 4
-        elif nowcast_score >= 12:
+        elif nowcast_score >= 14:
             # Condições fortes - forçar G3
             if base_severity < 3:
                 final_level = "G3 (Nowcast Override)"
                 final_severity = 3
-        elif nowcast_score >= 5:
+        elif nowcast_score >= 10:
             # Condições moderadas - forçar G2
             if base_severity < 2:
                 final_level = "G2 (Nowcast Enhancement)"
