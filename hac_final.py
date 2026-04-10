@@ -77,9 +77,9 @@ class HACPhysicsConfig:
     TAU_EFFECTIVE = 2.0          # τ_eff para modelo Nowcast+Inércia
     
     #PARÂMETROS DE SATURAÇÃO FÍSICA
-    E_FIELD_SATURATION = 25.0    # mV/m - Saturação OBSERVACIONAL
+    E_FIELD_SATURATION = 35.0    # mV/m - Saturação OBSERVACIONAL
     KP_SATURATION = 8.0          # Saturação do índice Kp
-    RING_CURRENT_MAX = 500.0     # nT - Saturação da corrente do anel
+    RING_CURRENT_MAX = 800.0     # nT - Saturação da corrente do anel
     
     # COEFICIENTES DE PARTICIONAMENTO (soma = 1,0)
     ALPHA_RING = 0.4            # Fração para corrente de anel
@@ -91,7 +91,7 @@ class HACPhysicsConfig:
     COUPLING_THRESHOLD = 5.0    # mV/m - Limiar para não-linearidade
     
     # ESCALAS OPERACIONAIS
-    HAC_SCALE_MAX = 500.0
+    HAC_SCALE_MAX = 1200.0
     KP_SCALE = 9.0
     
     # LIMITES FÍSICOS
@@ -106,9 +106,9 @@ class HACPhysicsConfig:
     BZ_CRITICAL = -8.0         # nT
     
     # PARÂMETROS CLASSIFICAÇÃO HÍBRIDA
-    DHDT_G5_THRESHOLD = 200.0   # nT/h para G5
-    DHDT_G4_THRESHOLD = 150.0   # nT/h para G4
-    DHDT_G3_THRESHOLD = 100.0   # nT/h para G3
+    DHDT_G5_THRESHOLD = 150.0   # nT/h para G5
+    DHDT_G4_THRESHOLD = 100.0   # nT/h para G4
+    DHDT_G3_THRESHOLD = 80.0   # nT/h para G3
     BZ_G5_THRESHOLD = -15.0     # nT para G5
     BZ_G4_THRESHOLD = -10.0     # nT para G4
     BZ_G3_THRESHOLD = -8.0      # nT para G3
@@ -433,7 +433,7 @@ class ProductionHACModel:
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
             try:
-                window = min(7, len(hac_total))
+                window = min(5, len(hac_total))
                 if window < 3:
                     return np.gradient(hac_total) / dt_hours
                 if window % 2 == 0:
@@ -461,7 +461,7 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        dHAC_dt = np.clip(raw_dhdt, -400, 400)
+        dHAC_dt = np.clip(raw_dhdt, -600, 600)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
