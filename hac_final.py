@@ -686,7 +686,7 @@ class ProductionHACModel:
     def predict_storm_indicators(self, hac_values):
         """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
-    print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
+        print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
     kp_pred = 9 * np.tanh(hac_values / 180)
 
@@ -751,18 +751,18 @@ class ProductionHACModel:
     print(f"   • Escalações Nowcast: {escalation_count}")
 
     forecast = self.results.get('forecast', {})
-        if forecast:
-            print("   • Previsão Dst:")
-            for h, val in forecast.items():
+    if forecast:
+        print("   • Previsão Dst:")
+        for h, val in forecast.items():
             print(f"       {h}: {val:.1f} nT")
 
     probs = self.results.get('core_probabilities', {})
-        if probs:
-            print("   • Probabilidades (softmax):")
-            for k, v in probs.items():
+    if probs:
+        print("   • Probabilidades (softmax):")
+        for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
 
-        return kp_pred, dst_pred, enhanced_levels
+    return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
