@@ -305,11 +305,11 @@ class ProductionHACModel:
             injection = coupling[i]
 
             # 🔥 BOOST NÃO LINEAR REALISTA
-            if Bz[i] < -10 and Vsw[i] > 600:
-            injection *= 1.8
+                if Bz[i] < -10 and Vsw[i] > 600:
+                injection *= 1.8
 
             if Bz[i] < -15 and Vsw[i] > 700:
-            injection *= 2.5
+                injection *= 2.5
             
 
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
