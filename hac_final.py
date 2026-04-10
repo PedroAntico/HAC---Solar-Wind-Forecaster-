@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.002
+        self.core.config.Q_FACTOR = -0.01
 
         core_results = self.core.process(
             time=times,
@@ -769,7 +769,7 @@ class ProductionHACModel:
                 print(f"       {h}: {val:.1f} nT")
         
         probs = self.results.get('core_probabilities', {})
-        if probs:
+        if isinstance(probs, dict) and len(probs) > 0:
             print("   • Probabilidades (softmax):")
             for k, v in probs.items():
                 print(f"       {k}: {v*100:.1f}%")
@@ -779,7 +779,7 @@ class ProductionHACModel:
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
 
-        if not self.nowcast_alerts:
+        if len(self.nowcast_alerts) == 0:
             nowcast_summary = "Nenhum alerta de escalação detectado."
         else:
             nowcast_summary = f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
@@ -838,9 +838,9 @@ class ProductionHACModel:
     
     def get_current_assessment(self):
         """Retorna avaliação detalhada do momento atual"""
-        if not self.results or 'Storm_level' not in self.results:
+        if self.results is None or 'Storm_level' not in self.results:
             return None
-        
+
         idx = -1  # Último ponto
         assessment = {
             'time': self.results['time'][idx],
