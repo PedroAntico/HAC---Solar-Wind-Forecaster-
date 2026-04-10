@@ -351,16 +351,37 @@ class ProductionHACModel:
 )
 
         # ========================================================
-        # 🔥 MAPEAMENTO HAC → Dst (FORA da chamada)
+        # 🔥 MAPEAMENTO HAC → Dst COM GATING FÍSICO (CORRETO)
         # ========================================================
+
         hac = hac_total
         dhdt = dHAC_dt
 
-        dst_from_hac = -0.45 * hac - 1.5 * np.abs(dhdt) - 25.0
+        # Fatores físicos (ESSENCIAL)
+        bz_factor = np.clip((-Bz) / 10.0, 0, 1)
+        v_factor = np.clip((Vsw - 400) / 400, 0, 1)
 
-        core_results['Dst_pred'] = (0.15 * core_results['Dst_pred'] + 0.85 * dst_from_hac)
+        activity = bz_factor * v_factor
+
+        # Mapeamento físico corrigido
+        dst_from_hac = (
+            -0.45 * hac * activity
+            -1.5 * np.abs(dhdt) * activity
+            -25.0
+)
+
+        # Fusão com modelo core
+        core_results['Dst_pred'] = (
+            0.15 * core_results['Dst_pred'] +
+            0.85 * dst_from_hac
+)
+
+        # Atualização final
         core_results['Dst_min'] = np.min(core_results['Dst_pred'])
         core_results['Dst_now'] = core_results['Dst_pred'][-1]
+
+        print(f"   • Dst físico mínimo gerado: {core_results['Dst_min']:.1f} nT")
+
         # ------------------------------------------------------------
         # 3. Armazenar resultados
         # ------------------------------------------------------------
