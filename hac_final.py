@@ -692,7 +692,7 @@ class ProductionHACModel:
 
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
-        dst_now = self.results.get('Dst_now', dst_pred[-1] if float(dst_pred) > 0 else 0)
+        dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
 
         storm_levels = []
         decision_logs = []
