@@ -900,7 +900,7 @@ class ProductionVisualizer:
                     else:
                         colors.append('#1E90FF')  # Azul dodger
             else:
-                colors = ['#d62728'] * (hac)
+                colors = ['#d62728'] * len(hac)
             
             # Plotar com cores variadas
             for i in range(len(hac)-1):
