@@ -684,19 +684,17 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-        """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+    def predict_storm_indicators(self, hac_values):
+    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
     print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
-    # 1. Kp com saturação (mantido)
     kp_pred = 9 * np.tanh(hac_values / 180)
 
-    # 2. Dst físico (vindo do core)
     dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
     dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
     dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
 
-    # 3. Classificação híbrida
     storm_levels = []
     decision_logs = []
 
@@ -726,7 +724,8 @@ class ProductionHACModel:
         if "G4" in level or "G5" in level:
             g4g5_nowcast_count += 1
 
-        enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
+    # ✅ FORA do loop
+    enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
     self.results.update({
         'Kp_pred': kp_pred,
@@ -740,31 +739,31 @@ class ProductionHACModel:
 
     self.classification_logs = decision_logs
 
-        g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
-        g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
-        g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+    g4g5_final_count = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
+    g4g5_base_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+    g4g5_traditional = sum(1 for l in storm_levels if l in ['G4', 'G5'])
 
-        print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
-        print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
-        print(f"   • Dst atual: {dst_now:.1f} nT")
-        print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
-        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
-        print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
-        print(f"   • Escalações Nowcast: {escalation_count}")
+    print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
+    print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
+    print(f"   • Dst atual: {dst_now:.1f} nT")
+    print(f"   • Eventos G4/G5 (tradicional): {g4g5_traditional}")
+    print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base_count}")
+    print(f"   • Eventos G4/G5 (com boost): {g4g5_final_count}")
+    print(f"   • Escalações Nowcast: {escalation_count}")
 
-        forecast = self.results.get('forecast', {})
-        if forecast:
+    forecast = self.results.get('forecast', {})
+    if forecast:
         print("   • Previsão Dst:")
-            for h, val in forecast.items():
+        for h, val in forecast.items():
             print(f"       {h}: {val:.1f} nT")
 
-        probs = self.results.get('core_probabilities', {})
-        if probs:
+    probs = self.results.get('core_probabilities', {})
+    if probs:
         print("   • Probabilidades (softmax):")
-            for k, v in probs.items():
+        for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
 
-        return kp_pred, dst_pred, enhanced_levels
+    return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
         """Gera relatório específico do modelo Nowcast + Inércia"""
