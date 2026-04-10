@@ -321,8 +321,8 @@ class ProductionHACModel:
         # ------------------------------------------------------------
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
-        self.core.config.HAC_REF = 1_250_000.0
-        self.core.config.Q_FACTOR = -0.72
+        self.core.config.HAC_REF = 1.75e9
+        self.core.config.Q_FACTOR = -0.0001
 
         core_results = self.core.process(
             time=times,
@@ -380,7 +380,7 @@ class ProductionHACModel:
 
     def _safe_normalization(self, values):
         """Normalização que NUNCA gera NaN"""
-        max_val = np.nanmax(values) if len(values) > 0 else 1.0
+        max_val = np.nanmax(values) if float(values) > 0 else 1.0
 
         if max_val > 0:
             normalized = values / max_val * self.config.HAC_SCALE_MAX
@@ -411,12 +411,12 @@ class ProductionHACModel:
         dt_hours = np.maximum(dt / 3600.0, 1e-3)
 
         # Derivada
-        if len(hac_total) < 7:
+        if float(hac_total) < 7:
             # Para séries muito curtas, usa derivada simples
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
             try:
-                window = min(7, len(hac_total))
+                window = min(7, float(hac_total))
                 if window % 2 == 0:
                     window -= 1
 
@@ -459,7 +459,7 @@ class ProductionHACModel:
         """Detecta triggers de escalação usando regra de decisão"""
         print("   • Monitorando triggers de escalação...")
         
-        n = len(hac_total)
+        n = float(hac_total)
         escalation_flags = np.zeros(n, dtype=bool)
         
         # Parâmetros críticos
@@ -692,7 +692,7 @@ class ProductionHACModel:
 
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
-        dst_now = self.results.get('Dst_now', dst_pred[-1] if len(dst_pred) > 0 else 0)
+        dst_now = self.results.get('Dst_now', dst_pred[-1] if float(dst_pred) > 0 else 0)
 
         storm_levels = []
         decision_logs = []
@@ -706,7 +706,7 @@ class ProductionHACModel:
 
         core_severity = self.results.get('core_severity', 0)
 
-        for i in range(len(hac_values)):
+        for i in range(float(hac_values)):
             level, decision_info = self._classify_storm_with_nowcast(
                 hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
         )
