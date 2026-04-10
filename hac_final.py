@@ -304,12 +304,21 @@ class ProductionHACModel:
 
             injection = coupling[i]
 
-            # 🔥 BOOST NÃO LINEAR REALISTA
-            if Bz[i] < -10 and Vsw[i] > 600:
-                injection *= 1.8
+            # 🔥 FORÇANTE DIRETA (ESSENCIAL)
+            forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
 
-            if Bz[i] < -15 and Vsw[i] > 700:
-                injection *= 2.5
+            # Peso da forçante
+            injection += 0.5 * forcing
+
+            # NÃO LINEARIDADE REALISTA
+            if Bz[i] < -10:
+                injection *= 1.5
+
+            if Bz[i] < -15:
+                injection *= 2.2
+
+            if Bz[i] < -20:
+                injection *= 3.0
             
 
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
