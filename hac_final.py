@@ -380,7 +380,7 @@ class ProductionHACModel:
 
     def _safe_normalization(self, values):
         """Normalização que NUNCA gera NaN"""
-        max_val = np.nanmax(values) if float(values) > 0 else 1.0
+        max_val = np.nanmax(values) if values.size > 0 else 1.0
 
         if max_val > 0:
             normalized = values / max_val * self.config.HAC_SCALE_MAX
