@@ -684,7 +684,6 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-    def predict_storm_indicators(self, hac_values):
     """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
     print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
