@@ -321,8 +321,8 @@ class ProductionHACModel:
         # ------------------------------------------------------------
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
-        self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.001
+        self.core.config.HAC_REF = 8e8
+        self.core.config.Q_FACTOR = -0.0025
 
         core_results = self.core.process(
             time=times,
@@ -1444,7 +1444,7 @@ def prepare_omni(df):
     return df
 
 
-def euler_dst(df, alpha=5.5, tau=8.0):
+def euler_dst(df, alpha=5.5, tau=7.0):
     """
     Adapter: usa HAC no lugar do Burton.
     Retorna proxy de Dst baseado no HAC.
