@@ -716,12 +716,12 @@ class ProductionHACModel:
 
         dst = self.results['Dst_physical'][i]
 
-        if dst < -250:
-            level = "G5 (Dst Override)"
-        elif dst < -150:
-            level = "G4 (Dst Override)"
-        elif dst < -100:
-            level = "G3 (Dst Override)"
+            if dst < -250:
+                level = "G5 (Dst Override)"
+            elif dst < -150:
+                level = "G4 (Dst Override)"
+            elif dst < -100:
+                level = "G3 (Dst Override)"
 
             if core_severity > 0:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
