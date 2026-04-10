@@ -684,9 +684,9 @@ class ProductionHACModel:
         print("   ✅ Validação passada")
     
     def predict_storm_indicators(self, hac_values):
-        """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
+    """Predição de indicadores utilizando Dst físico do core e classificação híbrida."""
 
-        print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
+    print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
 
     kp_pred = 9 * np.tanh(hac_values / 180)
 
@@ -723,7 +723,6 @@ class ProductionHACModel:
         if "G4" in level or "G5" in level:
             g4g5_nowcast_count += 1
 
-    # ✅ FORA do loop
     enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
     self.results.update({
