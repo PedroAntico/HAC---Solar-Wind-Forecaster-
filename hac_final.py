@@ -411,7 +411,7 @@ class ProductionHACModel:
         dt_hours = np.maximum(dt / 3600.0, 1e-3)
 
         # Derivada
-        if float(hac_total) < 7:
+        if hac_total.size < 7:
             # Para séries muito curtas, usa derivada simples
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
