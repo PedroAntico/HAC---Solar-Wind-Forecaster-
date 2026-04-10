@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.004
+        self.core.config.Q_FACTOR = -0.001
 
         core_results = self.core.process(
             time=times,
@@ -594,15 +594,15 @@ class ProductionHACModel:
         
         # REGRAS ESPECIAIS PARA CONDIÇÕES EXTREMAS
         # Mesmo com HAC baixo, se crescimento for extremo e condições favoráveis
-        if dhdt > 220 and bz < -18 and v > 750 and hac > 100:
+        if dhdt > 220 and bz < -10 and v > 750 and hac > 100:
             if base_severity < 5:
                 final_level = "G5 (Extreme Nowcast)"
                 final_severity = 5
-        elif dhdt > 150 and bz < -15 and v > 650:
+        elif dhdt > 150 and bz < -8 and v > 650:
             if base_severity < 4:
                 final_level = "G4 (Strong Nowcast)"
                 final_severity = 4
-        elif dhdt > 100 and bz < -12 and v > 600 and hac > 50:
+        elif dhdt > 100 and bz < -5 and v > 600 and hac > 50:
             if base_severity < 3:
                 final_level = "G3 (Nowcast Trigger)"
                 final_severity = 3
