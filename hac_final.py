@@ -312,7 +312,7 @@ class ProductionHACModel:
             forcing = forcing / self.config.E_FIELD_SATURATION
 
             # Peso menor e controlado
-            injection += 0.25 * forcing
+            injection += 0.05 * forcing
 
             if Bz[i] < -20:
                 injection *= 2.0
@@ -356,12 +356,9 @@ class ProductionHACModel:
         hac = hac_total
         dhdt = dHAC_dt
 
-        dst_from_hac = -0.95 * hac - 2.2 * np.abs(dhdt) - 35.0
+        dst_from_hac = -0.25 * hac - 1.2 * np.abs(dhdt) - 20.0
 
-        core_results['Dst_pred'] = (
-            0.3 * core_results['Dst_pred'] +
-            0.7 * dst_from_hac
-)
+        core_results['Dst_pred'] = np.clip(core_results['Dst_pred'], -1500, 50)
 
         core_results['Dst_min'] = np.min(core_results['Dst_pred'])
         core_results['Dst_now'] = core_results['Dst_pred'][-1]
@@ -413,10 +410,10 @@ class ProductionHACModel:
 
     def _safe_normalization(self, values):
         """Normalização que NUNCA gera NaN"""
-        max_val = np.nanmax(values) if values.size > 0 else 1.0
+        max_val = np.nanmax(values)
 
         if max_val > 0:
-            normalized = values / self.config.HAC_REF * self.config.HAC_SCALE_MAX
+            normalized = values / max_val * self.config.HAC_SCALE_MAX
         else:
             normalized = np.zeros_like(values)
 
