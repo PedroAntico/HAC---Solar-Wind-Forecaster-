@@ -719,9 +719,9 @@ class ProductionHACModel:
             decision_logs.append(decision_info)
 
             if decision_info['escalation']:
-            escalation_count += 1
+                escalation_count += 1
             if "G4" in level or "G5" in level:
-            g4g5_nowcast_count += 1
+                g4g5_nowcast_count += 1
 
         enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
