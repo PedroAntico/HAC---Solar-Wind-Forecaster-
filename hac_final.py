@@ -96,7 +96,7 @@ class HACPhysicsConfig:
     
     # LIMITES FÍSICOS
     VSW_MIN, VSW_MAX = 200, 1500 # km/s
-    DENSITY_MIN, DENSITY_MAX = 0.1, 100 # cm⁻³0.1, 100  # cm⁻³
+    DENSITY_MIN, DENSITY_MAX = 0.1, 100 # cm^⁻³
     BZ_MIN, BZ_MAX = -100, 100 # nT
     
     # NOWCAST + PARÂMETROS DE INÉRCIA# NOWCAST + INÉRCIA PARAMETERS
@@ -322,7 +322,7 @@ class ProductionHACModel:
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
         self.core.config.HAC_REF = 1.75e9
-        self.core.config.Q_FACTOR = -0.0005
+        self.core.config.Q_FACTOR = -0.0002
 
         core_results = self.core.process(
             time=times,
@@ -416,7 +416,7 @@ class ProductionHACModel:
             dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
             try:
-                window = min(7, float(hac_total))
+                window = min(7, len(hac_total))
                 if window % 2 == 0:
                     window -= 1
 
@@ -569,17 +569,17 @@ class ProductionHACModel:
         final_severity = base_severity
         
         # Escalação baseada no score Nowcast
-        if nowcast_score >= 13:
+        if nowcast_score >= 18:
             # Condições extremas - forçar G5
             if base_severity < 5:
                 final_level = "G5 (Nowcast Override)"
                 final_severity = 5
-        elif nowcast_score >= 12:
+        elif nowcast_score >= 15:
             # Condições muito fortes - forçar G4
             if base_severity < 4:
                 final_level = "G4 (Nowcast Override)"
                 final_severity = 4
-        elif nowcast_score >= 10:
+        elif nowcast_score >= 12:
             # Condições fortes - forçar G3
             if base_severity < 3:
                 final_level = "G3 (Nowcast Override)"
@@ -596,11 +596,11 @@ class ProductionHACModel:
             if base_severity < 5:
                 final_level = "G5 (Extreme Nowcast)"
                 final_severity = 5
-        elif dhdt > 150 and bz < -10 and v > 650:
+        elif dhdt > 150 and bz < -15 and v > 650:
             if base_severity < 4:
                 final_level = "G4 (Strong Nowcast)"
                 final_severity = 4
-        elif dhdt > 100 and bz < -8 and v > 600 and hac > 50:
+        elif dhdt > 100 and bz < -12 and v > 600 and hac > 50:
             if base_severity < 3:
                 final_level = "G3 (Nowcast Trigger)"
                 final_severity = 3
