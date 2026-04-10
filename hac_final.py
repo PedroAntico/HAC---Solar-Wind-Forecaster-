@@ -664,11 +664,11 @@ class ProductionHACModel:
             if levels[i] == current:
                 count += 1
              else:
-              if count < min_duration:
-                fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
-                filtered[i-count:i] = [fill] * count
-                current = levels[i]
-                count = 1
+                 if count < min_duration:
+                    fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
+                    filtered[i-count:i] = [fill] * count
+                    current = levels[i]
+                    count = 1
 
         return filtered
     
