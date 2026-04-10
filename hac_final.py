@@ -459,7 +459,7 @@ class ProductionHACModel:
         """Detecta triggers de escalação usando regra de decisão"""
         print("   • Monitorando triggers de escalação...")
         
-        n = float(hac_total)
+        n = len(hac_total)
         escalation_flags = np.zeros(n, dtype=bool)
         
         # Parâmetros críticos
