@@ -656,19 +656,20 @@ class ProductionHACModel:
 
     def apply_persistence_filter(self, levels, min_duration=30):
         filtered = levels.copy()
-    
+
         current = levels[0]
         count = 1
-    
+
         for i in range(1, len(levels)):
             if levels[i] == current:
                 count += 1
-             else:
-                 if count < min_duration:
+            else:
+                if count < min_duration:
                     fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
                     filtered[i-count:i] = [fill] * count
-                    current = levels[i]
-                    count = 1
+
+                current = levels[i]
+                count = 1
 
         return filtered
     
