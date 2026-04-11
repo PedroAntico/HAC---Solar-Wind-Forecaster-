@@ -368,9 +368,9 @@ class ProductionHACModel:
 
         # Mapeamento físico corrigido
         dst_from_hac = (
-            -0.45 * hac * activity
-            -0.6 * np.abs(dhdt) * activity
-            -25.0
+            -0.95 * hac * activity
+            -2.2 * np.abs(dhdt) * activity
+            -35.0
 )
 
         # Fusão com modelo core
