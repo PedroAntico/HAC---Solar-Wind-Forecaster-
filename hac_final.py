@@ -326,8 +326,7 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
 
-        hac_total = hac_ring + hac_substorm + hac_ionosphere
-        hac_total = self._safe_normalization(hac_total)
+        hac_total = np.clip(hac_total, 0, 800)
 
         # Derivada robusta
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
@@ -366,7 +365,7 @@ class ProductionHACModel:
         # Mapeamento físico corrigido
         dst_from_hac = (
             -0.45 * hac * activity
-            -1.5 * np.abs(dhdt) * activity
+            -0.6 * np.abs(dhdt) * activity
             -25.0
 )
 
@@ -766,12 +765,19 @@ class ProductionHACModel:
 
             dst = self.results['Dst_physical'][i]
 
-            if dst < -250:
-                level = "G5 (Dst Override)"
-            elif dst < -150:
-                level = "G4 (Dst Override)"
-            elif dst < -100:
-                level = "G3 (Dst Override)"
+            def classify_dst(dst):
+            if dst <= -300:
+                return "G5"
+            elif dst <= -200:
+                return "G4"
+            elif dst <= -150:
+                return "G3"
+            elif dst <= -100:
+                return "G2"
+            elif dst <= -50:
+                return "G1"
+            else:
+                return "Quiet"
 
             if core_severity > 0 and "Dst Override" not in level:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
