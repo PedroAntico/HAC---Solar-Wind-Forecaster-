@@ -765,7 +765,6 @@ class ProductionHACModel:
 
             dst = self.results['Dst_physical'][i]
 
-            def classify_dst(dst):
             if dst <= -300:
                 return "G5"
             elif dst <= -200:
