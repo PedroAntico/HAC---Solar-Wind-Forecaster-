@@ -1419,7 +1419,7 @@ def main():
     
     # 5. PREDIÇÃO COM CLASSIFICAÇÃO HÍBRIDA
     print("\n🌍 GERANDO PREDIÇÕES (Classificação Híbrida)...")
-    kp_pred, dst_pred, storm_levels = model.predict_storm_indicators(hac_values)
+    kp_pred, dst_pred, storm_levels, *_ = model.predict_storm_indicators(hac_values)
     
     # 6. OBTER AVALIAÇÃO ATUAL
     print("\n🔍 AVALIAÇÃO DO ESTADO ATUAL:")
