@@ -92,7 +92,7 @@ class HACPhysicsConfig:
     HAC_REF = 300.00
     
     # ESCALAS OPERACIONAIS
-    HAC_SCALE_MAX = 1200.0
+    HAC_SCALE_MAX = 2000.0
     KP_SCALE = 9.0
     
     # LIMITES FÍSICOS
@@ -367,16 +367,10 @@ class ProductionHACModel:
         activity = bz_factor * v_factor
 
         # Mapeamento físico corrigido
-        dst_from_hac = (
-            -0.95 * hac * activity
-            -2.2 * np.abs(dhdt) * activity
-            -35.0
-)
+        dst_from_hac = -1.6 * hac - 3.5 * np.abs(dhdt) - 50.0
 
         # Fusão com modelo core
-        core_results['Dst_pred'] = (
-            0.15 * core_results['Dst_pred'] +
-            0.85 * dst_from_hac
+        core_results['Dst_pred'] = 0.1 * core_results['Dst_pred'] + 0.9 * dst_from_hac
 )
 
         # Atualização final
