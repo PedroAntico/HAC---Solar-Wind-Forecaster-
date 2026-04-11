@@ -326,6 +326,10 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
 
+        hac_total = hac_ring + hac_substorm + hac_ionosphere
+
+        hac_total = self._safe_normalization(hac_total)
+
         hac_total = np.clip(hac_total, 0, 800)
 
         # Derivada robusta
