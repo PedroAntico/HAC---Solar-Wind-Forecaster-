@@ -201,16 +201,16 @@ def validate_event(core_model, df, name, start, end):
         print("   ⚠️ poucos dados")
         return None
 
-    # Processar com o core no modo 'event' (classificação pelo mínimo)
-    res = core_model.process(
-        time=event['time_tag'].values,
-        bz=event['bz_gsm'].values,
-        v=event['speed'].values,
-        density=event['density'].values,
-        mode='event'
-    )
+    from hac_final import ProductionHACModel
 
-    event['Dst_pred'] = res['Dst_pred']
+    model = ProductionHACModel()
+
+    # 🔥 roda seu modelo REAL (o mesmo da produção)
+    hac_values = model.compute_hac_system(event)
+
+    kp_pred, dst_pred, storm_levels = model.predict_storm_indicators(hac_values)
+
+    event['Dst_pred'] = dst_pred
 
     # Métricas científicas
     metrics = evaluate_event(
@@ -226,8 +226,6 @@ def validate_event(core_model, df, name, start, end):
     print(f"   Erro timing:   {metrics['peak_time_error_min']:.0f} min")
     print(f"   Erro mín Dst:  {metrics['min_Dst_error_nT']:.1f} nT")
 
-    # Severidade (core)
-    print(f"   Severidade:    G{res['severity']}")
 
     # Probabilidades
     probs = res['probabilities']
