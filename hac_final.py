@@ -574,13 +574,13 @@ class ProductionHACModel:
         elif hac < 100:
             base_level = "G1"
             base_severity = 1
-        elif hac < 150:
+        elif hac < 200:
             base_level = "G2"
             base_severity = 2
-        elif hac < 200:
+        elif hac < 350:
             base_level = "G3"
             base_severity = 3
-        elif hac < 250:
+        elif hac < 550:
             base_level = "G4"
             base_severity = 4
         else:
@@ -619,22 +619,22 @@ class ProductionHACModel:
         final_severity = base_severity
         
         # Escalação baseada no score Nowcast
-        if nowcast_score >= 20:
+        if nowcast_score >= 16:
             # Condições extremas - forçar G5
             if base_severity < 5:
                 final_level = "G5 (Nowcast Override)"
                 final_severity = 5
-        elif nowcast_score >= 18:
+        elif nowcast_score >= 13:
             # Condições muito fortes - forçar G4
             if base_severity < 4:
                 final_level = "G4 (Nowcast Override)"
                 final_severity = 4
-        elif nowcast_score >= 14:
+        elif nowcast_score >= 10:
             # Condições fortes - forçar G3
             if base_severity < 3:
                 final_level = "G3 (Nowcast Override)"
                 final_severity = 3
-        elif nowcast_score >= 10:
+        elif nowcast_score >= 6:
             # Condições moderadas - forçar G2
             if base_severity < 2:
                 final_level = "G2 (Nowcast Enhancement)"
@@ -768,17 +768,21 @@ class ProductionHACModel:
 
             dst = dst_pred[i]
 
-            # Override baseado em Dst (SEM return!)
-            if dst <= -300:
-                level = "G5 (Dst Override)"
-            elif dst <= -200:
-                level = "G4 (Dst Override)"
-            elif dst <= -150:
-                level = "G3 (Dst Override)"
-            elif dst <= -100:
-                level = "G2 (Dst Override)"
-            elif dst <= -50:
-                level = "G1 (Dst Override)"
+            # Só aplica override se atividade física REAL
+            bz_cond = Bz[i] < -8
+            v_cond = Vsw[i] > 600
+
+            if bz_cond and v_cond:
+                if dst <= -300:
+                    level = "G5 (Dst Override)"
+                elif dst <= -200:
+                    level = "G4 (Dst Override)"
+                elif dst <= -150:
+                    level = "G3 (Dst Override)"
+                elif dst <= -100:
+                    level = "G2 (Dst Override)"
+                elif dst <= -50:
+                    level = "G1 (Dst Override)"
 
             if core_severity > 0 and "Dst Override" not in level:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
