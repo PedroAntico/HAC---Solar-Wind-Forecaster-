@@ -367,7 +367,12 @@ class ProductionHACModel:
         activity = bz_factor * v_factor
 
         # Mapeamento físico corrigido
-        dst_from_hac = -0.9 * hac - 1.8 * np.abs(dhdt) - 20.0
+        # 🔥 normalização física
+        hac_norm = hac / 800.0
+        dhdt_norm = np.abs(dhdt) / 400.0
+
+        # 🔥 mapeamento físico controlado
+        dst_from_hac = -250 * hac_norm - 120 * dhdt_norm - 20
 
         # Fusão com modelo core
         blend = np.clip(activity, 0.2, 1.0)
