@@ -87,8 +87,8 @@ class HACPhysicsConfig:
     ALPHA_IONOSPHERE = 0.3      # Fração para ionosfera
     
     # PARÂMETROS NÃO LINEARES
-    BETA_NONLINEAR = 1.8        # Expoente de resposta não linear
-    COUPLING_THRESHOLD = 5.0    # mV/m - Limiar para não-linearidade
+    BETA_NONLINEAR = 2.2        # Expoente de resposta não linear
+    COUPLING_THRESHOLD = 3.0    # mV/m - Limiar para não-linearidade
     HAC_REF = 300.00
     
     # ESCALAS OPERACIONAIS
@@ -219,46 +219,116 @@ class PhysicalFieldsCalculator:
     
     @staticmethod
     def compute_all_fields(df):
-        """Calcula TODOS os campos físicos necessários SEM NUNCA GERAR NaN"""
+    """
+    Calcula TODOS os campos físicos necessários com modelo de acoplamento
+    magnetosfera–vento solar baseado em física (Newell-like).
+    Nunca gera NaN e mantém consistência física.
+    """
+    import numpy as np
+    
         df = df.copy()
-        
-        bz = df['bz_gsm'].fillna(0).values
-        v = df['speed'].fillna(400).values
-        
-        bz_negative = np.maximum(0, -bz)
-        df['E_field_raw'] = bz_negative * v * 1e-3
-        
         config = HACPhysicsConfig()
+
+        # ============================
+        # 1. INPUTS BÁSICOS
+        # ============================
+        bz = df['bz_gsm'].fillna(0).values
+        by = df['by_gsm'].fillna(0).values if 'by_gsm' in df.columns else np.zeros_like(bz)
+        v = df['speed'].fillna(400).values
+
+        # ============================
+        # 2. CAMPO ELÉTRICO (FÍSICO)
+        # ============================
+        bz_negative = np.maximum(0, -bz)
+        E_field_raw = bz_negative * v * 1e-3   # mV/m (correto fisicamente)
+
+        df['E_field_raw'] = E_field_raw
+
         df['E_field_saturated'] = np.clip(
-            df['E_field_raw'].values,
+            E_field_raw,
             0,
             config.E_FIELD_SATURATION
-        )
-        
+    )
+
+        # ============================
+        # 3. ACOPLAMENTO FÍSICO (NEWELL SIMPLIFICADO)
+        # ============================
+        # Campo total
+        Bt = np.sqrt(by**2 + bz**2)
+
+        # Ângulo IMF
+        theta = np.arctan2(by, bz)
+
+        # Fator geométrico (suavizado)
+        theta_factor = np.sin(theta / 2.0) ** (4.0)
+
+        # Acoplamento físico (Newell-like)
+        coupling_newell = (v ** (4/3)) * (Bt ** (2/3)) * theta_factor
+
+        # Normalização para escala utilizável
+        coupling_newell = coupling_newell * 1e-4
+
+        # ============================
+        # 4. NÃO-LINEARIDADE CONTROLADA
+        # ============================
         threshold = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
-        e_saturated = df['E_field_saturated'].values
-        coupling = np.zeros_like(e_saturated)
-        
-        mask_linear = e_saturated <= threshold
-        coupling[mask_linear] = e_saturated[mask_linear]
-        
-        mask_nonlinear = e_saturated > threshold
-        if np.any(mask_nonlinear):
-            normalized = e_saturated[mask_nonlinear] / threshold
-            coupling[mask_nonlinear] = threshold * (normalized ** beta)
-        
-        df['coupling_nonlinear'] = coupling
-        coupling_signal = np.where(bz < 0, coupling, 0.0)
+
+        coupling_nl = np.zeros_like(coupling_newell)
+
+        mask_linear = coupling_newell <= threshold
+        coupling_nl[mask_linear] = coupling_newell[mask_linear]
+
+        mask_nl = coupling_newell > threshold
+        if np.any(mask_nl):
+            normalized = coupling_newell[mask_nl] / threshold
+            coupling_nl[mask_nl] = threshold * (normalized ** beta)
+
+        # ============================
+        # 5. GATING FÍSICO (Bz < 0)
+        # ============================
+        coupling_signal = np.where(bz < 0, coupling_nl, 0.0)
+
+        # ============================
+        # 6. FALLBACK INTELIGENTE (SEM MATAR FÍSICA)
+        # ============================
+        # Só ativa se realmente não houver energia
+        if np.max(coupling_signal) < 1e-3:
+            print("   ⚠️ Coupling muito baixo → fallback físico ativado")
+            coupling_signal = df['E_field_saturated'].values * 0.2
+
+        # ============================
+        # 7. CLIPPING FINAL (ESTABILIDADE)
+        # ============================
+        coupling_signal = np.clip(coupling_signal, 0, 100)
+
+        # ============================
+        # 8. DEBUG (ESSENCIAL PRA VOCÊ)
+        # ============================
+        print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f}")
+        print(f"   • Vsw mean: {np.mean(v):.1f} km/s")
+        print(f"   • Bt mean: {np.mean(Bt):.1f}")
+        print(f"   • Coupling max: {np.max(coupling_signal):.2f}")
+
+        # ============================
+        # 9. OUTPUT FINAL
+        # ============================
+        df['Bt'] = Bt
+        df['theta'] = theta
+        df['coupling_newell'] = coupling_newell
+        df['coupling_nonlinear'] = coupling_nl
         df['coupling_signal'] = coupling_signal
-        
-        # Se mesmo assim coupling_signal for zero, use o campo elétrico saturado como base mínima
-        if df['coupling_signal'].max() == 0:
-            df['coupling_signal'] = df['E_field_saturated'] * 0.1  # 10% do campo saturado
-        for col in ['E_field_raw', 'E_field_saturated', 'coupling_signal']:
-            if df[col].isna().any():
-                df[col] = df[col].fillna(0)
-        
+
+        # Garantia total contra NaN
+        for col in [
+            'E_field_raw',
+            'E_field_saturated',
+            'coupling_signal',
+            'coupling_newell',
+            'coupling_nonlinear'
+    ]:
+            df[col] = np.nan_to_num(df[col], nan=0.0, posinf=100, neginf=0.0)
+
         return df
 
 # ============================
@@ -380,7 +450,7 @@ class ProductionHACModel:
         dhdt_clipped = np.clip(np.abs(dHAC_dt), 0, 400)
         dhdt_norm = dhdt_clipped / 400.0
 
-        dst_from_hac = -500 * hac_norm - 150 * dhdt_norm
+        dst_from_hac = -500 * hac_norm - 150 * dhdt_norm - 30
         dst_from_hac = np.clip(dst_from_hac, -500, 20)
 
         # Diagnóstico do core
