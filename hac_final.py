@@ -551,7 +551,7 @@ class ProductionHACModel:
                     dt[i] = 60.0
         if i % 2000 == 0:
             print(f"dt[i]: {dt[i]:.2f} sec | dt_hours: {dt[i]/3600:.6f}")
-                dt[0] = dt[1]
+            dt[0] = dt[1]
 
         return dt
 
