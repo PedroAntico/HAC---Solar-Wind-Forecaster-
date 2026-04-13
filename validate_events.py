@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação científica com modelo físico unificado HAC++
-Versão final corrigida:
-- Calibração global usando o mesmo acoplamento do core
-- dt robusto (sem divisão por zero)
-- HAC_REF com remoção de outliers extremos
-- Métricas completas (correlação, MAE, erro de timing, erro do mínimo Dst)
-- Exportação de calibração para JSON
+validate_events.py - Validação científica usando o MODELO DE PRODUÇÃO HAC++
+
+Arquitetura correta:
+- Calibração global com HACCoreModel (parâmetros físicos).
+- Injeção dos parâmetros calibrados no ProductionHACModel.
+- Validação de eventos com o mesmo modelo usado em produção.
+- Métricas completas: correlação, MAE, erro de timing, erro do mínimo Dst.
 """
 
 import pandas as pd
@@ -16,18 +16,10 @@ import json
 from datetime import datetime
 
 # =========================
-# IMPORTS DO NOVO CORE
+# IMPORTS DO MODELO DE PRODUÇÃO E CORE
 # =========================
-from hac_core import (
-    HACCoreModel,
-    HACCoreConfig,
-    evaluate_event,
-    compute_hac,
-    compute_dHdt
-)
-
-# Mantemos a função de normalização de colunas do hac_final
-from hac_final import normalize_omni_columns
+from hac_final import ProductionHACModel, normalize_omni_columns
+from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
 
 # =========================
 # EVENTOS PARA VALIDAÇÃO
@@ -65,7 +57,6 @@ def load_omni(filepath):
     print(f"   ✅ {len(df)} pontos OMNI")
     return df
 
-
 # =========================
 # CARREGAMENTO DST
 # =========================
@@ -93,7 +84,6 @@ def load_dst(filepath):
     print(f"   ✅ {len(df)} pontos DST")
     return df
 
-
 # =========================
 # MERGE OMNI + DST
 # =========================
@@ -120,18 +110,18 @@ def merge_data(omni, dst):
     print(f"   ✅ final: {len(df)} pontos")
     return df
 
-
 # =========================
-# CALIBRAÇÃO GLOBAL (CORRIGIDA)
+# CALIBRAÇÃO GLOBAL (com HACCoreModel)
 # =========================
 def global_calibration(df, core_model):
     """
     Realiza a calibração global de HAC_REF e Q_FACTOR usando todo o dataset.
-    Utiliza o MESMO acoplamento do core (compute_hac) para consistência.
+    Utiliza o acoplamento unificado do core.
+    Retorna o objeto HACCoreConfig calibrado.
     """
     print("\n📊 CALIBRAÇÃO GLOBAL DO MODELO...")
 
-    # 1. Calcular acoplamento CORRETO usando a função do core
+    # 1. Calcular acoplamento unificado
     _, comp = compute_hac(
         time=df['time_tag'].values,
         bz=df['bz_gsm'].values,
@@ -139,23 +129,20 @@ def global_calibration(df, core_model):
         density=df['density'].values,
         config=core_model.config
     )
-    coupling = comp['coupling']          # ← acoplamento unificado
+    coupling = comp['coupling']
 
     # 2. Calibrar HAC_REF (com remoção de outliers extremos)
     hac_raw = comp['raw']
-    
-    # Filtrar valores altos (> percentil 90)
     threshold = np.percentile(hac_raw, 90)
     high_values = hac_raw[hac_raw > threshold]
-    
-    # Remover outliers extremos (> percentil 99.5 dos valores altos)
+
     if len(high_values) > 0:
         upper_limit = np.percentile(high_values, 99.5)
         high_values = high_values[high_values < upper_limit]
         core_model.config.HAC_REF = np.median(high_values) * 3.0
     else:
-        core_model.config.HAC_REF = np.percentile(hac_raw, 99)  # fallback
-    
+        core_model.config.HAC_REF = np.percentile(hac_raw, 99)
+
     print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f}")
 
     # 3. Preparar dt robusto
@@ -170,10 +157,9 @@ def global_calibration(df, core_model):
 
     # 4. Calibrar Q_FACTOR
     core_model.fit_calibration(coupling, dt, df['dst'].values)
-
     print(f"   Q_FACTOR calibrado: {core_model.config.Q_FACTOR:.4f}")
 
-    # Salvar calibração em JSON
+    # Salvar calibração em JSON (para uso no modelo de produção)
     calib_data = {
         "HAC_REF": core_model.config.HAC_REF,
         "Q_FACTOR": core_model.config.Q_FACTOR,
@@ -185,13 +171,16 @@ def global_calibration(df, core_model):
         json.dump(calib_data, f, indent=4)
     print("   Calibração salva em 'hac_calibration.json'")
 
-    return df
-
+    return core_model.config
 
 # =========================
-# VALIDAÇÃO DE UM EVENTO
+# VALIDAÇÃO DE UM EVENTO (USANDO MODELO DE PRODUÇÃO)
 # =========================
-def validate_event(core_model, df, name, start, end):
+def validate_event(calibrated_config, df, name, start, end):
+    """
+    Valida um evento usando o ProductionHACModel (modelo completo de produção).
+    calibrated_config: objeto HACCoreConfig calibrado (do core).
+    """
     print(f"\n🌌 {name}")
 
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
@@ -201,18 +190,24 @@ def validate_event(core_model, df, name, start, end):
         print("   ⚠️ poucos dados")
         return None
 
-    from hac_final import ProductionHACModel
-
+    # Instancia o modelo de produção (sem passar config no construtor)
     model = ProductionHACModel()
 
-    # 🔥 roda seu modelo REAL (o mesmo da produção)
-    hac_values = model.compute_hac_system(event)
+    # Injeta os parâmetros calibrados no core físico interno
+    model.core.config.HAC_REF = calibrated_config.HAC_REF
+    model.core.config.Q_FACTOR = calibrated_config.Q_FACTOR
+    model.core.config.TAU_DST = calibrated_config.TAU_DST
+    model.core.config.DST_Q = calibrated_config.DST_Q
 
+    # Executa a cadeia completa de produção
+    hac_values = model.compute_hac_system(event)
     kp_pred, dst_pred, storm_levels = model.predict_storm_indicators(hac_values)
 
+    # Adiciona previsão ao DataFrame
     event['Dst_pred'] = dst_pred
+    event['Storm_level'] = storm_levels
 
-    # Métricas científicas
+    # Métricas científicas (usando evaluate_event do core)
     metrics = evaluate_event(
         time=event['time_tag'].values,
         dst_obs=event['dst'].values,
@@ -226,42 +221,38 @@ def validate_event(core_model, df, name, start, end):
     print(f"   Erro timing:   {metrics['peak_time_error_min']:.0f} min")
     print(f"   Erro mín Dst:  {metrics['min_Dst_error_nT']:.1f} nT")
 
+    # Contagem de níveis G4/G5 (para referência)
+    g4g5_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
+    print(f"   Eventos G4/G5: {g4g5_count}")
 
-    # Probabilidades
-    probs = res['probabilities']
-    print(f"   Probabilidades:")
-    for k, v in probs.items():
-        print(f"      {k}: {v*100:.1f}%")
-
-    # Salvar resultados
-    event.to_csv(f"event_{name}_physical.csv", index=False)
+    # Salvar resultados completos
+    event.to_csv(f"event_{name}_production.csv", index=False)
 
     # Plot
     plt.figure(figsize=(12, 6))
     plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst observado', linewidth=2)
-    plt.plot(event['time_tag'], event['Dst_pred'], 'r--', label='Dst previsto (modelo físico)', linewidth=2)
+    plt.plot(event['time_tag'], event['Dst_pred'], 'r--', label='Dst previsto (modelo produção)', linewidth=2)
     plt.axhline(y=-50, color='gray', linestyle=':', alpha=0.5)
     plt.axhline(y=-100, color='orange', linestyle=':', alpha=0.5)
     plt.axhline(y=-200, color='red', linestyle=':', alpha=0.5)
     plt.xlabel('Tempo (UTC)')
     plt.ylabel('Dst [nT]')
-    plt.title(f'{name} - Modelo Físico Unificado\n'
+    plt.title(f'{name} - Modelo de Produção HAC++\n'
               f'Corr={metrics["correlation"]:.3f}, MAE={metrics["MAE"]:.0f} nT, '
               f'Erro mín={metrics["min_Dst_error_nT"]:.0f} nT')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"event_{name}_physical.png", dpi=150)
+    plt.savefig(f"event_{name}_production.png", dpi=150)
     plt.close()
 
     return metrics
-
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("🚀 VALIDAÇÃO HAC++ COM MODELO FÍSICO UNIFICADO")
+    print("🚀 VALIDAÇÃO HAC++ COM MODELO DE PRODUÇÃO")
     print("=" * 70)
 
     # 1. Carregar dados
@@ -269,21 +260,19 @@ def main():
     dst = load_dst("data/dst_kyoto_2000_2020.csv")
     df = merge_data(omni, dst)
 
-    # 2. Instanciar modelo core
-    config = HACCoreConfig()
-    core = HACCoreModel(config)
+    # 2. Calibração global com HACCoreModel
+    core_config = HACCoreConfig()
+    core_model = HACCoreModel(core_config)
+    calibrated_config = global_calibration(df, core_model)
 
-    # 3. Calibração global (substitui run_model antigo)
-    df = global_calibration(df, core)
-
-    # 4. Validar cada evento
+    # 3. Validar cada evento usando a configuração calibrada
     all_metrics = []
     for name, (start, end) in EVENTS.items():
-        metrics = validate_event(core, df, name, start, end)
+        metrics = validate_event(calibrated_config, df, name, start, end)
         if metrics:
             all_metrics.append(metrics)
 
-    # 5. Resumo geral
+    # 4. Resumo geral
     if all_metrics:
         print("\n" + "=" * 70)
         print("📈 RESUMO GERAL DAS MÉTRICAS")
@@ -299,9 +288,8 @@ def main():
         print(f"Erro mínimo Dst médio:   {avg_min_err:.1f} nT")
 
     print("\n✅ VALIDAÇÃO CONCLUÍDA")
-    print("   Resultados salvos em event_*_physical.csv e event_*_physical.png")
+    print("   Resultados salvos em event_*_production.csv e event_*_production.png")
     print("   Calibração salva em hac_calibration.json")
-
 
 if __name__ == "__main__":
     main()
