@@ -219,9 +219,7 @@ class PhysicalFieldsCalculator:
     
     @staticmethod
     def compute_all_fields(df):
-    """Calcula TODOS os campos físicos necessários com modelo de acoplamento
-    magnetosfera–vento solar baseado em física (Newell-like).
-    Nunca gera NaN e mantém consistência física."""
+        """Calcula TODOS os campos físicos necessários com modelo de acoplamento magnetosfera–vento solar baseado em física (Newell-like). Nunca gera NaN e mantém consistência física."""
         import numpy as np
     
         df = df.copy()
