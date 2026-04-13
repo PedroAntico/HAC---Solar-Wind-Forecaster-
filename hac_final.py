@@ -151,8 +151,28 @@ class RobustOMNIProcessor:
         df = df.replace([np.inf, -np.inf], np.nan)
         
         config = HACPhysicsConfig()
+
+        # ==============================
+        # 🔥 CORREÇÃO DE UNIDADE DO VENTO SOLAR
+        # ==============================
         if 'speed' in df.columns:
-            df['speed'] = df['speed'].clip(lower=config.VSW_MIN, upper=config.VSW_MAX)
+            mean_v = df['speed'].mean()
+
+            print(f"   • Vsw bruto (mean): {mean_v:.1f}")
+
+        if mean_v > 10000:
+                print("   ⚠️ Detectado Vsw em m/s → convertendo para km/s")
+             df['speed'] = df['speed'] / 1000.0
+
+        elif mean_v > 2000:
+            print("   ⚠️ Detectado Vsw fora de escala → ajustando")
+            df['speed'] = df['speed'] / 10.0
+
+        # Agora sim aplica limites físicos
+        df['speed'] = df['speed'].clip(
+            lower=config.VSW_MIN,
+            upper=config.VSW_MAX
+    )
         if 'density' in df.columns:
             df['density'] = df['density'].clip(lower=config.DENSITY_MIN, upper=config.DENSITY_MAX)
         if 'bz_gsm' in df.columns:
@@ -160,11 +180,11 @@ class RobustOMNIProcessor:
         
         cols_to_interpolate = ['bz_gsm', 'speed', 'density']
         for col in cols_to_interpolate:
-            if col in df.columns:
-                df[col] = df[col].interpolate(
-                    method='linear', 
-                    limit=max_interpolation,
-                    limit_direction='both'
+        if col in df.columns:
+             df[col] = df[col].interpolate(
+                method='linear', 
+                limit=max_interpolation,
+                limit_direction='both'
                 )
         
         # ==============================
