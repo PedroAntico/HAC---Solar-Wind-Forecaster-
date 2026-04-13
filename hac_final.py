@@ -342,8 +342,8 @@ class ProductionHACModel:
         # ------------------------------------------------------------
         # 2. Modelo físico (HAC CORE)
         # ------------------------------------------------------------
-        self.core.config.HAC_REF = 300.0
-        self.core.config.Q_FACTOR = -0.0015
+        #self.core.config.HAC_REF = 300.0
+        #self.core.config.Q_FACTOR = -0.0015
 
         core_results = self.core.process(
             time=times,
