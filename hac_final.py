@@ -425,7 +425,7 @@ class ProductionHACModel:
         # -----------------------------
         dt_hours = dt[i] / 3600.0
 
-        injection_eff = injection * dt_hours
+        injection_eff = injection
         injection_eff = np.clip(injection_eff, 0, 100)   # permite tempestades severas
 
         # -----------------------------
