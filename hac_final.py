@@ -414,7 +414,7 @@ class ProductionHACModel:
         forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
         forcing = forcing / self.config.E_FIELD_SATURATION
 
-        injection = coupling[i]
+        injection = 5.0
 
         # 🔥 reforço do campo elétrico
         if Bz[i] < 0:
@@ -855,7 +855,8 @@ class ProductionHACModel:
                 if count < min_duration:
                     fill = filtered[i-count-1] if i-count-1 >= 0 else "G0"
                     filtered[i-count:i] = [fill] * count
-
+                if i % 2000 == 0:
+                    print(f"[DEBUG] i={i} | injection={injection:.3f}")
                 current = levels[i]
                 count = 1
 
