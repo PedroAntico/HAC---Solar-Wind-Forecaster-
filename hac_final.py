@@ -92,7 +92,7 @@ class HACPhysicsConfig:
     HAC_REF = 300.00
     
     # ESCALAS OPERACIONAIS
-    HAC_SCALE_MAX = 2000.0
+    HAC_SCALE_MAX = 800.0
     KP_SCALE = 9.0
     
     # LIMITES FÍSICOS
@@ -563,7 +563,7 @@ class ProductionHACModel:
         if scale <= 0:
             scale = 1.0
 
-        normalized = (values / scale) * 300.0
+        normalized = (values / scale) * 500.0
 
         normalized = np.nan_to_num(normalized, nan=0.0, posinf=800, neginf=0.0)
         normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
