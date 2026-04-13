@@ -433,7 +433,7 @@ class ProductionHACModel:
         # -----------------------------
         dt_hours = dt[i] / 3600.0
 
-        injection_eff = injection
+        injection_eff = injection * dt_hours
         injection_eff = np.clip(injection_eff, 0, 100)   # permite tempestades severas
 
         # -----------------------------
@@ -486,7 +486,7 @@ class ProductionHACModel:
         dhdt_norm = np.abs(dhdt_safe) / 400.0
 
         # Modelo físico estável
-        dst_from_hac = -400 * (hac_norm ** 1.3) - 120 * dhdt_norm - 20
+        dst_from_hac = -450 * (hac_norm ** 1.4) - 150 * dhdt_norm - 30
         dst_from_hac = np.clip(dst_from_hac, -500, 50)
 
         # 🔥 USA SOMENTE HAC
