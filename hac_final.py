@@ -312,7 +312,7 @@ class ProductionHACModel:
         forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
         forcing = forcing / self.config.E_FIELD_SATURATION
 
-        injection += 0.05 * forcing
+        injection += 0.2 * forcing
 
         # 🔥 reduzir agressividade (ESSENCIAL)
         if Bz[i] < -10:
@@ -326,14 +326,14 @@ class ProductionHACModel:
         injection_eff = injection * dt_hours
 
         # 🔥 LIMITADOR FÍSICO (EVITA EXPLOSÃO)
-        injection_eff = np.clip(injection_eff, 0, 5)
+        injection_eff = np.clip(injection_eff, 0, 50)
 
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
         # -----------------------------
-        loss_ring = 0.01 * hac_ring[i-1]
-        loss_sub = 0.01 * hac_substorm[i-1]
-        loss_ion = 0.01 * hac_ionosphere[i-1]
+        loss_ring = 0.001 * hac_ring[i-1]
+        loss_sub = 0.001 * hac_substorm[i-1]
+        loss_ion = 0.001 * hac_ionosphere[i-1]
 
         # -----------------------------
         # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
