@@ -82,9 +82,9 @@ class HACPhysicsConfig:
     RING_CURRENT_MAX = 800.0     # nT - Saturação da corrente do anel
     
     # COEFICIENTES DE PARTICIONAMENTO (soma = 1,0)
-    ALPHA_RING = 0.4            # Fração para corrente de anel
-    ALPHA_SUBSTORM = 0.3        # Fração para subtempestades
-    ALPHA_IONOSPHERE = 0.3      # Fração para ionosfera
+    ALPHA_RING = 0.7            # Fração para corrente de anel
+    ALPHA_SUBSTORM = 0.2        # Fração para subtempestades
+    ALPHA_IONOSPHERE = 0.1      # Fração para ionosfera
     
     # PARÂMETROS NÃO LINEARES
     BETA_NONLINEAR = 2.2        # Expoente de resposta não linear
@@ -414,11 +414,19 @@ class ProductionHACModel:
         forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
         forcing = forcing / self.config.E_FIELD_SATURATION
 
-        injection += 0.2 * forcing
+        injection = coupling[i]
 
-        # 🔥 reduzir agressividade (ESSENCIAL)
+        # 🔥 reforço do campo elétrico
+        if Bz[i] < 0:
+            e_field = -Bz[i] * Vsw[i] * 1e-3
+            e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
+            injection += 3.0 * e_field_clipped
+
+        # 🔥 boost por reconexão magnética
+        if Bz[i] < -5:
+            injection *= 1.5
         if Bz[i] < -10:
-            injection *= 1.2
+            injection *= 2.5
 
         # -----------------------------
         # 2. NORMALIZAÇÃO TEMPORAL (CRÍTICO)
@@ -431,19 +439,16 @@ class ProductionHACModel:
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
         # -----------------------------
-        loss_ring = 0.001 * hac_ring[i-1]
-        loss_sub = 0.001 * hac_substorm[i-1]
-        loss_ion = 0.001 * hac_ionosphere[i-1]
+        loss_ring = 0
+        loss_sub = 0
+        loss_ion = 0
 
         # -----------------------------
         # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
         # -----------------------------
-        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
-
-        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
-
-        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
-
+        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection - loss_ring
+        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection - loss_sub
+        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection - loss_ion
         hac_total = hac_ring + hac_substorm + hac_ionosphere
 
         hac_total = self._safe_normalization(hac_total)
