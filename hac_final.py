@@ -252,6 +252,9 @@ class PhysicalFieldsCalculator:
         coupling_signal = np.where(bz < 0, coupling, 0.0)
         df['coupling_signal'] = coupling_signal
         
+        # Se mesmo assim coupling_signal for zero, use o campo elétrico saturado como base mínima
+        if df['coupling_signal'].max() == 0:
+            df['coupling_signal'] = df['E_field_saturated'] * 0.1  # 10% do campo saturado
         for col in ['E_field_raw', 'E_field_saturated', 'coupling_signal']:
             if df[col].isna().any():
                 df[col] = df[col].fillna(0)
@@ -458,6 +461,8 @@ class ProductionHACModel:
         p95 = np.percentile(values, 95)
         scale = max(p99, p95 * 1.2)   # evita que p99 sozinho seja instável
 
+        if scale < 1.0:
+            scale = 1.0
         if scale > 0:
             normalized = (values / scale) * 300.0
         else:
