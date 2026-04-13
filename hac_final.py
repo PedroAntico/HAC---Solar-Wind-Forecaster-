@@ -330,7 +330,7 @@ class ProductionHACModel:
 
         hac_total = self._safe_normalization(hac_total)
 
-        hac_total = np.clip(normalized, 0, 800)
+        hac_total = np.clip(hac_total, 0, 800)
 
         # Derivada robusta
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
@@ -459,7 +459,7 @@ class ProductionHACModel:
         # Converter tempo para segundos
         times = np.array(times, dtype="datetime64[s]")
         dt = np.diff(times).astype("timedelta64[s]").astype(float)
-        dt = np.insert(dt, 0, dt[0])
+        dt = np.insert(dt, 0, np.median(dt))
         dt[dt <= 0] = 1.0
         dt_hours = np.maximum(dt / 3600.0, 1e-3)
 
@@ -478,11 +478,11 @@ class ProductionHACModel:
                 dt_median = np.median(dt_hours)
 
                 dHAC_dt = savgol_filter(
-                  hac_total,
-                  window_length=window,
-                  polyorder=2,
-                  deriv=1
-              ) / dt_median
+                    hac_total,
+                    window_length=window,
+                    polyorder=2,
+                    deriv=1,
+                    delta=dt_median)
 
             except Exception as e:
                 print(f"⚠️ Fallback derivada simples: {e}")
@@ -497,7 +497,8 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        dHAC_dt = np.clip(raw_dhdt, -400, 400)
+        limit = 400
+        dHAC_dt = limit * np.tanh(raw_dhdt / limit)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
 
