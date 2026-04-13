@@ -439,9 +439,9 @@ class ProductionHACModel:
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
         # -----------------------------
-        loss_ring = 0.01 * hac_ring[i-1]
-        loss_sub = 0.01 * hac_substorm[i-1]
-        loss_ion = 0.01 * hac_ionosphere[i-1]
+        loss_ring = 0.02 * hac_ring[i-1]
+        loss_sub = 0.02 * hac_substorm[i-1]
+        loss_ion = 0.02 * hac_ionosphere[i-1]
 
         # -----------------------------
         # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
@@ -619,7 +619,7 @@ class ProductionHACModel:
             print(f"⚠️ Derivada bruta alta: max={np.max(raw_dhdt):.1f} nT/h")
 
         # Soft clipping (melhor que cortar seco)
-        limit = 400
+        limit = 300
         dHAC_dt = limit * np.tanh(raw_dhdt / limit)
 
         print(f"     Derivada máxima: {np.max(dHAC_dt):.1f} nT/h")
