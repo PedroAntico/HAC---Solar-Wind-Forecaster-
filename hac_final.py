@@ -71,9 +71,9 @@ class HACPhysicsConfig:
     """Configuração física validada para dados OMNI reais"""
     
     # TEMPOS CARACTERÍSTICOS (horas)
-    TAU_RING_CURRENT = 2.0       # Tempo de decaimento da corrente do anel
-    TAU_SUBSTORM = 1.0           # Tempo de injeção por subtempestades  
-    TAU_IONOSPHERE = 0.3         # Tempo de resposta ionosférica
+    TAU_RING_CURRENT = 1.2       # Tempo de decaimento da corrente do anel
+    TAU_SUBSTORM = 0.6          # Tempo de injeção por subtempestades  
+    TAU_IONOSPHERE = 0.2         # Tempo de resposta ionosférica
     TAU_EFFECTIVE = 2.0          # τ_eff para modelo Nowcast+Inércia
     
     #PARÂMETROS DE SATURAÇÃO FÍSICA
@@ -330,7 +330,7 @@ class ProductionHACModel:
 
         hac_total = self._safe_normalization(hac_total)
 
-        hac_total = np.clip(hac_total, 0, 800)
+        hac_total = np.clip(normalized, 0, 800)
 
         # Derivada robusta
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
@@ -436,7 +436,7 @@ class ProductionHACModel:
         max_val = np.nanmax(values)
 
         if max_val > 0:
-            normalized = values / max_val * self.config.HAC_SCALE_MAX
+            normalized = values / self.config.HAC_REF * 300
         else:
             normalized = np.zeros_like(values)
 
