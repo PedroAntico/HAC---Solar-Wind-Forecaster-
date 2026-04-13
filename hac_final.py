@@ -303,28 +303,46 @@ class ProductionHACModel:
             alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
             alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
 
-            injection = coupling[i]
+            # -----------------------------
+            # 1. INJECTION BASE
+            # -----------------------------
+        injection = coupling[i]
 
-            # 🔥 FORÇANTE DIRETA (ESSENCIAL)
-            forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
+         # Forçante física (ok manter)
+        forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
+        forcing = forcing / self.config.E_FIELD_SATURATION
 
-            # Normaliza a forçante (ESSENCIAL)
-            forcing = forcing / self.config.E_FIELD_SATURATION
+        injection += 0.05 * forcing
 
-            # Peso menor e controlado
-            injection += 0.05 * forcing
+        # 🔥 reduzir agressividade (ESSENCIAL)
+        if Bz[i] < -10:
+            injection *= 1.2
 
-            if Bz[i] < -20:
-                injection *= 2.0
-            elif Bz[i] < -15:
-                injection *= 1.6
-            elif Bz[i] < -10:
-                injection *= 1.3
-            
+        # -----------------------------
+        # 2. NORMALIZAÇÃO TEMPORAL (CRÍTICO)
+        # -----------------------------
+        dt_hours = dt[i] / 3600.0
 
-            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection * dt[i]
-            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection * dt[i]
-            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection * dt[i]
+        injection_eff = injection * dt_hours
+
+        # 🔥 LIMITADOR FÍSICO (EVITA EXPLOSÃO)
+        injection_eff = np.clip(injection_eff, 0, 5)
+
+        # -----------------------------
+        # 3. DISSIPAÇÃO REAL (ESSENCIAL)
+        # -----------------------------
+        loss_ring = 0.01 * hac_ring[i-1]
+        loss_sub = 0.01 * hac_substorm[i-1]
+        loss_ion = 0.01 * hac_ionosphere[i-1]
+
+        # -----------------------------
+        # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
+        # -----------------------------
+        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
+
+        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
+
+        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
         hac_total = hac_ring + hac_substorm + hac_ionosphere
 
