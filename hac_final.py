@@ -476,49 +476,27 @@ class ProductionHACModel:
             mode='nowcast'
 )
         # ------------------------------------------------------------
-        # Mapeamento HAC → Dst (corrigido e estável)
+        # Mapeamento HAC → Dst (VERSÃO LIMPA)
         # ------------------------------------------------------------
 
         hac_clipped = np.clip(hac_total, 0, 800)
         hac_norm = hac_clipped / 800.0
 
-        # 🔥 CLIP REAL DA DERIVADA (ANTES DE USAR)
         dhdt_safe = np.clip(dHAC_dt, -400, 400)
         dhdt_norm = np.abs(dhdt_safe) / 400.0
 
-        # 🔥 NOVA FUNÇÃO (mais estável)
-        dst_from_hac = -400 * (hac_norm ** 1.3) - 120 * dhdt_norm
-
-        # offset físico leve
-        dst_from_hac -= 20
-
-        # 🔒 CLIP FINAL FÍSICO
+        # Modelo físico estável
+        dst_from_hac = -400 * (hac_norm ** 1.3) - 120 * dhdt_norm - 20
         dst_from_hac = np.clip(dst_from_hac, -500, 50)
-        # Diagnóstico do core
-        dst_core = core_results.get('Dst_pred', np.zeros_like(hac_total))
-        core_unstable = np.any(np.abs(dst_core) > 1000)
 
-        if core_unstable:
-            print("   ⚠️ CORE INSTÁVEL (|Dst| > 1000 nT) → Dst puramente do HAC")
-            dst_hybrid = dst_from_hac.copy()
-        else:
-            # Blend não linear: baixa atividade → core domina; alta atividade → HAC domina
-            bz_factor = np.clip((-Bz) / 15.0, 0, 1)
-            v_factor = np.clip((Vsw - 400) / 400, 0, 1)
-            activity = bz_factor * v_factor
-            blend = activity ** 1.5
-            blend = np.clip(blend, 0.1, 0.95)
+        # 🔥 USA SOMENTE HAC
+        dst_hybrid = dst_from_hac.copy()
 
-            dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
-            print(f"   🟢 Core estável. Peso médio do HAC no blend: {np.mean(blend):.2f}")
+        core_results['Dst_pred'] = dst_hybrid
+        core_results['Dst_min'] = np.min(dst_hybrid)
+        core_results['Dst_now'] = dst_hybrid[-1]
 
-            dst_hybrid = np.clip(dst_hybrid, -500, 50)
-
-            core_results['Dst_pred'] = dst_hybrid
-            core_results['Dst_min'] = np.min(dst_hybrid)
-            core_results['Dst_now'] = dst_hybrid[-1]
-
-            print(f"   • Dst físico mínimo gerado: {core_results['Dst_min']:.1f} nT")
+        print(f"   • Dst (HAC puro): {core_results['Dst_min']:.1f} nT")
 
         # ------------------------------------------------------------
         # 3. Armazenar resultados
