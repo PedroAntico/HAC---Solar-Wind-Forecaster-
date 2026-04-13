@@ -566,24 +566,27 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização robusta usando percentis para evitar compressão ou explosão."""
-        p99 = np.percentile(values, 99)
-        p95 = np.percentile(values, 95)
-        scale = max(p99, p95 * 1.2)   # evita que p99 sozinho seja instável
+        """Normalização robusta baseada em valores NÃO ZERO"""
 
-        if scale < 1.0:
-            scale = 1.0
-        if scale > 0:
-            normalized = (values / scale) * 300.0
+        non_zero = values[values > 0]
+
+        if len(non_zero) > 10:
+            scale = np.percentile(non_zero, 95)
         else:
-            normalized = np.zeros_like(values)
+            scale = np.max(values)
+
+        if scale <= 0:
+            scale = 1.0
+
+        normalized = (values / scale) * 300.0
 
         normalized = np.nan_to_num(normalized, nan=0.0, posinf=800, neginf=0.0)
         normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
 
-        print(f"   • HAC escala dinâmica (p99={p99:.1f}, p95={p95:.1f}) -> scale={scale:.1f}")
+        print(f"   • Escala (não-zero): {scale:.2f}")
         print(f"   • HAC máximo (pós-norm): {np.max(normalized):.1f}")
         print(f"   • HAC médio (pós-norm): {np.mean(normalized):.1f}")
+
         return normalized
     
     def _compute_robust_derivative(self, hac_total, times):
