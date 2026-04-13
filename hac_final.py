@@ -427,7 +427,10 @@ class ProductionHACModel:
             injection *= 1.5
         if Bz[i] < -10:
             injection *= 2.5
-
+        if Bz[i] >= 0:
+            decay_factor = 1.5   # descarga mais rápida
+        else:
+            decay_factor = 1.0
         # -----------------------------
         # 2. NORMALIZAÇÃO TEMPORAL (CRÍTICO)
         # -----------------------------
@@ -439,9 +442,9 @@ class ProductionHACModel:
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
         # -----------------------------
-        loss_ring = 0.02 * hac_ring[i-1]
-        loss_sub = 0.02 * hac_substorm[i-1]
-        loss_ion = 0.02 * hac_ionosphere[i-1]
+        loss_ring = 0.08 * hac_ring[i-1]
+        loss_sub = 0.10 * hac_substorm[i-1]
+        loss_ion = 0.12 * hac_ionosphere[i-1]
 
         # -----------------------------
         # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
