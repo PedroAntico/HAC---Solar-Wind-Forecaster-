@@ -540,7 +540,7 @@ class ProductionHACModel:
     def _safe_deltat(self, times):
         """Calcula delta-t com proteção"""
         n = len(times)
-        dt = np.full(n, 60.0)
+        dt = np.full(len(times), 60.0)  # força 1 minuto
 
         if n > 1:
             for i in range(1, n):
