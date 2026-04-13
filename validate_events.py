@@ -4,9 +4,10 @@ validate_events.py - Validação científica usando o MODELO DE PRODUÇÃO HAC++
 
 Arquitetura correta:
 - Calibração global com HACCoreModel (parâmetros físicos).
+- Cálculo de campos físicos (PhysicalFieldsCalculator) antes da predição.
 - Injeção dos parâmetros calibrados no ProductionHACModel.
-- Validação de eventos com o mesmo modelo usado em produção.
-- Métricas completas: correlação, MAE, erro de timing, erro do mínimo Dst.
+- Validação de eventos com o mesmo pipeline usado em produção.
+- Proteção contra valores não físicos de Dst (clipping).
 """
 
 import pandas as pd
@@ -18,7 +19,11 @@ from datetime import datetime
 # =========================
 # IMPORTS DO MODELO DE PRODUÇÃO E CORE
 # =========================
-from hac_final import ProductionHACModel, normalize_omni_columns
+from hac_final import (
+    ProductionHACModel,
+    normalize_omni_columns,
+    PhysicalFieldsCalculator
+)
 from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
 
 # =========================
@@ -29,6 +34,10 @@ EVENTS = {
     "St_Patrick_2015": ("2015-03-17", "2015-03-20"),
     "Carrington_like_2012": ("2012-07-22", "2012-07-25"),
 }
+
+# Limites físicos para Dst (segurança contra valores absurdos)
+DST_MIN_PHYSICAL = -500   # nT (pode ser ajustado conforme necessidade)
+DST_MAX_PHYSICAL = 50     # nT
 
 # =========================
 # CARREGAMENTO OMNI
@@ -190,24 +199,33 @@ def validate_event(calibrated_config, df, name, start, end):
         print("   ⚠️ poucos dados")
         return None
 
-    # Instancia o modelo de produção (sem passar config no construtor)
+    # 1. Calcular campos físicos (necessários para o modelo de produção)
+    print("   🔄 Calculando campos físicos...")
+    event = PhysicalFieldsCalculator.compute_all_fields(event)
+
+    # 2. Instanciar modelo de produção
     model = ProductionHACModel()
 
-    # Injeta os parâmetros calibrados no core físico interno
+    # 3. Injeta os parâmetros calibrados no core físico interno
     model.core.config.HAC_REF = calibrated_config.HAC_REF
     model.core.config.Q_FACTOR = calibrated_config.Q_FACTOR
     model.core.config.TAU_DST = calibrated_config.TAU_DST
     model.core.config.DST_Q = calibrated_config.DST_Q
 
-    # Executa a cadeia completa de produção
+    # 4. Executa a cadeia completa de produção
     hac_values = model.compute_hac_system(event)
-    kp_pred, dst_pred, storm_levels = model.predict_storm_indicators(hac_values)
+    kp_pred, dst_pred_raw, storm_levels = model.predict_storm_indicators(hac_values)
+
+    # 5. Proteção contra valores não físicos de Dst (clipping)
+    dst_pred = np.clip(dst_pred_raw, DST_MIN_PHYSICAL, DST_MAX_PHYSICAL)
+    if not np.array_equal(dst_pred, dst_pred_raw):
+        print(f"   ⚠️ Dst previsto continha valores fora do intervalo físico [{DST_MIN_PHYSICAL}, {DST_MAX_PHYSICAL}] e foi clipado.")
 
     # Adiciona previsão ao DataFrame
     event['Dst_pred'] = dst_pred
     event['Storm_level'] = storm_levels
 
-    # Métricas científicas (usando evaluate_event do core)
+    # 6. Métricas científicas
     metrics = evaluate_event(
         time=event['time_tag'].values,
         dst_obs=event['dst'].values,
@@ -225,10 +243,10 @@ def validate_event(calibrated_config, df, name, start, end):
     g4g5_count = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
     print(f"   Eventos G4/G5: {g4g5_count}")
 
-    # Salvar resultados completos
+    # 7. Salvar resultados completos
     event.to_csv(f"event_{name}_production.csv", index=False)
 
-    # Plot
+    # 8. Plot
     plt.figure(figsize=(12, 6))
     plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst observado', linewidth=2)
     plt.plot(event['time_tag'], event['Dst_pred'], 'r--', label='Dst previsto (modelo produção)', linewidth=2)
