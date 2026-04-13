@@ -439,9 +439,9 @@ class ProductionHACModel:
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
         # -----------------------------
-        loss_ring = 0
-        loss_sub = 0
-        loss_ion = 0
+        loss_ring = 0.01 * hac_ring[i-1]
+        loss_sub = 0.01 * hac_substorm[i-1]
+        loss_ion = 0.01 * hac_ionosphere[i-1]
 
         # -----------------------------
         # 4. ATUALIZAÇÃO DOS RESERVATÓRIOS
@@ -476,17 +476,24 @@ class ProductionHACModel:
             mode='nowcast'
 )
         # ------------------------------------------------------------
-        # Mapeamento HAC → Dst (fisicamente consistente)
+        # Mapeamento HAC → Dst (corrigido e estável)
         # ------------------------------------------------------------
+
         hac_clipped = np.clip(hac_total, 0, 800)
         hac_norm = hac_clipped / 800.0
 
-        dhdt_clipped = np.clip(np.abs(dHAC_dt), 0, 400)
-        dhdt_norm = dhdt_clipped / 400.0
+        # 🔥 CLIP REAL DA DERIVADA (ANTES DE USAR)
+        dhdt_safe = np.clip(dHAC_dt, -400, 400)
+        dhdt_norm = np.abs(dhdt_safe) / 400.0
 
-        dst_from_hac = -500 * hac_norm - 150 * dhdt_norm - 30
-        dst_from_hac = np.clip(dst_from_hac, -500, 20)
+        # 🔥 NOVA FUNÇÃO (mais estável)
+        dst_from_hac = -400 * (hac_norm ** 1.3) - 120 * dhdt_norm
 
+        # offset físico leve
+        dst_from_hac -= 20
+
+        # 🔒 CLIP FINAL FÍSICO
+        dst_from_hac = np.clip(dst_from_hac, -500, 50)
         # Diagnóstico do core
         dst_core = core_results.get('Dst_pred', np.zeros_like(hac_total))
         core_unstable = np.any(np.abs(dst_core) > 1000)
