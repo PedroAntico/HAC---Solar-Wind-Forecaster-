@@ -550,7 +550,12 @@ class ProductionHACModel:
                 except:
                     dt[i] = 60.0
         if i % 2000 == 0:
-            print(f"dt[i]: {dt[i]:.2f} sec | dt_hours: {dt[i]/3600:.6f}")
+            print(f"""
+            injection: {injection:.4f}
+            dt_hours: {dt[i]/3600:.6f}
+            injection_eff: {(injection * (dt[i]/3600)):.6f}
+            hac_ring_prev: {hac_ring[i-1]:.4f}
+            """)
             dt[0] = dt[1]
 
         return dt
