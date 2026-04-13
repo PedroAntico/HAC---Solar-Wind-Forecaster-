@@ -324,9 +324,7 @@ class ProductionHACModel:
         dt_hours = dt[i] / 3600.0
 
         injection_eff = injection * dt_hours
-
-        # 🔥 LIMITADOR FÍSICO (EVITA EXPLOSÃO)
-        injection_eff = np.clip(injection_eff, 0, 50)
+        injection_eff = np.clip(injection_eff, 0, 100)   # permite tempestades severas
 
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
@@ -370,38 +368,43 @@ class ProductionHACModel:
             density=density,
             mode='nowcast'
 )
+        # ------------------------------------------------------------
+        # Mapeamento HAC → Dst (fisicamente consistente)
+        # ------------------------------------------------------------
+        hac_clipped = np.clip(hac_total, 0, 800)
+        hac_norm = hac_clipped / 800.0
 
-        # ========================================================
-        # 🔥 MAPEAMENTO HAC → Dst COM GATING FÍSICO (CORRETO)
-        # ========================================================
+        dhdt_clipped = np.clip(np.abs(dHAC_dt), 0, 400)
+        dhdt_norm = dhdt_clipped / 400.0
 
-        hac = hac_total
-        dhdt = dHAC_dt
+        dst_from_hac = -500 * hac_norm - 150 * dhdt_norm
+        dst_from_hac = np.clip(dst_from_hac, -500, 20)
 
-        # Fatores físicos (ESSENCIAL)
-        bz_factor = np.clip((-Bz) / 10.0, 0, 1)
-        v_factor = np.clip((Vsw - 400) / 400, 0, 1)
+        # Diagnóstico do core
+        dst_core = core_results.get('Dst_pred', np.zeros_like(hac_total))
+        core_unstable = np.any(np.abs(dst_core) > 1000)
 
-        activity = bz_factor * v_factor
+        if core_unstable:
+            print("   ⚠️ CORE INSTÁVEL (|Dst| > 1000 nT) → Dst puramente do HAC")
+            dst_hybrid = dst_from_hac.copy()
+        else:
+            # Blend não linear: baixa atividade → core domina; alta atividade → HAC domina
+            bz_factor = np.clip((-Bz) / 15.0, 0, 1)
+            v_factor = np.clip((Vsw - 400) / 400, 0, 1)
+            activity = bz_factor * v_factor
+            blend = activity ** 1.5
+            blend = np.clip(blend, 0.1, 0.95)
 
-        # Mapeamento físico corrigido
-        # 🔥 normalização física
-        hac_norm = hac / 800.0
-        dhdt_norm = np.abs(dhdt) / 400.0
+            dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
+            print(f"   🟢 Core estável. Peso médio do HAC no blend: {np.mean(blend):.2f}")
 
-        # 🔥 mapeamento físico controlado
-        dst_from_hac = -250 * hac_norm - 120 * dhdt_norm - 20
+            dst_hybrid = np.clip(dst_hybrid, -500, 50)
 
-        # Fusão com modelo core
-        blend = np.clip(activity, 0.2, 1.0)
+            core_results['Dst_pred'] = dst_hybrid
+            core_results['Dst_min'] = np.min(dst_hybrid)
+            core_results['Dst_now'] = dst_hybrid[-1]
 
-        core_results['Dst_pred'] = ((1 - blend) * core_results['Dst_pred'] + blend * dst_from_hac)
-
-        # Atualização final
-        core_results['Dst_min'] = np.min(core_results['Dst_pred'])
-        core_results['Dst_now'] = core_results['Dst_pred'][-1]
-
-        print(f"   • Dst físico mínimo gerado: {core_results['Dst_min']:.1f} nT")
+            print(f"   • Dst físico mínimo gerado: {core_results['Dst_min']:.1f} nT")
 
         # ------------------------------------------------------------
         # 3. Armazenar resultados
@@ -450,24 +453,22 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização que NUNCA gera NaN"""
-        max_val = np.nanmax(values)
+        """Normalização robusta usando percentis para evitar compressão ou explosão."""
+        p99 = np.percentile(values, 99)
+        p95 = np.percentile(values, 95)
+        scale = max(p99, p95 * 1.2)   # evita que p99 sozinho seja instável
 
-        if max_val > 0:
-            normalized = values / self.config.HAC_REF * 300
+        if scale > 0:
+            normalized = (values / scale) * 300.0
         else:
             normalized = np.zeros_like(values)
 
-        normalized = np.nan_to_num(
-            normalized,
-            nan=0.0,
-            posinf=self.config.HAC_SCALE_MAX,
-            neginf=0.0
-        )
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=800, neginf=0.0)
+        normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
 
-        print(f"   • HAC máximo: {np.max(normalized):.1f}")
-        print(f"   • HAC médio: {np.mean(normalized):.1f}")
-
+        print(f"   • HAC escala dinâmica (p99={p99:.1f}, p95={p95:.1f}) -> scale={scale:.1f}")
+        print(f"   • HAC máximo (pós-norm): {np.max(normalized):.1f}")
+        print(f"   • HAC médio (pós-norm): {np.mean(normalized):.1f}")
         return normalized
     
     def _compute_robust_derivative(self, hac_total, times):
