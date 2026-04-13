@@ -370,7 +370,9 @@ class ProductionHACModel:
         dst_from_hac = -1.6 * hac - 3.5 * np.abs(dhdt) - 50.0
 
         # Fusão com modelo core
-        core_results['Dst_pred'] = 0.1 * core_results['Dst_pred'] + 0.9 * dst_from_hac
+        blend = np.clip(activity, 0.2, 1.0)
+
+        core_results['Dst_pred'] = ((1 - blend) * core_results['Dst_pred'] + blend * dst_from_hac)
 
         # Atualização final
         core_results['Dst_min'] = np.min(core_results['Dst_pred'])
