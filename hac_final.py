@@ -756,24 +756,21 @@ class ProductionHACModel:
         core_severity = self.results.get('core_severity', 0)
 
         for i in range(len(hac_values)):
-            level, decision_info = self._classify_storm_with_nowcast(
-                hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
-    )
-
+            
             dst = self.results['Dst_physical'][i]
 
             if dst <= -300:
-                return "G5"
+                level = "G5"
             elif dst <= -200:
-                return "G4"
+                level = "G4"
             elif dst <= -150:
-                return "G3"
+                level = "G3"
             elif dst <= -100:
-                return "G2"
+                level = "G2"
             elif dst <= -50:
-                return "G1"
+                level = "G1"
             else:
-                return "Quiet"
+                level = "Quiet"
 
             if core_severity > 0 and "Dst Override" not in level:
                 severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
