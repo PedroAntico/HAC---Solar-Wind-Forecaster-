@@ -437,7 +437,7 @@ class ProductionHACModel:
         dt_hours = dt[i] / 3600.0
 
         injection_eff = injection * dt_hours
-        injection_eff = np.clip(injection_eff, 0, 100)   # permite tempestades severas
+        injection_eff = np.clip(injection_eff, 0, 20)   # permite tempestades severas
 
         # -----------------------------
         # 3. DISSIPAÇÃO REAL (ESSENCIAL)
@@ -454,7 +454,7 @@ class ProductionHACModel:
         hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection - loss_ion
         hac_total = hac_ring + hac_substorm + hac_ionosphere
 
-        hac_total = self._safe_normalization(hac_total)
+        hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
 
         hac_total = np.clip(hac_total, 0, 800)
 
