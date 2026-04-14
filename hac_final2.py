@@ -1,7 +1,11 @@
 """
 HAC++ Model: Heliospheric Accumulated Coupling - PRODUÇÃO FINAL
 COM NOWCAST + INÉRCIA (Previsão de Escalação Híbrida)
-Versão Corrigida e Consolidada
+Versão Final Corrigida:
+- Atualização física separada: decay → injeção → perda
+- Perda dependente do estado (loss_factor variável)
+- Saturação suave do HAC (evita clipping brusco)
+- Fallback de coupling reduzido e com aviso
 """
 import json
 import numpy as np
@@ -192,7 +196,8 @@ class PhysicalFieldsCalculator:
 
         coupling_signal = np.where(bz < 0, coupling_nl, 0.0)
         if np.max(coupling_signal) < 1e-3:
-            coupling_signal = df['E_field_saturated'].values * 0.2
+            print("   ⚠️ Coupling extremamente baixo → usando fallback (10% do E_field)")
+            coupling_signal = df['E_field_saturated'].values * 0.1
         coupling_signal = np.clip(coupling_signal, 0, 100)
 
         df['Bt'] = Bt
@@ -241,7 +246,7 @@ class ProductionHACModel:
             alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
             alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
 
-            # --- INJECTION (corrigida) ---
+            # --- INJECTION ---
             injection = max(0.0, coupling[i])
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
@@ -252,22 +257,44 @@ class ProductionHACModel:
                 if Bz[i] < -10:
                     injection *= 2.5
             else:
-                injection = 0.0   # IMF norte → zera injeção
+                injection = 0.0
 
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
-            injection_eff = np.clip(injection_eff, 0, 80)   # limite aumentado
+            injection_eff = np.clip(injection_eff, 0, 80)
 
-            loss_ring = 0.08 * hac_ring[i-1]
-            loss_sub = 0.10 * hac_substorm[i-1]
-            loss_ion = 0.12 * hac_ionosphere[i-1]
+            # --- LOSS DEPENDENTE DO ESTADO (novo) ---
+            loss_factor_ring = 0.05 + 0.0005 * hac_ring[i-1]
+            loss_ring = loss_factor_ring * hac_ring[i-1]
 
-            # ATUALIZAÇÃO USANDO injection_eff (corrigido)
-            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
-            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
-            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
+            loss_factor_sub = 0.05 + 0.0005 * hac_substorm[i-1]
+            loss_sub = loss_factor_sub * hac_substorm[i-1]
+
+            loss_factor_ion = 0.05 + 0.0005 * hac_ionosphere[i-1]
+            loss_ion = loss_factor_ion * hac_ionosphere[i-1]
+
+            # --- ATUALIZAÇÃO SEPARADA (decay → injeção → perda) ---
+            hac_ring[i] = hac_ring[i-1] * alpha_rc
+            hac_ring[i] += self.config.ALPHA_RING * injection_eff
+            hac_ring[i] -= loss_ring
+
+            hac_substorm[i] = hac_substorm[i-1] * alpha_sub
+            hac_substorm[i] += self.config.ALPHA_SUBSTORM * injection_eff
+            hac_substorm[i] -= loss_sub
+
+            hac_ionosphere[i] = hac_ionosphere[i-1] * alpha_ion
+            hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
+            hac_ionosphere[i] -= loss_ion
+
+            # Garantir não-negatividade
+            hac_ring[i] = max(0.0, hac_ring[i])
+            hac_substorm[i] = max(0.0, hac_substorm[i])
+            hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
 
         hac_total = hac_ring + hac_substorm + hac_ionosphere
+
+        # Saturação suave (física)
+        hac_total = hac_total / (1.0 + (hac_total / 600.0) ** 2)
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
 
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
@@ -769,7 +796,6 @@ def main():
     reporter = FinalReport()
     reporter.generate_report(model.results, df, model)
 
-    # Salvar resultados
     try:
         results_df = df.copy()
         for key, value in model.results.items():
