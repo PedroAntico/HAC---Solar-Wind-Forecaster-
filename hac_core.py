@@ -491,10 +491,19 @@ class HACCoreModel:
 
         probs = storm_probability(hac_val, dhdt_val, bz_val, v_val, self.config)
 
-        # 8. Previsão de Dst (corrigida: Q_effective sem multiplicação extra por tau)
+        # 8. Previsão de Dst (com saturação explícita do termo de injeção)
         tau = float(self.config.TAU_DST)
         Dst_q = self.config.DST_Q
-        Q_effective = self.config.Q_FACTOR * coupling[-1]   # valor calibrado
+        coupling_last = coupling[-1]
+
+        # Limitar o acoplamento para evitar previsões irreais
+        coupling_safe = np.clip(coupling_last, 0, 200)   # limite superior razoável
+
+        # Calcular Q_effective com saturação
+        Q_effective = self.config.Q_FACTOR * coupling_safe
+        # Limitar Q_effective a um valor fisicamente plausível (nT)
+        Q_effective = np.clip(Q_effective, -200, 0)
+
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
 
@@ -502,10 +511,10 @@ class HACCoreModel:
         for h in [1, 2, 3]:
             dt_forecast = h * 3600.0
             exp_term = np.exp(-dt_forecast / tau)
-            # Usa Q_effective diretamente (já está em unidades compatíveis)
             dst_future = Dst_q + decay_term * exp_term + Q_effective * (1 - exp_term)
             forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
-
+        print(f"   [DEBUG forecast] coupling_last={coupling_last:.2f}, Q_effective={Q_effective:.2f}, decay_term={decay_term:.2f}")
+            
         self.results = {
             'time': time_arr,
             'HAC': hac,
