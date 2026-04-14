@@ -136,12 +136,12 @@ def global_calibration(df_train, core_model):
         density=df_train['density'].values,
         config=core_model.config
     )
-    coupling = comp['coupling']          # sinal linear → adequado para regressão
+    coupling = comp['coupling'] * 1000.0          # sinal linear → adequado para regressão
     hac_raw = comp['raw']                # HAC bruto para HAC_REF
 
     # 2. Calibrar HAC_REF com limite de segurança
     hac_ref_raw = np.percentile(hac_raw, 99)
-    core_model.config.HAC_REF = np.clip(hac_ref_raw, 100.0, 2000.0)
+    core_model.config.HAC_REF = np.clip(hac_ref_raw, 100.0, 5000.0)
     print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f} (bruto: {hac_ref_raw:.2f})")
 
     # 3. Preparar dt
