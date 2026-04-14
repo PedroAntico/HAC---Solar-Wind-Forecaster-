@@ -909,12 +909,12 @@ class ProductionHACModel:
 
         for i in range(len(hac_values)):
 
-            level, decision_info = self._classify_storm_with_nowcast(
-                hac_values[i],
-                dHAC_dt[i],
-                Bz[i],
-                Vsw[i]
-    )
+            result = self._classify_storm_with_nowcast(
+            hac_values[i], dHAC_dt[i], Bz[i], Vsw[i]
+)
+
+            level = result['final_level']
+            decision_info = result
 
             dst = dst_pred[i]
 
