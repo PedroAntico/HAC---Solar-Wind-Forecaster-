@@ -254,9 +254,9 @@ class ProductionHACModel:
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
                 injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(bz[i]))
                 #if Bz[i] < -5:
-                    injection *= 1.5
+                    #injection *= 1.5
                 #if Bz[i] < -10:
-                    injection *= 2.5
+                    #injection *= 2.5
             else:
                 injection = 0.0
 
