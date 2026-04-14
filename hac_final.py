@@ -952,7 +952,7 @@ class ProductionHACModel:
             storm_levels.append(level)
             decision_logs.append(decision_info)
 
-            if decision_info['escalation']:
+            if decision_info.get('escalation', False):
                 escalation_count += 1
             if "G4" in level or "G5" in level:
                 g4g5_nowcast_count += 1
