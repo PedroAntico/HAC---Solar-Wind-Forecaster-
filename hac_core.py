@@ -1,13 +1,15 @@
 """
-hac_core.py – Núcleo unificado do modelo HAC++ (VERSÃO FINAL COMPLETA)
-Aperfeiçoamentos finais:
-- Previsão Dst corrigida (sem multiplicação espúria por tau)
-- Probabilidades com ativação por limiar e corte para quietude
-- Injeção contínua dependente de Bz (residual 10% para Bz norte)
-- Perda sublinear (raiz quadrada do HAC)
-- Decaimento linear (1 - dt/tau) para evitar dupla dissipação
-- Saturação suave do HAC: HAC / (1 + HAC/800)
-- Calibração robusta de HAC_REF e Q_FACTOR
+hac_core.py – Núcleo unificado do modelo HAC++ (VERSÃO FINAL CONSOLIDADA)
+
+Aperfeiçoamentos aplicados:
+- Acoplamento unificado: pode receber coupling_override (escala 0–100).
+- Previsão Dst com Q_effective limitado e sem multiplicação extra por tau.
+- Probabilidades baseadas em limiares físicos (ReLU-like) com corte para quietude.
+- Injeção contínua dependente de Bz (residual 10% para Bz norte).
+- Perda proporcional à raiz quadrada do HAC (mais realista).
+- Decaimento linear (1 - dt/tau) para evitar dupla dissipação.
+- Saturação suave do HAC: HAC / (1 + HAC/800).
+- Calibração de HAC_REF via percentil 99 e Q_FACTOR via regressão linear.
 """
 
 import numpy as np
@@ -51,16 +53,16 @@ class HACCoreConfig:
     W_DHDT = 0.20
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
-    LIM_HAC = 50.0
-    LIM_BZ = -5.0
-    LIM_V = 500.0
-    LIM_DHDT = 30.0
+    LIM_HAC = 80.0
+    LIM_BZ = -8.0
+    LIM_V = 550.0
+    LIM_DHDT = 50.0
 
     # Fatores de escala para normalização das contribuições
-    SCALE_HAC = 150.0
-    SCALE_BZ = 10.0
-    SCALE_V = 300.0
-    SCALE_DHDT = 100.0
+    SCALE_HAC = 200.0
+    SCALE_BZ = 15.0
+    SCALE_V = 400.0
+    SCALE_DHDT = 150.0
 
     # Limites físicos para dH/dt
     DHDT_MIN = -500.0
@@ -414,16 +416,11 @@ class HACCoreModel:
 
     def calibrate_hac_ref(self, time, bz, v, density=None):
         """
-        Calibra HAC_REF usando mediana dos valores altos * 3.
+        Calibra HAC_REF usando percentil 99 do HAC bruto.
         """
         _, comp = compute_hac(time, bz, v, density, self.config)
         hac_raw = comp['raw']
-        threshold = np.percentile(hac_raw, 90)
-        high_values = hac_raw[hac_raw > threshold]
-        if len(high_values) > 0:
-            self.config.HAC_REF = np.median(high_values) * 3.0
-        else:
-            self.config.HAC_REF = np.percentile(hac_raw, 99)  # fallback
+        self.config.HAC_REF = np.percentile(hac_raw, 99)
         print(f"HAC_REF calibrado: {self.config.HAC_REF:.2f}")
         return self.config.HAC_REF
 
@@ -432,7 +429,7 @@ class HACCoreModel:
         self.config.Q_FACTOR = self.calibrator.Q_factor
         print(f"Q_factor calibrado: {self.config.Q_FACTOR:.4f}")
 
-    def process(self, time, bz, v, density=None, mode='event') -> Dict:
+    def process(self, time, bz, v, density=None, coupling_override=None, mode='event') -> Dict:
         # 1. HAC
         hac, components = compute_hac(time, bz, v, density, self.config)
 
@@ -449,15 +446,21 @@ class HACCoreModel:
         # 3. dH/dt
         dhdt = compute_dHdt(hac, time_arr, self.config)
 
-        # 4. Dst físico
-        coupling = components['coupling']
+        # 4. Acoplamento unificado
+        if coupling_override is not None:
+            coupling = np.clip(coupling_override, 0, 100)
+        else:
+            coupling = components['coupling']
+            coupling = np.clip(coupling, 0, 100)
+
+        # 5. Dst físico
         if self.calibrator.Q_factor is not None:
             dst_pred = self.calibrator.predict(coupling, dt)
         else:
             dst_pred = compute_dst_physical(coupling, dt, self.config.TAU_DST,
                                             self.config.Q_FACTOR, self.config.DST_Q)
 
-        # 5. Janela recente (últimos 30 min)
+        # 6. Janela recente (últimos 30 min)
         window_minutes = self.config.RECENT_WINDOW_MINUTES
         if isinstance(time_arr[-1], np.datetime64):
             recent_mask = (time_arr[-1] - time_arr) <= np.timedelta64(window_minutes, 'm')
@@ -466,7 +469,7 @@ class HACCoreModel:
             recent_mask = np.zeros(len(time_arr), dtype=bool)
             recent_mask[-n_recent:] = True
 
-        # 6. Classificação de severidade
+        # 7. Classificação de severidade
         if mode == 'nowcast':
             dst_for_class = dst_pred[-1]
             bz_recent = bz[recent_mask] if np.any(recent_mask) else bz[-30:] if len(bz)>=30 else bz
@@ -476,7 +479,7 @@ class HACCoreModel:
 
         severity = classify_storm_severity(dst_for_class, bz_recent, self.config)
 
-        # 7. Probabilidades (usando médias recentes para nowcast)
+        # 8. Probabilidades (usando médias recentes para nowcast)
         if mode == 'nowcast' and np.any(recent_mask):
             hac_val = np.mean(hac[recent_mask])
             dhdt_val = np.mean(dhdt[recent_mask])
@@ -491,18 +494,12 @@ class HACCoreModel:
 
         probs = storm_probability(hac_val, dhdt_val, bz_val, v_val, self.config)
 
-        # 8. Previsão de Dst (com saturação explícita do termo de injeção)
+        # 9. Previsão de Dst (solução analítica com Q_effective limitado)
         tau = float(self.config.TAU_DST)
         Dst_q = self.config.DST_Q
         coupling_last = coupling[-1]
-
-        # Limitar o acoplamento para evitar previsões irreais
-        coupling_safe = np.clip(coupling_last, 0, 200)   # limite superior razoável
-
-        # Calcular Q_effective com saturação
-        Q_effective = self.config.Q_FACTOR * coupling_safe
-        # Limitar Q_effective a um valor fisicamente plausível (nT)
-        Q_effective = np.clip(Q_effective, -200, 0)
+        Q_effective = self.config.Q_FACTOR * coupling_last
+        Q_effective = np.clip(Q_effective, -50, 0)   # limite suave
 
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
@@ -513,8 +510,7 @@ class HACCoreModel:
             exp_term = np.exp(-dt_forecast / tau)
             dst_future = Dst_q + decay_term * exp_term + Q_effective * (1 - exp_term)
             forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
-        print(f"   [DEBUG forecast] coupling_last={coupling_last:.2f}, Q_effective={Q_effective:.2f}, decay_term={decay_term:.2f}")
-            
+
         self.results = {
             'time': time_arr,
             'HAC': hac,
