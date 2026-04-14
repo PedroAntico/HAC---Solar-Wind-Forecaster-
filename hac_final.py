@@ -817,7 +817,7 @@ class ProductionHACModel:
             'severity': final_severity
         }
         
-        return final_level, decision_info
+        return {'final_level': final_level, 'final_severity': final_severity, 'escalation': final_severity > base_severity, 'reason': 'Quiet conditions override'}
     
     def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
         """Aplica boost adicional baseado em tendência de crescimento"""
