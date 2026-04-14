@@ -300,10 +300,17 @@ class ProductionHACModel:
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
 
-        core_results = self.core.process(time=times, bz=Bz, v=Vsw, density=density, mode='nowcast')
+        # Passa o MESMO coupling usado no HAC (já normalizado 0–100)
+        core_results = self.core.process(
+            time=times,
+            bz=Bz,
+            v=Vsw,
+            density=density,
+            coupling_override=coupling,      # ← usa o coupling_signal do HAC
+            mode='nowcast')
 
         # Conversão HAC → Dst (recalibrada)
-        dst_from_hac = -4.5 * (hac_total ** 1.25) - 20
+        dst_from_hac = -2.5 * (hac_total ** 1.1) - 20
         dst_from_hac = np.clip(dst_from_hac, -600, 50)
         dst_hybrid = dst_from_hac.copy()
         core_results['Dst_pred'] = dst_hybrid
