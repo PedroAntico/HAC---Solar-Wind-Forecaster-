@@ -190,7 +190,7 @@ def compute_hac(
     hac_total_raw = hac_ring + hac_sub + hac_ion
 
     # Saturação suave (preserva extremos)
-    hac_total = hac_total_raw / (1.0 + hac_total_raw / 800.0)
+    hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
 
     # Normalização com HAC_REF (fixo após calibração)
     hac_total = hac_total / config.HAC_REF * config.HAC_SCALE_MAX
