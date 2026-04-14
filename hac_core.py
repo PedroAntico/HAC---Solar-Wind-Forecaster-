@@ -427,12 +427,18 @@ class HACCoreModel:
         decay_term = Dst_now - Dst_q
 
         forecast = {}
+        # Garantir que tau está em segundos
+        tau = float(self.config.TAU_DST)  # já está em segundos
+
+        # Limitar Q_now para evitar explosão
+        Q_now = np.clip(self.config.Q_FACTOR * coupling[-1], -1000, 0)
+
+        # Calcular forecast com proteção
         for h in [1, 2, 3]:
             dt_forecast = h * 3600.0
             exp_term = np.exp(-dt_forecast / tau)
-            # Solução: Dst(t) = Dst_q + (Dst_now - Dst_q)*exp(-t/tau) + Q_now * tau * (1 - exp(-t/tau))
             dst_future = Dst_q + decay_term * exp_term + Q_now * tau * (1 - exp_term)
-            forecast[f'{h}h'] = dst_future
+            forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
 
         self.results = {
             'time': time_arr,
