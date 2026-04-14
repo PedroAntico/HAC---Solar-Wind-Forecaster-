@@ -252,7 +252,7 @@ class ProductionHACModel:
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
-                injection += 3.0 * e_field_clipped
+                injection += 5.0 * e_field_clipped
                 if Bz[i] < -5:
                     injection *= 1.5
                 if Bz[i] < -10:
@@ -265,13 +265,13 @@ class ProductionHACModel:
             injection_eff = np.clip(injection_eff, 0, 80)
 
             # --- LOSS DEPENDENTE DO ESTADO ---
-            loss_factor_ring = 0.05 + 0.0005 * hac_ring[i-1]
+            loss_factor_ring = 0.03 + 0.0003 * hac_ring[i-1]
             loss_ring = loss_factor_ring * hac_ring[i-1]
 
-            loss_factor_sub = 0.05 + 0.0005 * hac_substorm[i-1]
+            loss_factor_sub = 0.03 + 0.0003 * hac_substorm[i-1]
             loss_sub = loss_factor_sub * hac_substorm[i-1]
 
-            loss_factor_ion = 0.05 + 0.0005 * hac_ionosphere[i-1]
+            loss_factor_ion = 0.03 + 0.0003 * hac_ionosphere[i-1]
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
 
             # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
@@ -542,7 +542,8 @@ class ProductionHACModel:
         if forecast:
             print("   • Previsão Dst:")
             for h, val in forecast.items():
-                print(f"       {h}: {val:.1f} nT")
+                val_clipped = np.clip(val, -500, 50)
+                print(f"       {h}: {val_clipped:.1f} nT")
         probs = self.results.get('core_probabilities', {})
         if probs:
             print("   • Probabilidades:")
