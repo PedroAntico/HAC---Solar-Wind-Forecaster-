@@ -117,55 +117,6 @@ def merge_data(omni, dst):
 # =========================
 # CALIBRAÇÃO GLOBAL (apenas no treino)
 # =========================
-def global_calibration(df_train, core_model):
-    """
-    Calibra HAC_REF e Q_FACTOR usando APENAS os dados de treino.
-    Acoplamento unificado: coupling_signal do PhysicalFieldsCalculator.
-    """
-    print("\n📊 CALIBRAÇÃO GLOBAL (somente treino)...")
-
-    # 1. Calcular campos físicos (gera coupling_signal)
-    df_calc = PhysicalFieldsCalculator.compute_all_fields(df_train.copy())
-    coupling = df_calc['coupling_signal'].values
-
-    # 2. Calcular HAC bruto (para HAC_REF) – usa o ProductionHACModel temporariamente
-    temp_model = ProductionHACModel()
-    temp_model.core.config = core_model.config  # usa config atual
-    _ = temp_model.compute_hac_system(df_calc)
-    hac_raw = temp_model.results['HAC_total'] * core_model.config.HAC_REF / core_model.config.HAC_SCALE_MAX
-
-    # 3. HAC_REF = percentil 99 (robusto)
-    core_model.config.HAC_REF = np.percentile(hac_raw, 99)
-    print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f}")
-
-    # 4. dt para calibração do Q_FACTOR
-    time_arr = pd.to_datetime(df_train['time_tag']).values
-    dt = np.zeros(len(df_train))
-    if len(dt) > 1:
-        dt[1:] = (time_arr[1:] - time_arr[:-1]).astype('timedelta64[s]').astype(float)
-        dt[0] = dt[1]
-    else:
-        dt[0] = 60.0
-    dt = np.maximum(dt, 1.0)
-
-    # 5. Calibrar Q_FACTOR
-    core_model.fit_calibration(coupling, dt, df_train['dst'].values)
-    print(f"   Q_FACTOR calibrado: {core_model.config.Q_FACTOR:.4f}")
-
-    # 6. Salvar calibração
-    calib_data = {
-        "HAC_REF": core_model.config.HAC_REF,
-        "Q_FACTOR": core_model.config.Q_FACTOR,
-        "TAU_DST": core_model.config.TAU_DST,
-        "DST_Q": core_model.config.DST_Q,
-        "train_end": TRAIN_END_DATE,
-        "calibration_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    with open(CALIBRATION_FILE, "w") as f:
-        json.dump(calib_data, f, indent=4)
-    print(f"   Calibração salva em '{CALIBRATION_FILE}'")
-
-    return core_model.config
 
 # =========================
 # VALIDAÇÃO DE UM EVENTO
@@ -178,7 +129,57 @@ def validate_event(calibrated_config, df, name, start, end, is_test=True):
     print(f"\n🌌 {name} {'[TESTE]' if is_test else '[TREINO - apenas ilustrativo]'}")
 
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
-    event = df[mask].copy()
+    event =def global_calibration(df_train, core_model):
+    """
+    Calibra HAC_REF e Q_FACTOR usando APENAS os dados de treino.
+    Usa o acoplamento linear do core (compute_hac) para garantir relação física com Dst.
+    """
+    print("\n📊 CALIBRAÇÃO GLOBAL (somente treino)...")
+
+    # 1. Obter acoplamento LINEAR do core (essencial para Q_FACTOR)
+    _, comp = compute_hac(
+        time=df_train['time_tag'].values,
+        bz=df_train['bz_gsm'].values,
+        v=df_train['speed'].values,
+        density=df_train['density'].values,
+        config=core_model.config
+    )
+    coupling = comp['coupling']          # ← sinal linear, adequado para regressão
+    hac_raw = comp['raw']                # HAC bruto para calibração do HAC_REF
+
+    # 2. Calibrar HAC_REF com clipping de segurança
+    hac_ref_candidate = np.percentile(hac_raw, 99)
+    core_model.config.HAC_REF = np.clip(hac_ref_candidate, 100.0, 2000.0)
+    print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f} (bruto: {hac_ref_candidate:.2f})")
+
+    # 3. Preparar dt
+    time_arr = pd.to_datetime(df_train['time_tag']).values
+    dt = np.zeros(len(df_train))
+    if len(dt) > 1:
+        dt[1:] = (time_arr[1:] - time_arr[:-1]).astype('timedelta64[s]').astype(float)
+        dt[0] = dt[1]
+    else:
+        dt[0] = 60.0
+    dt = np.maximum(dt, 1.0)
+
+    # 4. Calibrar Q_FACTOR com o coupling linear
+    core_model.fit_calibration(coupling, dt, df_train['dst'].values)
+    print(f"   Q_FACTOR calibrado: {core_model.config.Q_FACTOR:.4f}")
+
+    # 5. Salvar calibração
+    calib_data = {
+        "HAC_REF": core_model.config.HAC_REF,
+        "Q_FACTOR": core_model.config.Q_FACTOR,
+        "TAU_DST": core_model.config.TAU_DST,
+        "DST_Q": core_model.config.DST_Q,
+        "train_end": TRAIN_END_DATE,
+        "calibration_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    with open(CALIBRATION_FILE, "w") as f:
+        json.dump(calib_data, f, indent=4)
+    print("   Calibração salva em 'hac_calibration.json'")
+
+    return core_model.config df[mask].copy()
 
     if len(event) < 20:
         print("   ⚠️ poucos dados")
