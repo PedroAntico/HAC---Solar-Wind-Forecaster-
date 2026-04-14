@@ -999,38 +999,66 @@ class ProductionHACModel:
         return kp_pred, dst_pred, storm_levels
 
     def generate_nowcast_report(self):
-        """Gera relatório específico do modelo Nowcast + Inércia"""
+        """Gera relatório específico do modelo Nowcast + Inércia (robusto e consistente)"""
 
+        # ==============================
+        # 1. SANITIZAÇÃO DOS LOGS
+        # ==============================
+        safe_logs = []
+
+        for log in self.classification_logs:
+            safe_logs.append({
+                'final_level': log.get('final_level', 'Unknown'),
+                'severity': log.get('final_severity', log.get('severity', 0)),
+                'escalation': log.get('escalation', False),
+                'hac': log.get('hac', 0.0),
+                'dhdt': log.get('dhdt', 0.0),
+                'bz': log.get('bz', 0.0),
+                'v': log.get('v', 0.0),
+                'base_level': log.get('base_level', 'Unknown')})
+
+        # ==============================
+        # 2. RESUMO DE ALERTAS
+        # ==============================
         if len(self.nowcast_alerts) == 0:
-            nowcast_summary = "Nenhum alerta de escalação detectado."
+            nowcast_summary = "Nenhum alerta de escalação detectado.\n"
         else:
             nowcast_summary = f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
             nowcast_summary += f"Triggers principais: {len(self.escalation_triggers)}\n\n"
 
-        # Análise de classificação Nowcast
-        if self.classification_logs:
-            nowcast_escalations = sum(1 for log in self.classification_logs if log['escalation'])
-            nowcast_g4g5 = sum(1 for log in self.classification_logs if log['severity'] >= 4)
+        # ==============================
+        # 3. ANÁLISE DE CLASSIFICAÇÃO
+        # ==============================
+        if safe_logs:
+            nowcast_escalations = sum(1 for log in safe_logs if log['escalation'])
+            nowcast_g4g5 = sum(1 for log in safe_logs if log['severity'] >= 4)
 
-            nowcast_summary += f"CLASSIFICAÇÃO NOWCAST:\n"
+            nowcast_summary += "CLASSIFICAÇÃO NOWCAST:\n"
             nowcast_summary += f"• Escalações Nowcast: {nowcast_escalations}\n"
             nowcast_summary += f"• Eventos G4/G5 Nowcast: {nowcast_g4g5}\n"
 
-            recent_escalations = [log for log in self.classification_logs[-10:] if log['escalation']]
+            # Últimas escalações reais
+            recent_escalations = [log for log in safe_logs[-10:] if log['escalation']]
+
             if recent_escalations:
                 nowcast_summary += "\nÚLTIMAS ESCALAÇÕES:\n"
                 for log in recent_escalations[-3:]:
                     nowcast_summary += (
                         f"• HAC={log['hac']:.1f}, dH/dt={log['dhdt']:.1f} nT/h, "
-                        f"Bz={log['bz']:.1f} nT: {log['base_level']} → {log['final_level']}\n"
-                    )
+                        f"Bz={log['bz']:.1f} nT → {log['base_level']} → {log['final_level']}\n" )
 
+        # ==============================
+        # 4. CONSTRUÇÃO DO RELATÓRIO
+        # ==============================
         report = "=" * 70 + "\n"
         report += "🚨 RELATÓRIO NOWCAST + INÉRCIA (Escalação de Tempestades)\n"
         report += "=" * 70 + "\n\n"
 
         report += nowcast_summary + "\n"
 
+        # ==============================
+        # 5. PARÂMETROS FÍSICOS
+        # ==============================
         report += "PARÂMETROS CRÍTICOS:\n"
         report += f"  • τ_eff (tempo de resposta): {self.config.TAU_EFFECTIVE} horas\n"
         report += f"  • Θ (limiar crescimento): {self.config.THETA_CRITICAL} nT/h\n"
@@ -1038,23 +1066,33 @@ class ProductionHACModel:
         report += f"  • Bz crítico: < {self.config.BZ_CRITICAL} nT\n"
         report += f"  • V crítico: > {self.config.VSW_CRITICAL} km/s\n\n"
 
+        # ==============================
+        # 6. ALERTAS DETALHADOS
+        # ==============================
         if self.escalation_triggers:
             report += "ALERTAS PRINCIPAIS:\n"
             report += "-" * 40 + "\n"
+
             for i, alert in enumerate(self.escalation_triggers, 1):
                 report += f"{i}. {alert['time']}:\n"
                 report += f"   HAC = {alert['HAC']:.1f} (abaixo de G3)\n"
                 report += f"   dH/dt = {alert['dHAC_dt']:.1f} nT/h (acima de Θ)\n"
                 report += f"   Bz médio = {alert['Bz_avg']:.1f} nT\n"
                 report += f"   V médio = {alert['V_avg']:.1f} km/s\n"
-                report += f"   Horizonte de previsão: {alert['forecast_horizon_hours']:.1f} horas\n\n"
+                report += f"   Horizonte: {alert['forecast_horizon_hours']:.1f} h\n\n"
 
+        # ==============================
+        # 7. EXPLICAÇÃO FÍSICA
+        # ==============================
         report += "EXPLICAÇÃO FÍSICA:\n"
-        report += "O modelo Nowcast + Inércia detecta condições onde o reservatório\n"
-        report += "magnetosférico está abaixo do limiar G3 mas com taxa de crescimento\n"
-        report += "crítica, indicando carregamento rápido que pode evoluir para\n"
-        report += "tempestades severas (G4/G5) em 2-6 horas.\n"
-        report += "=" * 70
+        report += (
+            "O modelo Nowcast + Inércia detecta situações onde a magnetosfera ainda\n"
+            "não atingiu níveis de tempestade severa (HAC < G3), mas apresenta\n"
+            "taxa de crescimento elevada (dH/dt alto), indicando carregamento rápido.\n\n"
+            "Isso é típico de fases iniciais de tempestades geomagnéticas, onde\n"
+            "o sistema pode evoluir para G4/G5 em poucas horas.\n")
+
+            report += "=" * 70
 
         return report
     
