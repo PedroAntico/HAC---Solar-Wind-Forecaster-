@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação científica com separação TREINO/TESTE
+validate_events.py - Validação científica com separação TREINO/TESTE (VERSÃO FINAL)
 
 Melhorias aplicadas:
 - Treino: dados até 2014-12-31. Teste: eventos a partir de 2015-01-01.
-- Acoplamento unificado: usa coupling_signal do PhysicalFieldsCalculator.
-- HAC_REF calibrado via percentil 99 (mais estável).
-- Alerta sobre valores de Dst fora do intervalo físico.
-- Possibilidade de carregar calibração salva.
+- Calibração do Q_FACTOR com acoplamento LINEAR do core (compute_hac).
+- HAC_REF limitado a [100, 2000] para evitar explosão.
+- Uso do coupling_override no modelo de produção (unificação).
+- Salvamento e reutilização inteligente da calibração.
 """
 
 import pandas as pd
@@ -17,12 +17,15 @@ import json
 import os
 from datetime import datetime
 
+# =========================
+# IMPORTS DO MODELO
+# =========================
 from hac_final import (
     ProductionHACModel,
     normalize_omni_columns,
     PhysicalFieldsCalculator
 )
-from hac_core import HACCoreModel, HACCoreConfig, evaluate_event
+from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
 
 # =========================
 # CONFIGURAÇÕES
@@ -33,17 +36,15 @@ EVENTS = {
     "Carrington_like_2012": ("2012-07-22", "2012-07-25"),
 }
 
-# Data de corte para treino/teste
 TRAIN_END_DATE = "2014-12-31"
 
-# Limites físicos para Dst
 DST_MIN_PHYSICAL = -500
 DST_MAX_PHYSICAL = 50
 
-# Arquivos
 OMNI_FILE = "data/omni_2000_2020.csv"
 DST_FILE = "data/dst_kyoto_2000_2020.csv"
 CALIBRATION_FILE = "hac_calibration.json"
+
 
 # =========================
 # CARREGAMENTO DE DADOS
@@ -70,6 +71,7 @@ def load_omni(filepath):
     print(f"   ✅ {len(df)} pontos OMNI")
     return df
 
+
 def load_dst(filepath):
     print(f"\n📥 DST: {filepath}")
     df = pd.read_csv(filepath)
@@ -92,6 +94,7 @@ def load_dst(filepath):
     print(f"   ✅ {len(df)} pontos DST")
     return df
 
+
 def merge_data(omni, dst):
     print("\n🔗 Merge OMNI + DST...")
     df = pd.merge_asof(
@@ -113,15 +116,19 @@ def merge_data(omni, dst):
     df = df.dropna(subset=['dst'])
     print(f"   ✅ final: {len(df)} pontos")
     return df
-    
+
+
+# =========================
+# CALIBRAÇÃO GLOBAL (CORRIGIDA)
+# =========================
 def global_calibration(df_train, core_model):
     """
     Calibra HAC_REF e Q_FACTOR usando APENAS os dados de treino.
-    Usa o acoplamento linear do core (compute_hac) para garantir relação física com Dst.
+    Usa o acoplamento LINEAR do core (compute_hac) para Q_FACTOR.
     """
     print("\n📊 CALIBRAÇÃO GLOBAL (somente treino)...")
 
-    # 1. Obter acoplamento LINEAR do core (essencial para Q_FACTOR)
+    # 1. Obter acoplamento linear e HAC bruto do core
     _, comp = compute_hac(
         time=df_train['time_tag'].values,
         bz=df_train['bz_gsm'].values,
@@ -129,13 +136,13 @@ def global_calibration(df_train, core_model):
         density=df_train['density'].values,
         config=core_model.config
     )
-    coupling = comp['coupling']          # ← sinal linear, adequado para regressão
-    hac_raw = comp['raw']                # HAC bruto para calibração do HAC_REF
+    coupling = comp['coupling']          # sinal linear → adequado para regressão
+    hac_raw = comp['raw']                # HAC bruto para HAC_REF
 
-    # 2. Calibrar HAC_REF com clipping de segurança
-    hac_ref_candidate = np.percentile(hac_raw, 99)
-    core_model.config.HAC_REF = np.clip(hac_ref_candidate, 100.0, 2000.0)
-    print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f} (bruto: {hac_ref_candidate:.2f})")
+    # 2. Calibrar HAC_REF com limite de segurança
+    hac_ref_raw = np.percentile(hac_raw, 99)
+    core_model.config.HAC_REF = np.clip(hac_ref_raw, 100.0, 2000.0)
+    print(f"   HAC_REF calibrado: {core_model.config.HAC_REF:.2f} (bruto: {hac_ref_raw:.2f})")
 
     # 3. Preparar dt
     time_arr = pd.to_datetime(df_train['time_tag']).values
@@ -147,7 +154,7 @@ def global_calibration(df_train, core_model):
         dt[0] = 60.0
     dt = np.maximum(dt, 1.0)
 
-    # 4. Calibrar Q_FACTOR com o coupling linear
+    # 4. Calibrar Q_FACTOR com coupling linear
     core_model.fit_calibration(coupling, dt, df_train['dst'].values)
     print(f"   Q_FACTOR calibrado: {core_model.config.Q_FACTOR:.4f}")
 
@@ -165,12 +172,16 @@ def global_calibration(df_train, core_model):
     print("   Calibração salva em 'hac_calibration.json'")
 
     return core_model.config
-    
-    # =========================
-    # VALIDAÇÃO DE UM EVENTO
-    # =========================
+
+
+# =========================
+# VALIDAÇÃO DE UM EVENTO
+# =========================
 def validate_event(calibrated_config, df, name, start, end, is_test=True):
-        """Executa o pipeline de produção e calcula métricas. is_test: se True, o evento NÃO participou da calibração."""
+    """
+    Executa o pipeline de produção e calcula métricas.
+    is_test: se True, o evento NÃO participou da calibração.
+    """
     print(f"\n🌌 {name} {'[TESTE]' if is_test else '[TREINO - apenas ilustrativo]'}")
 
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
@@ -180,7 +191,7 @@ def validate_event(calibrated_config, df, name, start, end, is_test=True):
         print("   ⚠️ poucos dados")
         return None
 
-    # 1. Calcular campos físicos
+    # 1. Calcular campos físicos (necessário para coupling_signal)
     print("   🔄 Calculando campos físicos...")
     event = PhysicalFieldsCalculator.compute_all_fields(event)
 
@@ -243,6 +254,7 @@ def validate_event(calibrated_config, df, name, start, end, is_test=True):
 
     return metrics
 
+
 # =========================
 # MAIN
 # =========================
@@ -287,7 +299,6 @@ def main():
     all_test_metrics = []
     for name, (start, end) in EVENTS.items():
         event_start = pd.to_datetime(start)
-        # Verificar se o evento está no período de teste
         is_test = event_start > pd.to_datetime(TRAIN_END_DATE)
         metrics = validate_event(calibrated_config, df, name, start, end, is_test=is_test)
         if metrics and is_test:
@@ -312,6 +323,7 @@ def main():
 
     print("\n✅ VALIDAÇÃO CONCLUÍDA")
     print("   (Eventos anteriores a 2015 foram avaliados apenas de forma ilustrativa)")
+
 
 if __name__ == "__main__":
     main()
