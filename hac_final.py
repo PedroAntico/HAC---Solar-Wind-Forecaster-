@@ -823,8 +823,12 @@ class ProductionHACModel:
             'final_level': final_level,
             'final_severity': final_severity,
             'escalation': escalation,
-            'reason': reason
-}
+            'hac': hac,
+            'dhdt': dhdt,
+            'bz': bz,
+            'v': v,
+            'base_level': base_level,
+            'nowcast_score': nowcast_score}
     
     def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
         """Aplica boost adicional baseado em tendência de crescimento"""
