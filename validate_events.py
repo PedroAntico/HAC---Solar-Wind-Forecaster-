@@ -114,19 +114,6 @@ def merge_data(omni, dst):
     print(f"   ✅ final: {len(df)} pontos")
     return df
     
-    # =========================
-    # VALIDAÇÃO DE UM EVENTO
-    # =========================
-def validate_event(calibrated_config, df, name, start, end, is_test=True):
-    """
-    Executa o pipeline de produção e calcula métricas.
-    is_test: se True, o evento NÃO participou da calibração.
-    """
-    print(f"\n🌌 {name} {'[TESTE]' if is_test else '[TREINO - apenas ilustrativo]'}")
-
-    mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
-    event =
-    
 def global_calibration(df_train, core_model):
     """
     Calibra HAC_REF e Q_FACTOR usando APENAS os dados de treino.
