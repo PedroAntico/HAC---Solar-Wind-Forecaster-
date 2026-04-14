@@ -1,12 +1,13 @@
 """
-hac_core.py – Núcleo unificado do modelo HAC++ (VERSÃO FINAL APERFEIÇOADA)
-Melhorias incorporadas:
-- Previsão Dst com saturação suave via tanh (evita explosão)
-- Probabilidades baseadas em limiares físicos (ReLU-like) – elimina falsos positivos
-- Injeção contínua em função de Bz (sem condicionais bruscos)
-- Perda dependente da raiz quadrada do HAC (mais realista fisicamente)
-- HAC_REF calibrado com robustez (mediana de altos valores * 3)
-- Classificação com freios físicos e persistência temporal
+hac_core.py – Núcleo unificado do modelo HAC++ (VERSÃO FINAL COMPLETA)
+Aperfeiçoamentos finais:
+- Previsão Dst corrigida (sem multiplicação espúria por tau)
+- Probabilidades com ativação por limiar e corte para quietude
+- Injeção contínua dependente de Bz (residual 10% para Bz norte)
+- Perda sublinear (raiz quadrada do HAC)
+- Decaimento linear (1 - dt/tau) para evitar dupla dissipação
+- Saturação suave do HAC: HAC / (1 + HAC/800)
+- Calibração robusta de HAC_REF e Q_FACTOR
 """
 
 import numpy as np
@@ -20,14 +21,14 @@ from typing import Dict, Tuple, Optional, List
 # CONFIGURAÇÃO FÍSICA (VALORES CALIBRÁVEIS)
 # ------------------------------------------------------------
 class HACCoreConfig:
-    # Referência para normalização do HAC (será calibrada)
+    # Referência para normalização do HAC (calibrada via dados)
     HAC_REF = 1_000_000.0          # placeholder
     HAC_SCALE_MAX = 500.0          # escala de saída (0-500)
 
     # Parâmetros do modelo físico de Dst
     TAU_DST = 7 * 3600             # 7 horas (decaimento em segundos)
     DST_Q = -20.0                  # baseline de quiet time (nT)
-    Q_FACTOR = -0.7                # fator de injeção (será calibrado)
+    Q_FACTOR = -0.7                # fator de injeção (calibrado globalmente)
 
     # Saturação do campo elétrico
     E_FIELD_SATURATION = 25.0      # mV/m
@@ -43,13 +44,13 @@ class HACCoreConfig:
     BZ_FREIO_MEDIAN = -5.0         # se mediana recente > -5, reduz 2 níveis
     BZ_PERSISTENCE_THRESH = -6.0   # se média recente > -6 e severidade>=3, reduz 1 nível
 
-    # Pesos para probabilidade (soma = 1.0) – serão usados na versão com limiares
+    # Pesos para probabilidade (soma = 1.0)
     W_HAC = 0.25
     W_BZ = 0.35
     W_V = 0.20
     W_DHDT = 0.20
 
-    # Limiares de ativação para probabilidades (valores abaixo não contribuem)
+    # Limiares de ativação (abaixo destes valores a contribuição é zero)
     LIM_HAC = 50.0
     LIM_BZ = -5.0
     LIM_V = 500.0
@@ -79,7 +80,7 @@ def softmax(x: np.ndarray) -> np.ndarray:
 
 
 # ------------------------------------------------------------
-# 1. CÁLCULO DO HAC (COM PRESSÃO DINÂMICA)
+# 1. CÁLCULO DO HAC (COM PRESSÃO DINÂMICA E INJEÇÃO CONTÍNUA)
 # ------------------------------------------------------------
 def compute_hac(
     time: np.ndarray,
@@ -91,6 +92,7 @@ def compute_hac(
     """
     Calcula o HAC total usando acoplamento Newell-like:
     coupling = (E_sat ** 1.5) * sqrt(density) * (v / 400)
+    A injeção é contínua em função de Bz, com residual de 10% para Bz norte.
     """
     if config is None:
         config = HACCoreConfig()
@@ -108,7 +110,7 @@ def compute_hac(
     e_field = bz_south * v * 1e-3                     # mV/m
     e_field_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
 
-    # Acoplamento incluindo densidade e velocidade
+    # Acoplamento base
     coupling = (e_field_sat ** 1.5) * np.sqrt(density) * (v / 400.0)
 
     # Tempos característicos (segundos)
@@ -139,33 +141,33 @@ def compute_hac(
     for i in range(1, n):
         # Decaimento linear (evita dupla dissipação)
         decay_rc = min(dt[i] / tau_ring, 1.0) if dt[i] > 0 else 0.0
-        decay_sb = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
-        decay_io = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
+        decay_sb = min(dt[i] / tau_sub, 1.0)   if dt[i] > 0 else 0.0
+        decay_io = min(dt[i] / tau_ion, 1.0)   if dt[i] > 0 else 0.0
 
-        # Injeção contínua dependente de Bz (sem condicionais)
+        # Injeção contínua dependente de Bz
         injection = coupling[i]
         if bz[i] < 0:
             e_field_inst = -bz[i] * v[i] * 1e-3
             e_field_clipped = np.clip(e_field_inst, 0, config.E_FIELD_SATURATION)
-            injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(bz[i]))
+            injection += 6.0 * e_field_clipped * (1.0 + 0.1 * abs(bz[i]))
         else:
-            injection *= 0.1   # residual (não zera)
+            injection *= 0.1   # residual para Bz norte (não zera)
 
         dt_hours = dt[i] / 3600.0
         injection_eff = injection * dt_hours
         injection_eff = np.clip(injection_eff, 0, 80)
 
         # Perda dependente da raiz quadrada do HAC
-        loss_factor_ring = 0.02 + 0.0002 * np.sqrt(hac_ring[i-1])
+        loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
         loss_ring = loss_factor_ring * hac_ring[i-1]
 
-        loss_factor_sub = 0.02 + 0.0002 * np.sqrt(hac_sub[i-1])
+        loss_factor_sub = 0.015 + 0.0002 * np.sqrt(hac_sub[i-1])
         loss_sub = loss_factor_sub * hac_sub[i-1]
 
-        loss_factor_ion = 0.02 + 0.0002 * np.sqrt(hac_ion[i-1])
+        loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ion[i-1])
         loss_ion = loss_factor_ion * hac_ion[i-1]
 
-        # Atualização sequencial: decaimento -> injeção -> perda
+        # Atualização sequencial: decaimento → injeção → perda
         hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
         hac_ring[i] += alpha_ring * injection_eff
         hac_ring[i] -= loss_ring
@@ -180,12 +182,12 @@ def compute_hac(
 
         # Garantir não-negatividade
         hac_ring[i] = max(0.0, hac_ring[i])
-        hac_sub[i] = max(0.0, hac_sub[i])
-        hac_ion[i] = max(0.0, hac_ion[i])
+        hac_sub[i]  = max(0.0, hac_sub[i])
+        hac_ion[i]  = max(0.0, hac_ion[i])
 
     hac_total_raw = hac_ring + hac_sub + hac_ion
 
-    # Saturação suave (menos agressiva)
+    # Saturação suave (preserva extremos)
     hac_total = hac_total_raw / (1.0 + hac_total_raw / 800.0)
 
     # Normalização com HAC_REF (fixo após calibração)
@@ -312,7 +314,7 @@ def classify_storm_severity(
 
 
 # ------------------------------------------------------------
-# 5. PROBABILIDADES G1–G5 (ATIVAÇÃO POR LIMIAR FÍSICO)
+# 5. PROBABILIDADES G1–G5 (ATIVAÇÃO POR LIMIAR + CORTE QUIETUDE)
 # ------------------------------------------------------------
 def storm_probability(
     hac: float,
@@ -323,7 +325,7 @@ def storm_probability(
 ) -> Dict[str, float]:
     """
     Calcula probabilidades usando contribuições que só ativam acima de limiares físicos.
-    Em condições quietas, a pontuação é zero e a probabilidade se concentra em G1.
+    Em condições muito quietas (score < 0.8), retorna 100% G1.
     """
     if config is None:
         config = HACCoreConfig()
@@ -336,6 +338,10 @@ def storm_probability(
 
     score = contrib_hac + contrib_bz + contrib_v + contrib_dhdt
     score = np.clip(score, 0.0, 4.0)
+
+    # Corte para quietude: se score < 0.8, retorna G1 dominante
+    if score < 0.8:
+        return {"G1": 1.0, "G2": 0.0, "G3": 0.0, "G4": 0.0, "G5": 0.0}
 
     # Escores para cada nível (não normalizados)
     level_scores = np.array([
@@ -397,7 +403,7 @@ def evaluate_event(
 
 
 # ------------------------------------------------------------
-# 7. CLASSE UNIFICADA (COM PREVISÃO FÍSICA E ESTABILIDADE)
+# 7. CLASSE UNIFICADA (COM PREVISÃO FÍSICA CORRIGIDA)
 # ------------------------------------------------------------
 class HACCoreModel:
     def __init__(self, config: Optional[HACCoreConfig] = None):
@@ -485,11 +491,10 @@ class HACCoreModel:
 
         probs = storm_probability(hac_val, dhdt_val, bz_val, v_val, self.config)
 
-        # 8. Previsão de Dst (solução analítica com saturação suave)
+        # 8. Previsão de Dst (corrigida: Q_effective sem multiplicação extra por tau)
         tau = float(self.config.TAU_DST)
         Dst_q = self.config.DST_Q
-        # Saturação suave do acoplamento para evitar explosão
-        Q_now = self.config.Q_FACTOR * np.tanh(coupling[-1] / 20.0)
+        Q_effective = self.config.Q_FACTOR * coupling[-1]   # valor calibrado
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
 
@@ -497,7 +502,8 @@ class HACCoreModel:
         for h in [1, 2, 3]:
             dt_forecast = h * 3600.0
             exp_term = np.exp(-dt_forecast / tau)
-            dst_future = Dst_q + decay_term * exp_term + Q_now * tau * (1 - exp_term)
+            # Usa Q_effective diretamente (já está em unidades compatíveis)
+            dst_future = Dst_q + decay_term * exp_term + Q_effective * (1 - exp_term)
             forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
 
         self.results = {
@@ -507,7 +513,7 @@ class HACCoreModel:
             'Dst_pred': dst_pred,
             'Dst_min': np.min(dst_pred),
             'Dst_now': Dst_now,
-            'dDst_dt': (Q_now - (Dst_now - Dst_q)/tau) * 3600.0,
+            'dDst_dt': (Q_effective - (Dst_now - Dst_q)/tau) * 3600.0,
             'forecast': forecast,
             'severity': severity,
             'probabilities': probs,
