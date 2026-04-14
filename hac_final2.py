@@ -252,10 +252,10 @@ class ProductionHACModel:
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
-                injection += 5.0 * e_field_clipped
-                if Bz[i] < -5:
+                injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(bz[i]))
+                #if Bz[i] < -5:
                     injection *= 1.5
-                if Bz[i] < -10:
+                #if Bz[i] < -10:
                     injection *= 2.5
             else:
                 injection = 0.0
@@ -265,13 +265,13 @@ class ProductionHACModel:
             injection_eff = np.clip(injection_eff, 0, 80)
 
             # --- LOSS DEPENDENTE DO ESTADO ---
-            loss_factor_ring = 0.03 + 0.0003 * hac_ring[i-1]
+            loss_factor_ring = 0.02 + 0.0002 * np.sqrt(hac_ring[i-1])
             loss_ring = loss_factor_ring * hac_ring[i-1]
 
-            loss_factor_sub = 0.03 + 0.0003 * hac_substorm[i-1]
+            loss_factor_sub = 0.02 + 0.0002 * np.sqrt(hac_substorm[i-1])
             loss_sub = loss_factor_sub * hac_substorm[i-1]
 
-            loss_factor_ion = 0.03 + 0.0003 * hac_ionosphere[i-1]
+            loss_factor_ion = 0.02 + 0.0002 * np.sqrt(hac_ionosphere[i-1])]
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
 
             # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
