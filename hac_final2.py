@@ -242,9 +242,10 @@ class ProductionHACModel:
 
         print("   Simulando reservatórios...")
         for i in range(1, n):
-            alpha_rc = np.exp(-dt[i] / tau_rc) if dt[i] > 0 else 0
-            alpha_sub = np.exp(-dt[i] / tau_sub) if dt[i] > 0 else 0
-            alpha_ion = np.exp(-dt[i] / tau_ion) if dt[i] > 0 else 0
+            # Frações de decaimento linear
+            decay_rc = min(dt[i] / tau_rc, 1.0) if dt[i] > 0 else 0.0
+            decay_sub = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
+            decay_ion = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
 
             # --- INJECTION ---
             injection = max(0.0, coupling[i])
@@ -263,7 +264,7 @@ class ProductionHACModel:
             injection_eff = injection * dt_hours
             injection_eff = np.clip(injection_eff, 0, 80)
 
-            # --- LOSS DEPENDENTE DO ESTADO (novo) ---
+            # --- LOSS DEPENDENTE DO ESTADO ---
             loss_factor_ring = 0.05 + 0.0005 * hac_ring[i-1]
             loss_ring = loss_factor_ring * hac_ring[i-1]
 
@@ -273,16 +274,16 @@ class ProductionHACModel:
             loss_factor_ion = 0.05 + 0.0005 * hac_ionosphere[i-1]
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
 
-            # --- ATUALIZAÇÃO SEPARADA (decay → injeção → perda) ---
-            hac_ring[i] = hac_ring[i-1] * alpha_rc
+            # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
+            hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
             hac_ring[i] += self.config.ALPHA_RING * injection_eff
             hac_ring[i] -= loss_ring
 
-            hac_substorm[i] = hac_substorm[i-1] * alpha_sub
+            hac_substorm[i] = hac_substorm[i-1] * (1.0 - decay_sub)
             hac_substorm[i] += self.config.ALPHA_SUBSTORM * injection_eff
             hac_substorm[i] -= loss_sub
 
-            hac_ionosphere[i] = hac_ionosphere[i-1] * alpha_ion
+            hac_ionosphere[i] = hac_ionosphere[i-1] * (1.0 - decay_ion)
             hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
             hac_ionosphere[i] -= loss_ion
 
@@ -292,9 +293,7 @@ class ProductionHACModel:
             hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
 
         hac_total = hac_ring + hac_substorm + hac_ionosphere
-
-        # Saturação suave (física)
-        hac_total = hac_total / (1.0 + (hac_total / 600.0) ** 2)
+        hac_total = hac_total / (1.0 + hac_total / 800.0)   # saturação suave melhorada
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
 
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
