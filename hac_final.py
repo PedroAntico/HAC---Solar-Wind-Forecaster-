@@ -1092,7 +1092,7 @@ class ProductionHACModel:
             "Isso é típico de fases iniciais de tempestades geomagnéticas, onde\n"
             "o sistema pode evoluir para G4/G5 em poucas horas.\n")
 
-            report += "=" * 70
+        report += "=" * 70
 
         return report
     
