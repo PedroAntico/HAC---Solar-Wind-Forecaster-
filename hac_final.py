@@ -414,7 +414,7 @@ class ProductionHACModel:
         forcing = max(0, -Bz[i]) * Vsw[i] * 1e-3
         forcing = forcing / self.config.E_FIELD_SATURATION
 
-        injection = 5.0
+        injection = max(0.0, coupling[i])
 
         # 🔥 reforço do campo elétrico
         if Bz[i] < 0:
@@ -428,7 +428,9 @@ class ProductionHACModel:
         if Bz[i] < -10:
             injection *= 2.5
         if Bz[i] >= 0:
-            decay_factor = 1.5   # descarga mais rápida
+            decay_factor = 1.5
+        if Bz[i] >= 0:
+            injection = 0.0# descarga mais rápida
         else:
             decay_factor = 1.0
         # -----------------------------
