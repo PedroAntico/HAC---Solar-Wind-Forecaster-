@@ -945,12 +945,21 @@ class ProductionHACModel:
                 elif dst <= -50:
                     level = "G1 (Dst Override)"
 
-            if core_severity > 0 and "Dst Override" not in level:
-                severity_map = {0: 'Quiet', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
-                level = severity_map.get(core_severity, level)
+            # ================================
+            # BLOQUEIO DO CORE EM ESTADO QUIETO
+            # ================================
+            quiet = (
+                hac_values[i] < 30 and
+                abs(dHAC_dt[i]) < 30 and
+                Bz[i] > -3 and
+                Vsw[i] < 500)
 
-            storm_levels.append(level)
-            decision_logs.append(decision_info)
+            if not quiet:
+                if core_severity > 0 and "Dst Override" not in level:
+                    severity_map = {0: 'G0', 1: 'G1', 2: 'G2', 3: 'G3', 4: 'G4', 5: 'G5'}
+                    level = severity_map.get(core_severity, level)
+                     storm_levels.append(level)
+                        decision_logs.append(decision_info)
 
             if decision_info.get('escalation', False):
                 escalation_count += 1
