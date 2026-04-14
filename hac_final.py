@@ -718,6 +718,27 @@ class ProductionHACModel:
         
         # PESAGEM DINÂMICA: Calcula score Nowcast
         nowcast_score = 0
+
+        # ================================
+        # BLOQUEIO DE ESTADO QUIETO (CRÍTICO)
+        # ================================
+
+        quiet = (
+            hac < 30 and
+            abs(dhdt) < 30 and
+            bz > -3 and
+            v < 500
+)
+
+        if quiet:
+            final_level = "G0"
+            final_severity = 0
+
+            return {
+                'final_level': final_level,
+                'final_severity': final_severity,
+                'reason': 'Quiet conditions override'
+    }
         
         # Componente taxa de crescimento (peso maior)
         if dhdt > 50: nowcast_score += 1
@@ -726,13 +747,12 @@ class ProductionHACModel:
         if dhdt > 200: nowcast_score += 3
         
         # Componente Bz
-        if bz < -5: nowcast_score += 1
+        if bz < -8: nowcast_score += 1
         if bz < -10: nowcast_score += 2
         if bz < -15: nowcast_score += 3
         if bz < -20: nowcast_score += 4
         
         # Componente velocidade
-        if v > 500: nowcast_score += 1
         if v > 600: nowcast_score += 1
         if v > 700: nowcast_score += 2
         if v > 800: nowcast_score += 3
