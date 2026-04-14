@@ -416,23 +416,19 @@ class ProductionHACModel:
 
         injection = max(0.0, coupling[i])
 
-        # 🔥 reforço do campo elétrico
         if Bz[i] < 0:
             e_field = -Bz[i] * Vsw[i] * 1e-3
             e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
             injection += 3.0 * e_field_clipped
 
-        # 🔥 boost por reconexão magnética
-        if Bz[i] < -5:
-            injection *= 1.5
-        if Bz[i] < -10:
-            injection *= 2.5
-        if Bz[i] >= 0:
-            decay_factor = 1.5
-        if Bz[i] >= 0:
-            injection = 0.0# descarga mais rápida
+            if Bz[i] < -5:
+                injection *= 1.5
+            if Bz[i] < -10:
+                injection *= 2.5
+
         else:
-            decay_factor = 1.0
+            # 🔥 NÃO zera — só reduz
+            injection *= 0.2
         # -----------------------------
         # 2. NORMALIZAÇÃO TEMPORAL (CRÍTICO)
         # -----------------------------
