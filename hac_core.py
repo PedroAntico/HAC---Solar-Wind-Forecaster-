@@ -422,7 +422,7 @@ class HACCoreModel:
         # 8. Previsão de Dst (solução analítica da EDO)
         tau = self.config.TAU_DST
         Dst_q = self.config.DST_Q
-        Q_now = self.config.Q_FACTOR * coupling[-1]
+        Q_now = self.config.Q_FACTOR * np.tanh(coupling[-1] / 50.0)
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
 
