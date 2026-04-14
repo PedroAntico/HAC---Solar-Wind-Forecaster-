@@ -489,7 +489,7 @@ class HACCoreModel:
         tau = float(self.config.TAU_DST)
         Dst_q = self.config.DST_Q
         # Saturação suave do acoplamento para evitar explosão
-        Q_now = self.config.Q_FACTOR * np.tanh(coupling[-1] / 50.0)
+        Q_now = self.config.Q_FACTOR * np.tanh(coupling[-1] / 20.0)
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
 
