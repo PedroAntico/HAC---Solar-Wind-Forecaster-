@@ -129,7 +129,9 @@ def validate_event(calibrated_config, df, name, start, end, is_test=True):
     print(f"\n🌌 {name} {'[TESTE]' if is_test else '[TREINO - apenas ilustrativo]'}")
 
     mask = (df['time_tag'] >= start) & (df['time_tag'] <= end)
-    event =def global_calibration(df_train, core_model):
+    event =
+    
+def global_calibration(df_train, core_model):
     """
     Calibra HAC_REF e Q_FACTOR usando APENAS os dados de treino.
     Usa o acoplamento linear do core (compute_hac) para garantir relação física com Dst.
