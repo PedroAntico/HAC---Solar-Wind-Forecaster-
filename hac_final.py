@@ -792,7 +792,7 @@ def main():
     hac_values = model.compute_hac_system(df)
     model.predict_storm_indicators(hac_values)
 
-    print("\n🚨 Relatório Nowcast:")
+    print(" Relatório Nowcast:")
     print(model.generate_nowcast_report())
     with open("nowcast_inertia_report.txt", "w") as f:
         f.write(model.generate_nowcast_report())
