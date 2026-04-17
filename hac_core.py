@@ -497,9 +497,9 @@ class HACCoreModel:
         # 9. Previsão de Dst (solução analítica com Q_effective limitado)
         tau = float(self.config.TAU_DST)
         Dst_q = self.config.DST_Q
-        coupling_last = coupling[-1]
+        coupling_last = np.clip(coupling[-1], 0, 200)
         Q_effective = self.config.Q_FACTOR * coupling_last
-        Q_effective = np.clip(Q_effective, -50, 0)   # limite suave
+        Q_effective = np.clip(Q_effective, -200, 0)   # limite suave
 
         Dst_now = dst_pred[-1]
         decay_term = Dst_now - Dst_q
