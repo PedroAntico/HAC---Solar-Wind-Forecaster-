@@ -729,7 +729,8 @@ class FinalReport:
     @staticmethod
     def generate_report(results, df, model, filename="hac_final_report.txt"):
         print("\n📊 Gerando relatório final...")
-        with open(filename, 'w') as f:
+        with open("hac_final_report.txt", "w", encoding="utf-8") as f:
+            f.write(model.generate_nowcast_report())
             f.write("="*80 + "\n")
             f.write("RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA HÍBRIDO)\n")
             f.write("="*80 + "\n\n")
@@ -792,7 +793,7 @@ def main():
     hac_values = model.compute_hac_system(df)
     model.predict_storm_indicators(hac_values)
 
-    print(" Relatório Nowcast:")
+    print("Relatório Nowcast:")
     print(model.generate_nowcast_report())
     with open("nowcast_inertia_report.txt", "w") as f:
         f.write(model.generate_nowcast_report())
