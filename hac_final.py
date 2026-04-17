@@ -795,7 +795,7 @@ def main():
 
     print("Relatório Nowcast:")
     print(model.generate_nowcast_report())
-    with open("nowcast_inertia_report.txt", "w") as f:
+    with open("nowcast_inertia_report.txt", "w", encoding="utf-8", errors="ignore") as f:
         f.write(model.generate_nowcast_report())
 
     visualizer = ProductionVisualizer()
