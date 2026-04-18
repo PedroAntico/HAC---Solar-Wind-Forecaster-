@@ -1,15 +1,12 @@
 """
 hac_core.py – Núcleo unificado do modelo HAC++ (VERSÃO FINAL CONSOLIDADA)
 
-Aperfeiçoamentos aplicados:
-- Acoplamento unificado: pode receber coupling_override (escala 0–100).
-- Previsão Dst com Q_effective limitado e sem multiplicação extra por tau.
-- Probabilidades baseadas em limiares físicos (ReLU-like) com corte para quietude.
-- Injeção contínua dependente de Bz (residual 10% para Bz norte).
-- Perda proporcional à raiz quadrada do HAC (mais realista).
-- Decaimento linear (1 - dt/tau) para evitar dupla dissipação.
-- Saturação suave do HAC: HAC / (1 + HAC/800).
-- Calibração de HAC_REF via percentil 99 e Q_FACTOR via regressão linear.
+Aperfeiçoamentos finais:
+- Probabilidades: máximo do HAC recente (30 min) + médias de Bz, V, dH/dt.
+- Termo HSS integrado para capturar atividade de buracos coronais.
+- Previsão de Dst empírica baseada na tendência de 1 hora.
+- Configurações calibradas para equilíbrio entre sensibilidade e realismo.
+- Código limpo e comentado.
 """
 
 import numpy as np
@@ -51,19 +48,19 @@ class HACCoreConfig:
     W_BZ = 0.30
     W_V = 0.20
     W_DHDT = 0.15
-    W_HSS = 0.3
+    W_HSS = 0.15
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
-    LIM_HAC = 5.0
+    LIM_HAC = 20.0
     LIM_BZ = -2.0
-    LIM_V = 250.0
-    LIM_DHDT = 2.0
+    LIM_V = 350.0
+    LIM_DHDT = 10.0
 
     # Fatores de escala para normalização das contribuições
-    SCALE_HAC = 30.0
-    SCALE_BZ = 4.0
-    SCALE_V = 150.0
-    SCALE_DHDT = 30.0
+    SCALE_HAC = 100.0
+    SCALE_BZ = 8.0
+    SCALE_V = 250.0
+    SCALE_DHDT = 60.0
 
     # Limites físicos para dH/dt
     DHDT_MIN = -500.0
@@ -317,41 +314,45 @@ def classify_storm_severity(
 
 
 # ------------------------------------------------------------
-# 5. PROBABILIDADES G1–G5 (ATIVAÇÃO POR LIMIAR + CORTE QUIETUDE)
+# 5. PROBABILIDADES G1–G5 (ATIVAÇÃO POR LIMIAR + HSS)
 # ------------------------------------------------------------
 def storm_probability(hac, dhdt, bz, v, config=None):
+    """
+    Calcula probabilidades usando contribuições que só ativam acima de limiares.
+    Inclui termo HSS para sensibilidade a buracos coronais.
+    """
     if config is None:
         config = HACCoreConfig()
 
-    # Contribuições existentes (ReLU-like)
+    # Contribuições individuais (ReLU-like)
     contrib_hac  = config.W_HAC  * np.maximum(0, hac - config.LIM_HAC) / config.SCALE_HAC
     contrib_bz   = config.W_BZ   * np.maximum(0, -bz - abs(config.LIM_BZ)) / config.SCALE_BZ
     contrib_v    = config.W_V    * np.maximum(0, v - config.LIM_V) / config.SCALE_V
     contrib_dhdt = config.W_DHDT * np.maximum(0, dhdt - config.LIM_DHDT) / config.SCALE_DHDT
 
-    # NOVO: termo HSS (baseado apenas na velocidade)
-    hss_factor = np.maximum(0, (v - 350) / 150.0)   # 0 em 450 km/s, 0.25 em 500, 0.75 em 600
-    contrib_hss = 0.4 * hss_factor                  # peso moderado
+    # Termo HSS (baseado apenas na velocidade do vento solar)
+    hss_factor = np.maximum(0, (v - 450) / 200.0)   # 0 em 450 km/s, 0.25 em 500, 0.75 em 600
+    contrib_hss = config.W_HSS * hss_factor
 
     score = contrib_hac + contrib_bz + contrib_v + contrib_dhdt + contrib_hss
     score = np.clip(score, 0.0, 4.0)
 
-    if score < 0.15:   # corte de quietude
+    # Corte de quietude
+    if score < 0.2:
         return {"G1": 1.0, "G2": 0.0, "G3": 0.0, "G4": 0.0, "G5": 0.0}
 
-    # Escores para cada nível (não normalizados)
+    # Escores para cada nível (mais íngreme para evitar G3+ com scores baixos)
     level_scores = np.array([
-        1.0 - score/4.0,          # G1
-        score/4.0,                # G2
-        (score - 1.0) / 3.0,      # G3
-        (score - 2.0) / 2.0,      # G4
-        (score - 3.0) / 1.0       # G5
+        1.0 - score/3.0,          # G1
+        score/3.0,                # G2
+        (score - 1.5) / 2.0,      # G3 (só ativa com score > 1.5)
+        (score - 2.5) / 1.5,      # G4 (score > 2.5)
+        (score - 3.5) / 1.0       # G5 (score > 3.5)
     ])
     level_scores = np.maximum(level_scores, 0.0)
 
     probs = softmax(level_scores)
-    print(f"[DEBUG] hac={hac:.1f}, dhdt={dhdt:.1f}, bz={bz:.1f}, v={v:.1f}, score={score:.3f}")
-    
+
     return {
         "G1": probs[0],
         "G2": probs[1],
@@ -359,6 +360,7 @@ def storm_probability(hac, dhdt, bz, v, config=None):
         "G4": probs[3],
         "G5": probs[4]
     }
+
 
 # ------------------------------------------------------------
 # 6. MÉTRICAS CIENTÍFICAS
@@ -399,7 +401,7 @@ def evaluate_event(
 
 
 # ------------------------------------------------------------
-# 7. CLASSE UNIFICADA (COM PREVISÃO FÍSICA CORRIGIDA)
+# 7. CLASSE UNIFICADA (COM PREVISÃO EMPÍRICA DE Dst)
 # ------------------------------------------------------------
 class HACCoreModel:
     def __init__(self, config: Optional[HACCoreConfig] = None):
@@ -409,9 +411,7 @@ class HACCoreModel:
         self.results = {}
 
     def calibrate_hac_ref(self, time, bz, v, density=None):
-        """
-        Calibra HAC_REF usando percentil 99 do HAC bruto.
-        """
+        """Calibra HAC_REF usando percentil 99 do HAC bruto."""
         _, comp = compute_hac(time, bz, v, density, self.config)
         hac_raw = comp['raw']
         self.config.HAC_REF = np.percentile(hac_raw, 99)
@@ -473,29 +473,28 @@ class HACCoreModel:
 
         severity = classify_storm_severity(dst_for_class, bz_recent, self.config)
 
-        # 8. Probabilidades (usando médias recentes para nowcast)
-        if mode == 'nowcast':
-            idx_prob = -1
+        # 8. Probabilidades (agora usa máximo do HAC recente para capturar picos)
+        if mode == 'nowcast' and np.any(recent_mask):
+            hac_val = np.max(hac[recent_mask])      # pico recente
+            dhdt_val = np.mean(dhdt[recent_mask])
+            bz_val = np.mean(bz[recent_mask])
+            v_val = np.mean(v[recent_mask])
         else:
-            idx_prob = np.argmin(dst_pred)
-        
-        hac_val = hac[idx_prob]
-        dhdt_val = dhdt[idx_prob]
-        bz_val = bz[idx_prob]
-        v_val = v[idx_prob]
+            idx_prob = -1 if mode == 'nowcast' else np.argmin(dst_pred)
+            hac_val = hac[idx_prob]
+            dhdt_val = dhdt[idx_prob]
+            bz_val = bz[idx_prob]
+            v_val = v[idx_prob]
 
         probs = storm_probability(hac_val, dhdt_val, bz_val, v_val, self.config)
 
-        # 9. Previsão de Dst (solução analítica com Q_effective limitado)
-        tau = float(self.config.TAU_DST)
-        Dst_q = self.config.DST_Q
-        coupling_last = np.clip(coupling[-1], 0, 200)
-        Q_effective = self.config.Q_FACTOR * coupling_last
-        Q_effective = np.clip(Q_effective, -200, 0)   # limite suave
-
-        # Previsão simples baseada na tendência recente do Dst (não usa Q_effective)
-        dDst_dt = (dst_pred[-1] - dst_pred[-2]) / (dt[-1] / 3600.0) if len(dst_pred) > 1 else 0.0
-        dDst_dt = np.clip(dDst_dt, -50, 50)   # limite físico (nT/h)
+        # 9. Previsão de Dst (empírica: tendência de 1 hora)
+        if len(dst_pred) >= 12:   # pelo menos 1 hora (12 pontos de 5 min)
+            window_trend = min(12, len(dst_pred))
+            dDst_dt = (dst_pred[-1] - dst_pred[-window_trend]) / (window_trend * 5 / 60.0)  # nT/h
+        else:
+            dDst_dt = 0.0
+        dDst_dt = np.clip(dDst_dt, -100, 100)
 
         Dst_now = dst_pred[-1]
         forecast = {}
@@ -509,7 +508,7 @@ class HACCoreModel:
             'Dst_pred': dst_pred,
             'Dst_min': np.min(dst_pred),
             'Dst_now': Dst_now,
-            'dDst_dt': (Q_effective - (Dst_now - Dst_q)/tau) * 3600.0,
+            'dDst_dt': dDst_dt,
             'forecast': forecast,
             'severity': severity,
             'probabilities': probs,
