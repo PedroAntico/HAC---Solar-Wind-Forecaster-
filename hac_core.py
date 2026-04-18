@@ -47,10 +47,11 @@ class HACCoreConfig:
     BZ_PERSISTENCE_THRESH = -6.0   # se média recente > -6 e severidade>=3, reduz 1 nível
 
     # Pesos para probabilidade (soma = 1.0)
-    W_HAC = 0.25
-    W_BZ = 0.35
+    W_HAC = 0.20
+    W_BZ = 0.30
     W_V = 0.20
-    W_DHDT = 0.20
+    W_DHDT = 0.15
+    W_HSS = 0.15
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
     LIM_HAC = 20.0
