@@ -474,17 +474,15 @@ class HACCoreModel:
         severity = classify_storm_severity(dst_for_class, bz_recent, self.config)
 
         # 8. Probabilidades (usando médias recentes para nowcast)
-        if mode == 'nowcast' and np.any(recent_mask):
-            hac_val = np.mean(hac[recent_mask])
-            dhdt_val = np.mean(dhdt[recent_mask])
-            bz_val = np.mean(bz[recent_mask])
-            v_val = np.mean(v[recent_mask])
+        if mode == 'nowcast':
+            idx_prob = -1
         else:
-            idx_prob = -1 if mode == 'nowcast' else np.argmin(dst_pred)
-            hac_val = hac[idx_prob]
-            dhdt_val = dhdt[idx_prob]
-            bz_val = bz[idx_prob]
-            v_val = v[idx_prob]
+            idx_prob = np.argmin(dst_pred)
+        
+        hac_val = hac[idx_prob]
+        dhdt_val = dhdt[idx_prob]
+        bz_val = bz[idx_prob]
+        v_val = v[idx_prob]
 
         probs = storm_probability(hac_val, dhdt_val, bz_val, v_val, self.config)
 
