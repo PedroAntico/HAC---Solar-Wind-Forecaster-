@@ -229,94 +229,97 @@ class ProductionHACModel:
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
         density = df['density'].fillna(5).values if 'density' in df.columns else None
-
+    
         dt = self._safe_deltat(times)
         n = len(times)
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
-
+    
         tau_rc = self.config.TAU_RING_CURRENT * 3600
         tau_sub = self.config.TAU_SUBSTORM * 3600
         tau_ion = self.config.TAU_IONOSPHERE * 3600
-
+    
         print("   Simulando reservatórios...")
         for i in range(1, n):
             # Frações de decaimento linear
             decay_rc = min(dt[i] / tau_rc, 1.0) if dt[i] > 0 else 0.0
             decay_sub = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
             decay_ion = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
-
+    
             # --- INJECTION BASE ---
             injection = max(0.0, coupling[i])
-
-            # Componente principal (Bz sul)
+    
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
                 injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(Bz[i]))
             else:
-                injection *= 0.1   # residual para Bz norte (não zera completamente)
-
-            # ========== BOOSTS PARA HSS / CIR (NOVO) ==========
+                injection *= 0.1
+    
+            # ========== BOOSTS PARA HSS/CIR (COEFICIENTES AUMENTADOS) ==========
             # 1. Turbulência de Bz (desvio padrão em janela de 60 min)
             if i >= 60:
                 bz_std = np.std(Bz[i-60:i+1])
-                if bz_std > 3.0:
-                    injection += 10.0 * (bz_std / 5.0)
-
+                if bz_std > 2.5:                     # limiar reduzido
+                    injection += 15.0 * (bz_std / 4.0)   # coeficiente maior
+    
             # 2. Vento solar rápido (HSS)
-            if Vsw[i] > 500:
-                injection += (Vsw[i] - 500) * 0.05
-
+            if Vsw[i] > 450:                         # limiar reduzido
+                injection += (Vsw[i] - 450) * 0.08    # coeficiente maior
+    
             # 3. Densidade elevada (CIR)
-            if density is not None and density[i] > 8:
-                injection *= 1.2
-            # ==================================================
-
+            if density is not None and density[i] > 6:  # limiar reduzido
+                injection *= 1.3                      # fator maior
+            # ==================================================================
+    
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
-            injection_eff = np.clip(injection_eff, 0, 80)
-
+            injection_eff = np.clip(injection_eff, 0, 100)   # limite superior aumentado
+    
             # --- LOSS DEPENDENTE DO ESTADO ---
             loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
             loss_ring = loss_factor_ring * hac_ring[i-1]
-
+    
             loss_factor_sub = 0.015 + 0.0002 * np.sqrt(hac_substorm[i-1])
             loss_sub = loss_factor_sub * hac_substorm[i-1]
-
+    
             loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
-
+    
             # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
             hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
             hac_ring[i] += self.config.ALPHA_RING * injection_eff
             hac_ring[i] -= loss_ring
-
+    
             hac_substorm[i] = hac_substorm[i-1] * (1.0 - decay_sub)
             hac_substorm[i] += self.config.ALPHA_SUBSTORM * injection_eff
             hac_substorm[i] -= loss_sub
-
+    
             hac_ionosphere[i] = hac_ionosphere[i-1] * (1.0 - decay_ion)
             hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
             hac_ionosphere[i] -= loss_ion
-
+    
             # Garantir não-negatividade
             hac_ring[i] = max(0.0, hac_ring[i])
             hac_substorm[i] = max(0.0, hac_substorm[i])
             hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
-
+    
         hac_total_raw = hac_ring + hac_substorm + hac_ionosphere
-
-        # Saturação suave (ajustada para 2000 para preservar extremos)
+    
+        # Saturação suave (ajustada para 2000)
         hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
-
+    
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
-
-        # Integração com o core (passando o coupling original)
+    
+        # Garantir que Q_FACTOR não seja zero (fallback)
+        if self.core.config.Q_FACTOR == 0.0:
+            self.core.config.Q_FACTOR = -0.05
+            print("   ⚠️ Q_FACTOR calibrado como zero, usando fallback -0.05")
+    
         core_results = self.core.process(
             time=times,
             bz=Bz,
@@ -324,16 +327,16 @@ class ProductionHACModel:
             density=density,
             coupling_override=coupling,
             mode='nowcast'
-    )
-
-        # Conversão HAC → Dst (coeficientes recalibrados)
-        dst_from_hac = -2.5 * (hac_total ** 1.1) - 20
-        dst_from_hac = np.clip(dst_from_hac, -600, 50)
+        )
+    
+        # Conversão HAC → Dst (coeficientes suavizados)
+        dst_from_hac = -1.8 * (hac_total ** 1.05) - 20
+        dst_from_hac = np.clip(dst_from_hac, -500, 50)
         dst_hybrid = dst_from_hac.copy()
         core_results['Dst_pred'] = dst_hybrid
         core_results['Dst_min'] = np.min(dst_hybrid)
         core_results['Dst_now'] = dst_hybrid[-1]
-
+    
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
@@ -353,10 +356,10 @@ class ProductionHACModel:
             'forecast': core_results['forecast'],
             'core_probabilities': core_results['probabilities'],
             'core_severity': core_results['severity']
-    })
+        })
         self._validate_output(hac_total)
         return hac_total
-
+    
     def _safe_deltat(self, times):
         n = len(times)
         dt = np.full(n, 60.0)
@@ -567,7 +570,7 @@ class ProductionHACModel:
             print("   • Previsão Dst:")
             for h, val in forecast.items():
                 val_clipped = np.clip(val, -500, 50)
-                print(f"       {h}: {val_clipped:.1f} nT")
+                print(f"       {h}: {np.clip(val, -500, 50):.1f} nT (raw: {val:.1f})")
         probs = self.results.get('core_probabilities', {})
         if probs:
             print("   • Probabilidades:")
