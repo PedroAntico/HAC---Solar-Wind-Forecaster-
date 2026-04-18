@@ -331,8 +331,8 @@ class ProductionHACModel:
         )
 
         # Conversão HAC → Dst (empírica)
-        dst_hybrid = -2.5 * (hac_total ** 1.1) - 15
-        dst_hybrid = np.clip(dst_hybrid, -300, 50)
+        dst_hybrid = -2.0 * (hac_total ** 1.05) - 15
+        dst_hybrid = np.clip(dst_hybrid, -250, 50)
         dDst_dt_emp = self._compute_robust_derivative(dst_hybrid, times)
 
         core_results['Dst_pred'] = dst_hybrid
@@ -526,7 +526,7 @@ class ProductionHACModel:
         dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
         
         # Kp empírico baseado no Dst previsto (agora dst_pred existe)
-        kp_pred = np.clip(np.abs(dst_pred) / 30.0, 0.0, 9.0)
+        kp_pred = np.minimum(np.abs(dst_pred) / 28.0, 9.0)
         
         storm_levels = []
         decision_logs = []
