@@ -247,31 +247,45 @@ class ProductionHACModel:
             decay_sub = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
             decay_ion = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
 
-            # --- INJECTION ---
+            # --- INJECTION BASE ---
             injection = max(0.0, coupling[i])
+
+            # Componente principal (Bz sul)
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
                 injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(Bz[i]))
-                #if Bz[i] < -5:
-                    #injection *= 1.5
-                #if Bz[i] < -10:
-                    #injection *= 2.5
             else:
-                injection *= 0.1
+                injection *= 0.1   # residual para Bz norte (não zera completamente)
+
+            # ========== BOOSTS PARA HSS / CIR (NOVO) ==========
+            # 1. Turbulência de Bz (desvio padrão em janela de 60 min)
+            if i >= 60:
+                bz_std = np.std(Bz[i-60:i+1])
+                if bz_std > 3.0:
+                    injection += 10.0 * (bz_std / 5.0)
+
+            # 2. Vento solar rápido (HSS)
+            if Vsw[i] > 500:
+                injection += (Vsw[i] - 500) * 0.05
+
+            # 3. Densidade elevada (CIR)
+            if density is not None and density[i] > 8:
+                injection *= 1.2
+            # ==================================================
 
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
             injection_eff = np.clip(injection_eff, 0, 80)
 
             # --- LOSS DEPENDENTE DO ESTADO ---
-            loss_factor_ring = 0.02 + 0.0002 * np.sqrt(hac_ring[i-1])
+            loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
             loss_ring = loss_factor_ring * hac_ring[i-1]
 
-            loss_factor_sub = 0.02 + 0.0002 * np.sqrt(hac_substorm[i-1])
+            loss_factor_sub = 0.015 + 0.0002 * np.sqrt(hac_substorm[i-1])
             loss_sub = loss_factor_sub * hac_substorm[i-1]
 
-            loss_factor_ion = 0.02 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
+            loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
 
             # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
@@ -292,24 +306,27 @@ class ProductionHACModel:
             hac_substorm[i] = max(0.0, hac_substorm[i])
             hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
 
-        hac_total = hac_ring + hac_substorm + hac_ionosphere
-        hac_total = hac_total / (1.0 + hac_total / 800.0)   # saturação suave melhorada
+        hac_total_raw = hac_ring + hac_substorm + hac_ionosphere
+
+        # Saturação suave (ajustada para 2000 para preservar extremos)
+        hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
 
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
 
-        # Passa o MESMO coupling usado no HAC (já normalizado 0–100)
+        # Integração com o core (passando o coupling original)
         core_results = self.core.process(
             time=times,
             bz=Bz,
             v=Vsw,
             density=density,
-            coupling_override=coupling,      # ← usa o coupling_signal do HAC
-            mode='nowcast')
+            coupling_override=coupling,
+            mode='nowcast'
+    )
 
-        # Conversão HAC → Dst (recalibrada)
+        # Conversão HAC → Dst (coeficientes recalibrados)
         dst_from_hac = -2.5 * (hac_total ** 1.1) - 20
         dst_from_hac = np.clip(dst_from_hac, -600, 50)
         dst_hybrid = dst_from_hac.copy()
@@ -336,7 +353,7 @@ class ProductionHACModel:
             'forecast': core_results['forecast'],
             'core_probabilities': core_results['probabilities'],
             'core_severity': core_results['severity']
-        })
+    })
         self._validate_output(hac_total)
         return hac_total
 
