@@ -242,12 +242,10 @@ class ProductionHACModel:
     
         print("   Simulando reservatórios...")
         for i in range(1, n):
-            # Frações de decaimento linear
             decay_rc = min(dt[i] / tau_rc, 1.0) if dt[i] > 0 else 0.0
             decay_sub = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
             decay_ion = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
     
-            # --- INJECTION BASE ---
             injection = max(0.0, coupling[i])
     
             if Bz[i] < 0:
@@ -257,27 +255,23 @@ class ProductionHACModel:
             else:
                 injection *= 0.1
     
-            # ========== BOOSTS PARA HSS/CIR (COEFICIENTES AUMENTADOS) ==========
-            # 1. Turbulência de Bz (desvio padrão em janela de 60 min)
+            # ========== BOOSTS AGRESSIVOS PARA HSS/CIR ==========
             if i >= 60:
                 bz_std = np.std(Bz[i-60:i+1])
-                if bz_std > 2.5:                     # limiar reduzido
-                    injection += 15.0 * (bz_std / 4.0)   # coeficiente maior
+                if bz_std > 2.0:
+                    injection += 20.0 * (bz_std / 3.0)
     
-            # 2. Vento solar rápido (HSS)
-            if Vsw[i] > 450:                         # limiar reduzido
-                injection += (Vsw[i] - 450) * 0.08    # coeficiente maior
+            if Vsw[i] > 400:
+                injection += (Vsw[i] - 400) * 0.12
     
-            # 3. Densidade elevada (CIR)
-            if density is not None and density[i] > 6:  # limiar reduzido
-                injection *= 1.3                      # fator maior
-            # ==================================================================
+            if density is not None and density[i] > 5:
+                injection *= 1.5
+            # ==================================================
     
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
-            injection_eff = np.clip(injection_eff, 0, 100)   # limite superior aumentado
+            injection_eff = np.clip(injection_eff, 0, 100)
     
-            # --- LOSS DEPENDENTE DO ESTADO ---
             loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
             loss_ring = loss_factor_ring * hac_ring[i-1]
     
@@ -287,7 +281,6 @@ class ProductionHACModel:
             loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
     
-            # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
             hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
             hac_ring[i] += self.config.ALPHA_RING * injection_eff
             hac_ring[i] -= loss_ring
@@ -300,42 +293,43 @@ class ProductionHACModel:
             hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
             hac_ionosphere[i] -= loss_ion
     
-            # Garantir não-negatividade
             hac_ring[i] = max(0.0, hac_ring[i])
             hac_substorm[i] = max(0.0, hac_substorm[i])
             hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
     
         hac_total_raw = hac_ring + hac_substorm + hac_ionosphere
-    
-        # Saturação suave (ajustada para 2000)
         hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
+    
+        print(f"   HAC máximo: {np.max(hac_total):.1f}")
     
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
     
-        # Garantir que Q_FACTOR não seja zero (fallback)
         if self.core.config.Q_FACTOR == 0.0:
             self.core.config.Q_FACTOR = -0.05
-            print("   ⚠️ Q_FACTOR calibrado como zero, usando fallback -0.05")
     
         core_results = self.core.process(
-            time=times,
-            bz=Bz,
-            v=Vsw,
-            density=density,
-            coupling_override=coupling,
-            mode='nowcast'
+            time=times, bz=Bz, v=Vsw, density=density,
+            coupling_override=coupling, mode='nowcast'
         )
     
-        # Conversão HAC → Dst (coeficientes suavizados)
+        # Substitui forecast por versão estável baseada em tendência
+        dDst_dt = core_results['dDst_dt']
+        Dst_now = core_results['Dst_now']
+        forecast_simple = {
+            '1h': np.clip(Dst_now + dDst_dt * 1, -500, 50),
+            '2h': np.clip(Dst_now + dDst_dt * 2, -500, 50),
+            '3h': np.clip(Dst_now + dDst_dt * 3, -500, 50)
+        }
+        core_results['forecast'] = forecast_simple
+    
         dst_from_hac = -1.8 * (hac_total ** 1.05) - 20
         dst_from_hac = np.clip(dst_from_hac, -500, 50)
-        dst_hybrid = dst_from_hac.copy()
-        core_results['Dst_pred'] = dst_hybrid
-        core_results['Dst_min'] = np.min(dst_hybrid)
-        core_results['Dst_now'] = dst_hybrid[-1]
+        core_results['Dst_pred'] = dst_from_hac
+        core_results['Dst_min'] = np.min(dst_from_hac)
+        core_results['Dst_now'] = dst_from_hac[-1]
     
         self.results.update({
             'time': times,
@@ -343,17 +337,15 @@ class ProductionHACModel:
             'HAC_ring': hac_ring,
             'HAC_substorm': hac_substorm,
             'HAC_ionosphere': hac_ionosphere,
-            'Bz': Bz,
-            'Vsw': Vsw,
-            'coupling_signal': coupling,
+            'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
             'dHAC_dt': dHAC_dt,
             'escalation_alert': escalation_flags,
             'nowcast_inertia_growth': nowcast_growth,
             'Dst_physical': core_results['Dst_pred'],
             'Dst_min_physical': core_results['Dst_min'],
             'Dst_now': core_results['Dst_now'],
-            'dDst_dt': core_results['dDst_dt'],
-            'forecast': core_results['forecast'],
+            'dDst_dt': dDst_dt,
+            'forecast': forecast_simple,
             'core_probabilities': core_results['probabilities'],
             'core_severity': core_results['severity']
         })
@@ -435,11 +427,11 @@ class ProductionHACModel:
         return escalation_flags
 
     def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
-        if hac < 50: base_level, base_severity = "Quiet", 0
-        elif hac < 100: base_level, base_severity = "G1", 1
-        elif hac < 200: base_level, base_severity = "G2", 2
-        elif hac < 350: base_level, base_severity = "G3", 3
-        elif hac < 550: base_level, base_severity = "G4", 4
+        if hac < 30: base_level, base_severity = "Quiet", 0
+        elif hac < 60: base_level, base_severity = "G1", 1
+        elif hac < 120: base_level, base_severity = "G2", 2
+        elif hac < 200: base_level, base_severity = "G3", 3
+        elif hac < 350: base_level, base_severity = "G4", 4
         else: base_level, base_severity = "G5", 5
 
         nowcast_score = 0
