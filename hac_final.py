@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
 from scipy.signal import savgol_filter
+import importlib
+import hac_core
+importlib.reload(hac_core)
 from hac_core import HACCoreModel, HACCoreConfig
 warnings.filterwarnings('ignore')
 
