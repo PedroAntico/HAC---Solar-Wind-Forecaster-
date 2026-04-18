@@ -53,10 +53,10 @@ class HACCoreConfig:
     W_DHDT = 0.20
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
-    LIM_HAC = 80.0
-    LIM_BZ = -8.0
-    LIM_V = 550.0
-    LIM_DHDT = 50.0
+    LIM_HAC = 30.0
+    LIM_BZ = -4.0
+    LIM_V = 400.0
+    LIM_DHDT = 20.0
 
     # Fatores de escala para normalização das contribuições
     SCALE_HAC = 200.0
@@ -342,7 +342,7 @@ def storm_probability(
     score = np.clip(score, 0.0, 4.0)
 
     # Corte para quietude: se score < 0.8, retorna G1 dominante
-    if score < 0.8:
+    if score < 0.3:
         return {"G1": 1.0, "G2": 0.0, "G3": 0.0, "G4": 0.0, "G5": 0.0}
 
     # Escores para cada nível (não normalizados)
