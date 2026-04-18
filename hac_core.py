@@ -51,7 +51,7 @@ class HACCoreConfig:
     W_BZ = 0.30
     W_V = 0.20
     W_DHDT = 0.15
-    W_HSS = 0.15
+    W_HSS = 0.25
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
     LIM_HAC = 20.0
