@@ -336,18 +336,32 @@ class ProductionHACModel:
         # Conversão HAC → Dst (empírica)
         dst_hybrid = -2.0 * (hac_total ** 1.05) - 15
         dst_hybrid = np.clip(dst_hybrid, -250, 50)
-        dDst_dt_emp = self._compute_robust_derivative(dst_hybrid, times)
-
+        
+        # Previsão de Dst: tendência de 2 horas, limitada a não subir
+        if len(dst_hybrid) >= 24:
+            dDst_dt_2h = (dst_hybrid[-1] - dst_hybrid[-24]) / 2.0
+        else:
+            dDst_dt_2h = 0.0
+        dDst_dt_2h = min(dDst_dt_2h, 0.0)
+        dDst_dt_2h = np.clip(dDst_dt_2h, -50, 0)
+        
+        forecast_emp = {
+            '1h': np.clip(dst_hybrid[-1] + dDst_dt_2h * 1, -500, 50),
+            '2h': np.clip(dst_hybrid[-1] + dDst_dt_2h * 2, -500, 50),
+            '3h': np.clip(dst_hybrid[-1] + dDst_dt_2h * 3, -500, 50)
+        }
+        
+        # Sobrescrever probabilidades com último ponto
+        from hac_core import storm_probability
+        probs_now = storm_probability(hac_total[-1], dHAC_dt[-1], Bz[-1], Vsw[-1], self.core.config)
+        
         core_results['Dst_pred'] = dst_hybrid
         core_results['Dst_min'] = np.min(dst_hybrid)
         core_results['Dst_now'] = dst_hybrid[-1]
-        core_results['dDst_dt'] = dDst_dt_emp[-1]
-        core_results['forecast'] = {
-            '1h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 1, -500, 50),
-            '2h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 2, -500, 50),
-            '3h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 3, -500, 50)
-        }
-
+        core_results['dDst_dt'] = dDst_dt_2h
+        core_results['forecast'] = forecast_emp
+        core_results['probabilities'] = probs_now
+        
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
@@ -363,7 +377,7 @@ class ProductionHACModel:
             'Dst_now': core_results['Dst_now'],
             'dDst_dt': core_results['dDst_dt'],
             'forecast': core_results['forecast'],
-            'core_probabilities': core_results['probabilities'],
+            'core_probabilities': probs_now,
             'core_severity': core_results['severity']
         })
         self._validate_output(hac_total)
