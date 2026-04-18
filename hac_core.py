@@ -59,10 +59,10 @@ class HACCoreConfig:
     LIM_DHDT = 20.0
 
     # Fatores de escala para normalização das contribuições
-    SCALE_HAC = 200.0
-    SCALE_BZ = 15.0
-    SCALE_V = 400.0
-    SCALE_DHDT = 150.0
+    SCALE_HAC = 120.0
+    SCALE_BZ = 12.0
+    SCALE_V = 350.0
+    SCALE_DHDT = 100.0
 
     # Limites físicos para dH/dt
     DHDT_MIN = -500.0
