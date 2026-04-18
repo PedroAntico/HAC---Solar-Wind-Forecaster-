@@ -519,27 +519,30 @@ class ProductionHACModel:
 
     def predict_storm_indicators(self, hac_values):
         print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
-        # Kp estimado a partir do Dst previsto (relação empírica)
-        kp_pred = np.clip(np.abs(dst_pred) / 25.0, 0, 9)
+        
+        # Obter Dst_pred dos resultados (já calculado em compute_hac_system)
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
         dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
-
+        
+        # Kp empírico baseado no Dst previsto (agora dst_pred existe)
+        kp_pred = np.clip(np.abs(dst_pred) / 25.0, 0, 9)
+        
         storm_levels = []
         decision_logs = []
         dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
         Bz = self.results.get('Bz', np.zeros_like(hac_values))
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
-
+    
         for i in range(len(hac_values)):
             result = self._classify_storm_with_nowcast(hac_values[i], dHAC_dt[i], Bz[i], Vsw[i])
             level = result['final_level']
-
+    
             if hac_values[i] < 20 and abs(dHAC_dt[i]) < 20:
                 level = "G0"
                 result['final_level'] = level
                 result['final_severity'] = 0
-
+    
             if Bz[i] < -8 and Vsw[i] > 600:
                 if dst_pred[i] <= -300: level = "G5 (Dst Override)"
                 elif dst_pred[i] <= -200: level = "G4 (Dst Override)"
@@ -547,12 +550,12 @@ class ProductionHACModel:
                 elif dst_pred[i] <= -100: level = "G2 (Dst Override)"
                 elif dst_pred[i] <= -50: level = "G1 (Dst Override)"
                 result['final_level'] = level
-
+    
             storm_levels.append(level)
             decision_logs.append(result)
-
+    
         enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
-
+    
         self.results.update({
             'Kp_pred': kp_pred,
             'Dst_pred': dst_pred,
@@ -563,7 +566,7 @@ class ProductionHACModel:
             'Decision_logs': decision_logs
         })
         self.classification_logs = decision_logs
-
+    
         g4g5_final = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
         g4g5_base = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
         print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
@@ -571,7 +574,7 @@ class ProductionHACModel:
         print(f"   • Dst atual: {dst_now:.1f} nT")
         print(f"   • Eventos G4/G5 (base): {g4g5_base}")
         print(f"   • Eventos G4/G5 (boost): {g4g5_final}")
-
+    
         forecast = self.results.get('forecast', {})
         if forecast:
             print("   • Previsão Dst:")
@@ -582,7 +585,7 @@ class ProductionHACModel:
             print("   • Probabilidades:")
             for k, v in probs.items():
                 print(f"       {k}: {v*100:.1f}%")
-
+    
         return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
