@@ -54,16 +54,16 @@ class HACCoreConfig:
     W_HSS = 0.3
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
-    LIM_HAC = 20.0
+    LIM_HAC = 5.0
     LIM_BZ = -2.0
-    LIM_V = 350.0
-    LIM_DHDT = 10.0
+    LIM_V = 250.0
+    LIM_DHDT = 2.0
 
     # Fatores de escala para normalização das contribuições
-    SCALE_HAC = 100.0
-    SCALE_BZ = 10.0
-    SCALE_V = 300.0
-    SCALE_DHDT = 80.0
+    SCALE_HAC = 30.0
+    SCALE_BZ = 4.0
+    SCALE_V = 150.0
+    SCALE_DHDT = 30.0
 
     # Limites físicos para dH/dt
     DHDT_MIN = -500.0
