@@ -55,9 +55,9 @@ class HACPhysicsConfig:
     RING_CURRENT_MAX = 800.0
 
     # Particionamento
-    ALPHA_RING = 0.7
-    ALPHA_SUBSTORM = 0.2
-    ALPHA_IONOSPHERE = 0.1
+    ALPHA_RING = 0.7*1.3
+    ALPHA_SUBSTORM = 0.2*1.3
+    ALPHA_IONOSPHERE = 0.1*1.3
 
     # Não linearidade
     BETA_NONLINEAR = 2.2
@@ -272,10 +272,15 @@ class ProductionHACModel:
             # 3. Densidade elevada (CIR)
             if density is not None and density[i] > 5:
                 injection *= 1.6
+                
+            # 4. Inércia / acúmulo histórico (HSS)
+            if i >= 120:
+                history_boost = np.mean(coupling[max(0, i-120):i+1])
+                injection += 0.4 * history_boost
             # ========================================
 
             dt_hours = dt[i] / 3600.0
-            injection_eff = injection * dt_hours
+            injection_eff = injection * dt_hours*1.5
             injection_eff = np.clip(injection_eff, 0, 150)
 
             # --- LOSS DEPENDENTE DO ESTADO ---
@@ -326,7 +331,8 @@ class ProductionHACModel:
         )
 
         # Conversão HAC → Dst (empírica)
-        dst_hybrid = np.clip(-1.8 * (hac_total ** 1.05) - 20, -500, 50)
+        dst_hybrid = -6.0 * (hac_total ** 1.2) - 15
+        dst_hybrid = np.clip(dst_hybrid, -500, 50)
         dDst_dt_emp = self._compute_robust_derivative(dst_hybrid, times)
 
         core_results['Dst_pred'] = dst_hybrid
@@ -436,11 +442,11 @@ class ProductionHACModel:
 
     def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
         # Limiares ajustados para melhor sensibilidade
-        if hac < 20: base_level, base_severity = "Quiet", 0
-        elif hac < 50: base_level, base_severity = "G1", 1
-        elif hac < 100: base_level, base_severity = "G2", 2
-        elif hac < 180: base_level, base_severity = "G3", 3
-        elif hac < 300: base_level, base_severity = "G4", 4
+        if hac < 30: base_level, base_severity = "Quiet", 0
+        elif hac < 80: base_level, base_severity = "G1", 1
+        elif hac < 150: base_level, base_severity = "G2", 2
+        elif hac < 250: base_level, base_severity = "G3", 3
+        elif hac < 400: base_level, base_severity = "G4", 4
         else: base_level, base_severity = "G5", 5
 
         nowcast_score = 0
@@ -513,7 +519,8 @@ class ProductionHACModel:
 
     def predict_storm_indicators(self, hac_values):
         print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
-        kp_pred = 9 * np.tanh(hac_values / 180)
+        # Kp estimado a partir do Dst previsto (relação empírica)
+        kp_pred = np.clip(np.abs(dst_pred) / 25.0, 0, 9)
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
         dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
