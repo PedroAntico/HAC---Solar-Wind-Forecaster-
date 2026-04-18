@@ -276,11 +276,11 @@ class ProductionHACModel:
             # 4. Inércia / acúmulo histórico (HSS)
             if i >= 120:
                 history_boost = np.mean(coupling[max(0, i-120):i+1])
-                injection += 0.4 * history_boost
+                injection += 0.2 * history_boost
             # ========================================
 
             dt_hours = dt[i] / 3600.0
-            injection_eff = injection * dt_hours*1.5
+            injection_eff = injection * dt_hours*1.2
             injection_eff = np.clip(injection_eff, 0, 150)
 
             # --- LOSS DEPENDENTE DO ESTADO ---
@@ -331,8 +331,8 @@ class ProductionHACModel:
         )
 
         # Conversão HAC → Dst (empírica)
-        dst_hybrid = -6.0 * (hac_total ** 1.2) - 15
-        dst_hybrid = np.clip(dst_hybrid, -500, 50)
+        dst_hybrid = -3.5 * (hac_total ** 1.15) - 15
+        dst_hybrid = np.clip(dst_hybrid, -400, 50)
         dDst_dt_emp = self._compute_robust_derivative(dst_hybrid, times)
 
         core_results['Dst_pred'] = dst_hybrid
@@ -526,7 +526,7 @@ class ProductionHACModel:
         dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
         
         # Kp empírico baseado no Dst previsto (agora dst_pred existe)
-        kp_pred = np.clip(np.abs(dst_pred) / 25.0, 0, 9)
+        kp_pred = np.clip(np.abs(dst_pred) / 30.0, 0, 9)
         
         storm_levels = []
         decision_logs = []
