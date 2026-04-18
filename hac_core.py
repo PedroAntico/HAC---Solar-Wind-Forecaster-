@@ -319,31 +319,24 @@ def classify_storm_severity(
 # ------------------------------------------------------------
 # 5. PROBABILIDADES G1–G5 (ATIVAÇÃO POR LIMIAR + CORTE QUIETUDE)
 # ------------------------------------------------------------
-def storm_probability(
-    hac: float,
-    dhdt: float,
-    bz: float,
-    v: float,
-    config: Optional[HACCoreConfig] = None
-) -> Dict[str, float]:
-    """
-    Calcula probabilidades usando contribuições que só ativam acima de limiares físicos.
-    Em condições muito quietas (score < 0.8), retorna 100% G1.
-    """
+def storm_probability(hac, dhdt, bz, v, config=None):
     if config is None:
         config = HACCoreConfig()
 
-    # Contribuições individuais (ReLU-like)
+    # Contribuições existentes (ReLU-like)
     contrib_hac  = config.W_HAC  * np.maximum(0, hac - config.LIM_HAC) / config.SCALE_HAC
     contrib_bz   = config.W_BZ   * np.maximum(0, -bz - abs(config.LIM_BZ)) / config.SCALE_BZ
     contrib_v    = config.W_V    * np.maximum(0, v - config.LIM_V) / config.SCALE_V
     contrib_dhdt = config.W_DHDT * np.maximum(0, dhdt - config.LIM_DHDT) / config.SCALE_DHDT
 
-    score = contrib_hac + contrib_bz + contrib_v + contrib_dhdt
+    # NOVO: termo HSS (baseado apenas na velocidade)
+    hss_factor = np.maximum(0, (v - 450) / 200.0)   # 0 em 450 km/s, 0.25 em 500, 0.75 em 600
+    contrib_hss = 0.25 * hss_factor                  # peso moderado
+
+    score = contrib_hac + contrib_bz + contrib_v + contrib_dhdt + contrib_hss
     score = np.clip(score, 0.0, 4.0)
 
-    # Corte para quietude: se score < 0.8, retorna G1 dominante
-    if score < 0.2:
+    if score < 0.15:   # corte de quietude
         return {"G1": 1.0, "G2": 0.0, "G3": 0.0, "G4": 0.0, "G5": 0.0}
 
     # Escores para cada nível (não normalizados)
