@@ -526,7 +526,7 @@ class ProductionHACModel:
         dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
         
         # Kp empírico baseado no Dst previsto (agora dst_pred existe)
-        kp_pred = np.clip(np.abs(dst_pred) / 30.0, 9.0)
+        kp_pred = np.clip(np.abs(dst_pred) / 30.0, 0.0, 9.0)
         
         storm_levels = []
         decision_logs = []
