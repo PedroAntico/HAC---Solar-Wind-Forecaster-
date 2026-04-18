@@ -358,7 +358,7 @@ def storm_probability(hac, dhdt, bz, v, config=None):
         "G4": probs[3],
         "G5": probs[4]
     }
-    print(f"[DEBUG] hac={hac:.1f}, dhdt={dhdt:.1f}, bz={bz:.1f}, v={v:.1f}, score={score:.3f}")
+        print(f"[DEBUG] hac={hac:.1f}, dhdt={dhdt:.1f}, bz={bz:.1f}, v={v:.1f}, score={score:.3f}")
 
 # ------------------------------------------------------------
 # 6. MÉTRICAS CIENTÍFICAS
