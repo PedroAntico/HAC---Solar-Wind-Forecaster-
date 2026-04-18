@@ -342,7 +342,7 @@ def storm_probability(
     score = np.clip(score, 0.0, 4.0)
 
     # Corte para quietude: se score < 0.8, retorna G1 dominante
-    if score < 0.3:
+    if score < 0.2:
         return {"G1": 1.0, "G2": 0.0, "G3": 0.0, "G4": 0.0, "G5": 0.0}
 
     # Escores para cada nível (não normalizados)
