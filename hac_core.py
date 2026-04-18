@@ -495,15 +495,14 @@ class HACCoreModel:
         Q_effective = self.config.Q_FACTOR * coupling_last
         Q_effective = np.clip(Q_effective, -200, 0)   # limite suave
 
-        Dst_now = dst_pred[-1]
-        decay_term = Dst_now - Dst_q
+        # Previsão simples baseada na tendência recente do Dst (não usa Q_effective)
+        dDst_dt = (dst_pred[-1] - dst_pred[-2]) / (dt[-1] / 3600.0) if len(dst_pred) > 1 else 0.0
+        dDst_dt = np.clip(dDst_dt, -50, 50)   # limite físico (nT/h)
 
+        Dst_now = dst_pred[-1]
         forecast = {}
         for h in [1, 2, 3]:
-            dt_forecast = h * 3600.0
-            exp_term = np.exp(-dt_forecast / tau)
-            dst_future = Dst_q + decay_term * exp_term + Q_effective * (1 - exp_term)
-            forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
+            forecast[f'{h}h'] = np.clip(Dst_now + dDst_dt * h, -500, 50)
 
         self.results = {
             'time': time_arr,
