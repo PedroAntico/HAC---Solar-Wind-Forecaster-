@@ -2,10 +2,9 @@
 HAC++ Model: Heliospheric Accumulated Coupling - PRODUÇÃO FINAL
 COM NOWCAST + INÉRCIA (Previsão de Escalação Híbrida)
 Versão Final Corrigida:
-- Atualização física separada: decay → injeção → perda
-- Perda dependente do estado (loss_factor variável)
-- Saturação suave do HAC (evita clipping brusco)
-- Fallback de coupling reduzido e com aviso
+- Boosts para HSS/CIR (turbulência, vento rápido, densidade)
+- Forecast empírico baseado na tendência do Dst
+- Limiares de classificação ajustados
 """
 import json
 import numpy as np
@@ -217,6 +216,9 @@ class ProductionHACModel:
     def __init__(self, config=None):
         self.config = config or HACPhysicsConfig()
         self.core = HACCoreModel()
+        # Fallback para Q_FACTOR se estiver zerado
+        if self.core.config.Q_FACTOR == 0.0:
+            self.core.config.Q_FACTOR = -0.05
         self.results = {}
         self.nowcast_alerts = []
         self.escalation_triggers = []
@@ -229,108 +231,114 @@ class ProductionHACModel:
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
         density = df['density'].fillna(5).values if 'density' in df.columns else None
-    
+
         dt = self._safe_deltat(times)
         n = len(times)
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
-    
+
         tau_rc = self.config.TAU_RING_CURRENT * 3600
         tau_sub = self.config.TAU_SUBSTORM * 3600
         tau_ion = self.config.TAU_IONOSPHERE * 3600
-    
+
         print("   Simulando reservatórios...")
         for i in range(1, n):
             decay_rc = min(dt[i] / tau_rc, 1.0) if dt[i] > 0 else 0.0
             decay_sub = min(dt[i] / tau_sub, 1.0) if dt[i] > 0 else 0.0
             decay_ion = min(dt[i] / tau_ion, 1.0) if dt[i] > 0 else 0.0
-    
+
+            # --- INJECTION BASE ---
             injection = max(0.0, coupling[i])
-    
+
             if Bz[i] < 0:
                 e_field = -Bz[i] * Vsw[i] * 1e-3
                 e_field_clipped = np.clip(e_field, 0, self.config.E_FIELD_SATURATION)
                 injection += 5.0 * e_field_clipped * (1.0 + 0.1 * abs(Bz[i]))
             else:
                 injection *= 0.1
-    
-            # ========== BOOSTS AGRESSIVOS PARA HSS/CIR ==========
+
+            # ========== BOOSTS PARA HSS/CIR ==========
+            # 1. Turbulência de Bz (janela 60 min)
             if i >= 60:
                 bz_std = np.std(Bz[i-60:i+1])
                 if bz_std > 2.0:
-                    injection += 20.0 * (bz_std / 3.0)
-    
+                    injection += 25.0 * (bz_std / 3.0)
+
+            # 2. Vento solar rápido
             if Vsw[i] > 400:
-                injection += (Vsw[i] - 400) * 0.12
-    
+                injection += (Vsw[i] - 400) * 0.15
+
+            # 3. Densidade elevada (CIR)
             if density is not None and density[i] > 5:
-                injection *= 1.5
-            # ==================================================
-    
+                injection *= 1.6
+            # ========================================
+
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
-            injection_eff = np.clip(injection_eff, 0, 100)
-    
+            injection_eff = np.clip(injection_eff, 0, 150)
+
+            # --- LOSS DEPENDENTE DO ESTADO ---
             loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
             loss_ring = loss_factor_ring * hac_ring[i-1]
-    
+
             loss_factor_sub = 0.015 + 0.0002 * np.sqrt(hac_substorm[i-1])
             loss_sub = loss_factor_sub * hac_substorm[i-1]
-    
+
             loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
             loss_ion = loss_factor_ion * hac_ionosphere[i-1]
-    
+
+            # --- ATUALIZAÇÃO COM DECAIMENTO LINEAR ---
             hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
             hac_ring[i] += self.config.ALPHA_RING * injection_eff
             hac_ring[i] -= loss_ring
-    
+
             hac_substorm[i] = hac_substorm[i-1] * (1.0 - decay_sub)
             hac_substorm[i] += self.config.ALPHA_SUBSTORM * injection_eff
             hac_substorm[i] -= loss_sub
-    
+
             hac_ionosphere[i] = hac_ionosphere[i-1] * (1.0 - decay_ion)
             hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
             hac_ionosphere[i] -= loss_ion
-    
+
+            # Garantir não-negatividade
             hac_ring[i] = max(0.0, hac_ring[i])
             hac_substorm[i] = max(0.0, hac_substorm[i])
             hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
-    
+
         hac_total_raw = hac_ring + hac_substorm + hac_ionosphere
         hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
         hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
-    
+
         print(f"   HAC máximo: {np.max(hac_total):.1f}")
-    
+
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
-    
+
+        # Garantir Q_FACTOR não nulo
         if self.core.config.Q_FACTOR == 0.0:
             self.core.config.Q_FACTOR = -0.05
-    
+
         core_results = self.core.process(
             time=times, bz=Bz, v=Vsw, density=density,
             coupling_override=coupling, mode='nowcast'
         )
-    
-        # Substitui forecast por versão estável baseada em tendência
-        dDst_dt = core_results['dDst_dt']
-        Dst_now = core_results['Dst_now']
-        forecast_simple = {
-            '1h': np.clip(Dst_now + dDst_dt * 1, -500, 50),
-            '2h': np.clip(Dst_now + dDst_dt * 2, -500, 50),
-            '3h': np.clip(Dst_now + dDst_dt * 3, -500, 50)
+
+        # Conversão HAC → Dst (empírica)
+        dst_hybrid = np.clip(-1.8 * (hac_total ** 1.05) - 20, -500, 50)
+        dDst_dt_emp = self._compute_robust_derivative(dst_hybrid, times)
+
+        core_results['Dst_pred'] = dst_hybrid
+        core_results['Dst_min'] = np.min(dst_hybrid)
+        core_results['Dst_now'] = dst_hybrid[-1]
+        core_results['dDst_dt'] = dDst_dt_emp[-1]
+        core_results['forecast'] = {
+            '1h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 1, -500, 50),
+            '2h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 2, -500, 50),
+            '3h': np.clip(dst_hybrid[-1] + dDst_dt_emp[-1] * 3, -500, 50)
         }
-        core_results['forecast'] = forecast_simple
-    
-        dst_from_hac = -1.8 * (hac_total ** 1.05) - 20
-        dst_from_hac = np.clip(dst_from_hac, -500, 50)
-        core_results['Dst_pred'] = dst_from_hac
-        core_results['Dst_min'] = np.min(dst_from_hac)
-        core_results['Dst_now'] = dst_from_hac[-1]
-    
+
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
@@ -344,14 +352,14 @@ class ProductionHACModel:
             'Dst_physical': core_results['Dst_pred'],
             'Dst_min_physical': core_results['Dst_min'],
             'Dst_now': core_results['Dst_now'],
-            'dDst_dt': dDst_dt,
-            'forecast': forecast_simple,
+            'dDst_dt': core_results['dDst_dt'],
+            'forecast': core_results['forecast'],
             'core_probabilities': core_results['probabilities'],
             'core_severity': core_results['severity']
         })
         self._validate_output(hac_total)
         return hac_total
-    
+
     def _safe_deltat(self, times):
         n = len(times)
         dt = np.full(n, 60.0)
@@ -365,30 +373,30 @@ class ProductionHACModel:
             dt[0] = dt[1]
         return dt
 
-    def _compute_robust_derivative(self, hac_total, times):
+    def _compute_robust_derivative(self, signal, times):
         times = np.array(times, dtype="datetime64[s]")
         dt = np.diff(times).astype("timedelta64[s]").astype(float)
         dt = np.insert(dt, 0, np.median(dt))
         dt[dt <= 0] = 1.0
         dt_hours = np.maximum(dt / 3600.0, 1e-3)
 
-        if hac_total.size < 7:
-            dHAC_dt = np.gradient(hac_total) / dt_hours
+        if signal.size < 7:
+            deriv = np.gradient(signal) / dt_hours
         else:
-            window = min(7, len(hac_total))
+            window = min(7, len(signal))
             if window < 3:
-                return np.gradient(hac_total) / dt_hours
+                return np.gradient(signal) / dt_hours
             if window % 2 == 0:
                 window -= 1
             dt_median = np.median(dt_hours)
             try:
-                dHAC_dt = savgol_filter(hac_total, window_length=window, polyorder=2, deriv=1, delta=dt_median)
+                deriv = savgol_filter(signal, window_length=window, polyorder=2, deriv=1, delta=dt_median)
             except:
-                dHAC_dt = np.gradient(hac_total) / dt_hours
-        dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
+                deriv = np.gradient(signal) / dt_hours
+        deriv = np.nan_to_num(deriv, nan=0.0)
         limit = 300
-        dHAC_dt = limit * np.tanh(dHAC_dt / limit)
-        return dHAC_dt
+        deriv = limit * np.tanh(deriv / limit)
+        return deriv
 
     def _compute_nowcast_growth(self, hac_total, coupling):
         hac_nowcast = (coupling / self.config.E_FIELD_SATURATION) * self.config.HAC_SCALE_MAX
@@ -427,29 +435,30 @@ class ProductionHACModel:
         return escalation_flags
 
     def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
-        if hac < 30: base_level, base_severity = "Quiet", 0
-        elif hac < 60: base_level, base_severity = "G1", 1
-        elif hac < 120: base_level, base_severity = "G2", 2
-        elif hac < 200: base_level, base_severity = "G3", 3
-        elif hac < 350: base_level, base_severity = "G4", 4
+        # Limiares ajustados para melhor sensibilidade
+        if hac < 20: base_level, base_severity = "Quiet", 0
+        elif hac < 50: base_level, base_severity = "G1", 1
+        elif hac < 100: base_level, base_severity = "G2", 2
+        elif hac < 180: base_level, base_severity = "G3", 3
+        elif hac < 300: base_level, base_severity = "G4", 4
         else: base_level, base_severity = "G5", 5
 
         nowcast_score = 0
-        if dhdt > 50: nowcast_score += 1
-        if dhdt > 100: nowcast_score += 1
-        if dhdt > 150: nowcast_score += 2
-        if dhdt > 200: nowcast_score += 3
-        if bz < -8: nowcast_score += 1
-        if bz < -10: nowcast_score += 2
-        if bz < -15: nowcast_score += 3
-        if bz < -20: nowcast_score += 4
-        if v > 600: nowcast_score += 1
-        if v > 700: nowcast_score += 2
-        if v > 800: nowcast_score += 3
-        if hac > 50: nowcast_score += 1
-        if hac > 100: nowcast_score += 1
+        if dhdt > 40: nowcast_score += 1
+        if dhdt > 80: nowcast_score += 1
+        if dhdt > 120: nowcast_score += 2
+        if dhdt > 180: nowcast_score += 3
+        if bz < -5: nowcast_score += 1
+        if bz < -8: nowcast_score += 2
+        if bz < -12: nowcast_score += 3
+        if bz < -18: nowcast_score += 4
+        if v > 500: nowcast_score += 1
+        if v > 600: nowcast_score += 2
+        if v > 700: nowcast_score += 3
+        if hac > 30: nowcast_score += 1
+        if hac > 60: nowcast_score += 1
+        if hac > 100: nowcast_score += 2
         if hac > 150: nowcast_score += 2
-        if hac > 200: nowcast_score += 2
 
         # Quiet override
         if hac < 20 and abs(dhdt) < 20 and bz > -2 and v < 450:
@@ -467,11 +476,11 @@ class ProductionHACModel:
         elif nowcast_score >= 6:
             if base_severity < 2: final_level, final_severity = "G2 (Nowcast Enhancement)", 2
 
-        if dhdt > 220 and bz < -10 and v > 750 and hac > 100:
+        if dhdt > 200 and bz < -8 and v > 650 and hac > 80:
             if base_severity < 5: final_level, final_severity = "G5 (Extreme Nowcast)", 5
-        elif dhdt > 150 and bz < -8 and v > 650:
+        elif dhdt > 120 and bz < -6 and v > 550:
             if base_severity < 4: final_level, final_severity = "G4 (Strong Nowcast)", 4
-        elif dhdt > 100 and bz < -5 and v > 600 and hac > 50:
+        elif dhdt > 80 and bz < -4 and v > 500 and hac > 40:
             if base_severity < 3: final_level, final_severity = "G3 (Nowcast Trigger)", 3
 
         return {'final_level': final_level, 'final_severity': final_severity,
@@ -489,10 +498,10 @@ class ProductionHACModel:
             mean_dhdt = np.mean(recent_dhdt)
             max_dhdt = np.max(recent_dhdt)
             hac_increase = hac_values[i] - hac_values[i-window]
-            if max_dhdt > 220 and mean_dhdt > 100 and hac_increase > 150:
+            if max_dhdt > 200 and mean_dhdt > 80 and hac_increase > 120:
                 if "G5" not in storm_levels[i]:
                     enhanced[i] = "G5 (Trend Boost)"
-            elif max_dhdt > 200 and mean_dhdt > 80 and hac_increase > 120:
+            elif max_dhdt > 150 and mean_dhdt > 60 and hac_increase > 80:
                 if "G4" not in storm_levels[i] and "G5" not in storm_levels[i]:
                     enhanced[i] = "G4 (Trend Boost)"
         return enhanced
@@ -519,7 +528,6 @@ class ProductionHACModel:
             result = self._classify_storm_with_nowcast(hac_values[i], dHAC_dt[i], Bz[i], Vsw[i])
             level = result['final_level']
 
-            # Blindagem adicional (evita G2/G3 com HAC muito baixo)
             if hac_values[i] < 20 and abs(dHAC_dt[i]) < 20:
                 level = "G0"
                 result['final_level'] = level
@@ -561,8 +569,7 @@ class ProductionHACModel:
         if forecast:
             print("   • Previsão Dst:")
             for h, val in forecast.items():
-                val_clipped = np.clip(val, -500, 50)
-                print(f"       {h}: {np.clip(val, -500, 50):.1f} nT (raw: {val:.1f})")
+                print(f"       {h}: {val:.1f} nT")
         probs = self.results.get('core_probabilities', {})
         if probs:
             print("   • Probabilidades:")
@@ -741,8 +748,7 @@ class FinalReport:
     @staticmethod
     def generate_report(results, df, model, filename="hac_final_report.txt"):
         print("\n📊 Gerando relatório final...")
-        with open("hac_final_report.txt", "w", encoding="utf-8") as f:
-            f.write(model.generate_nowcast_report())
+        with open(filename, 'w') as f:
             f.write("="*80 + "\n")
             f.write("RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA HÍBRIDO)\n")
             f.write("="*80 + "\n\n")
@@ -805,9 +811,9 @@ def main():
     hac_values = model.compute_hac_system(df)
     model.predict_storm_indicators(hac_values)
 
-    print("Relatório Nowcast:")
+    print("\n🚨 Relatório Nowcast:")
     print(model.generate_nowcast_report())
-    with open("nowcast_inertia_report.txt", "w", encoding="utf-8", errors="ignore") as f:
+    with open("nowcast_inertia_report.txt", "w") as f:
         f.write(model.generate_nowcast_report())
 
     visualizer = ProductionVisualizer()
