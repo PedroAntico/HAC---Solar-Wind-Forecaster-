@@ -51,7 +51,7 @@ class HACCoreConfig:
     W_BZ = 0.30
     W_V = 0.20
     W_DHDT = 0.15
-    W_HSS = 0.25
+    W_HSS = 0.3
 
     # Limiares de ativação (abaixo destes valores a contribuição é zero)
     LIM_HAC = 20.0
@@ -330,8 +330,8 @@ def storm_probability(hac, dhdt, bz, v, config=None):
     contrib_dhdt = config.W_DHDT * np.maximum(0, dhdt - config.LIM_DHDT) / config.SCALE_DHDT
 
     # NOVO: termo HSS (baseado apenas na velocidade)
-    hss_factor = np.maximum(0, (v - 450) / 200.0)   # 0 em 450 km/s, 0.25 em 500, 0.75 em 600
-    contrib_hss = 0.25 * hss_factor                  # peso moderado
+    hss_factor = np.maximum(0, (v - 350) / 150.0)   # 0 em 450 km/s, 0.25 em 500, 0.75 em 600
+    contrib_hss = 0.4 * hss_factor                  # peso moderado
 
     score = contrib_hac + contrib_bz + contrib_v + contrib_dhdt + contrib_hss
     score = np.clip(score, 0.0, 4.0)
