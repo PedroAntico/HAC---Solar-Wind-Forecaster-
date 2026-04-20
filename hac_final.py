@@ -160,59 +160,47 @@ class PhysicalFieldsCalculator:
     def compute_all_fields(df):
         df = df.copy()
         config = HACPhysicsConfig()
-    
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
-    
-        # 🔥 CORREÇÃO ROBUSTA
+        # bt seguro: se não existir, usa valor absoluto de bz como fallback
         if 'bt' in df.columns:
             bt = df['bt'].fillna(0).values
         else:
             bt = np.abs(bz)
-    
-        if 'by_gsm' in df.columns:
-            by = df['by_gsm'].fillna(0).values
-        else:
-            by = np.zeros_like(bz)
-    
-        # =========================
-        # Newell coupling
-        # =========================
+        by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
+
+        # Newell
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
         coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
-    
-        # =========================
+
         # Não-linear (E-field)
-        # =========================
         bz_neg = np.maximum(0, -bz)
         e_field = bz_neg * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
-    
         thr = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
-    
-        coupling_nl = np.where(
-            e_sat <= thr,
-            e_sat,
-            thr * ((e_sat / thr) ** beta)
-        )
-    
-        # =========================
-        # Combinação
-        # =========================
-        coupling_comb = 0.7 * coupling_newell + 0.3 * coupling_nl
+        coupling_nl = np.where(e_sat <= thr, e_sat, thr * ((e_sat / thr) ** beta))
+
+        # Combinado (60% Newell, 40% não-linear)
+        coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
+
+        # Normalização robusta
+        scale = np.percentile(coupling_comb, 99)
+        if scale > 1e-6:
+            coupling_comb = coupling_comb / scale
+        coupling_comb = np.clip(coupling_comb, 0, 5)
+
         coupling_signal = np.where(bz < 0, coupling_comb, 0.0)
-    
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
         df['E_field_raw'] = e_field
-    
+
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
         print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
         print(f"   • Coupling max: {coupling_signal.max():.2f}")
-    
+
         return df
 
 # ============================================================
@@ -311,7 +299,12 @@ class ProductionHACModel:
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
-    
+
+            # Reforço físico por Bz negativo (resposta imediata a tempestades)
+            if Bz[i] < -5:
+                boost_bz = 1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0)
+                injection *= boost_bz
+            
             if regime == 'CME':
                 injection *= 1.3
                 tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
@@ -320,7 +313,6 @@ class ProductionHACModel:
                 tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
             else:
                 tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
-    
             tau_sub = self.config.TAU_SUBSTORM * 3600
             tau_ion = self.config.TAU_IONOSPHERE * 3600
             dt_hours = dt[i] / 3600.0
@@ -364,8 +356,12 @@ class ProductionHACModel:
         dst_from_hac = np.clip(dst_from_hac, -600, 20)
     
         # Blend diferenciado por regime
-        bz_factor = np.clip((-Bz) / 15.0, 0, 1)
-        v_factor = np.clip((Vsw - 400) / 400, 0, 1)
+        # Mapeamento HAC -> Dst com ganho dinâmico
+        bz_factor = np.clip(-Bz / 20.0, 0.0, 1.0)
+        v_factor = np.clip((Vsw - 400) / 600.0, 0.0, 1.0)
+        
+        dynamic_gain = 300.0 + 300.0 * bz_factor + 200.0 * v_factor
+        dst_from_hac = -dynamic_gain * hac_norm - 100.0 * dhdt_norm - 20.0
         activity = bz_factor * v_factor
     
         blend = np.where(
