@@ -160,35 +160,59 @@ class PhysicalFieldsCalculator:
     def compute_all_fields(df):
         df = df.copy()
         config = HACPhysicsConfig()
+    
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
-        bt = df.get('bt', np.abs(bz)).fillna(0).values
-        by = df.get('by_gsm', np.zeros_like(bz)).fillna(0).values
-
-        # Newell
+    
+        # 🔥 CORREÇÃO ROBUSTA
+        if 'bt' in df.columns:
+            bt = df['bt'].fillna(0).values
+        else:
+            bt = np.abs(bz)
+    
+        if 'by_gsm' in df.columns:
+            by = df['by_gsm'].fillna(0).values
+        else:
+            by = np.zeros_like(bz)
+    
+        # =========================
+        # Newell coupling
+        # =========================
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
         coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
-
+    
+        # =========================
         # Não-linear (E-field)
+        # =========================
         bz_neg = np.maximum(0, -bz)
         e_field = bz_neg * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
+    
         thr = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
-        coupling_nl = np.where(e_sat <= thr, e_sat, thr * ((e_sat / thr) ** beta))
-
-        # Combinado
+    
+        coupling_nl = np.where(
+            e_sat <= thr,
+            e_sat,
+            thr * ((e_sat / thr) ** beta)
+        )
+    
+        # =========================
+        # Combinação
+        # =========================
         coupling_comb = 0.7 * coupling_newell + 0.3 * coupling_nl
         coupling_signal = np.where(bz < 0, coupling_comb, 0.0)
+    
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
         df['E_field_raw'] = e_field
-
+    
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
         print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
         print(f"   • Coupling max: {coupling_signal.max():.2f}")
+    
         return df
 
 # ============================================================
