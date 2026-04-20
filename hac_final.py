@@ -274,19 +274,19 @@ class ProductionHACModel:
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
         density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
-
+    
         dt = self._safe_deltat(times)
         n = len(times)
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
-
+    
         print("   Simulando reservatórios...")
         for i in range(1, n):
-            regime = detect_regime(Vsw[i], density[i], Bz[i])
-            baseline = 0.2 + 0.3 * (density[i] / 10.0)
+            regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
-
+    
             if regime == 'CME':
                 injection *= 1.3
                 tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
@@ -295,12 +295,12 @@ class ProductionHACModel:
                 tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
             else:
                 tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
-
+    
             tau_sub = self.config.TAU_SUBSTORM * 3600
             tau_ion = self.config.TAU_IONOSPHERE * 3600
             dt_hours = dt[i] / 3600.0
             injection_eff = np.clip(injection * dt_hours, 0, 100)
-
+    
             loss_ring = (0.015 + 0.0002 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             loss_sub  = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion  = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
@@ -308,37 +308,53 @@ class ProductionHACModel:
                 loss_ring *= 1.3
                 loss_sub  *= 1.3
                 loss_ion  *= 1.3
-
+    
             alpha_rc = np.exp(-dt[i] / tau_rc)
             alpha_sub = np.exp(-dt[i] / tau_sub)
             alpha_ion = np.exp(-dt[i] / tau_ion)
-
+    
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
-
+    
         hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
-        regimes = detect_regime_array(Vsw, density, Bz)
-        is_hss = (regimes == 'HSS')
-        dst_from_hac[is_hss] *= 1.1
-
-        
+    
         # Mapeamento HAC -> Dst
         hac_norm = np.clip(hac_total, 0, 800) / 800.0
-        dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0   # escala consistente
+        dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0
         dst_from_hac = -520 * hac_norm - 150 * dhdt_norm - 30
-
-        # Core dummy (estável)
-        dst_core = np.full(n, -20.0)
+    
+        # Regimes vetorizados para blend e boost
+        regimes = detect_regime_array(Vsw, density, Bz)
+    
+        # Boost dinâmico para HSS (depende da velocidade)
+        is_hss = (regimes == 'HSS')
+        if np.any(is_hss):
+            hss_strength = np.clip((Vsw[is_hss] - 500) / 300.0, 0.0, 1.0)
+            hss_boost = 1.0 + 0.15 * hss_strength
+            dst_from_hac[is_hss] *= hss_boost
+    
+        dst_from_hac = np.clip(dst_from_hac, -600, 20)
+    
+        # Blend diferenciado por regime
         bz_factor = np.clip((-Bz) / 15.0, 0, 1)
         v_factor = np.clip((Vsw - 400) / 400, 0, 1)
         activity = bz_factor * v_factor
-        blend = np.clip(activity ** 1.2, 0.1, 0.95)
+    
+        blend = np.where(
+            regimes == 'CME',
+            activity ** 1.0,   # CME: resposta mais agressiva
+            activity ** 1.3    # HSS / Quiet: mais amortecido
+        )
+        blend = np.clip(blend, 0.1, 0.95)
+    
+        # Core dummy (estável)
+        dst_core = np.full(n, -20.0)
         dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
         dst_hybrid = np.clip(dst_hybrid, -600, 50)
-
+    
         # Previsão por simulação
         forecast = {}
         dt_median = np.median(dt) / 3600.0
@@ -351,9 +367,9 @@ class ProductionHACModel:
             for _ in range(steps):
                 dst_fut = alpha * dst_fut + (1 - alpha) * (-hac_now * 0.8)
             forecast[f"{h}h"] = dst_fut
-
+    
         print(f"   • Dst híbrido mín: {np.min(dst_hybrid):.1f} nT")
-
+    
         self.results.update({
             'time': times, 'HAC_total': hac_total, 'dHAC_dt': dHAC_dt,
             'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
