@@ -305,6 +305,8 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
+        is_hss = (detect_regime(Vsw, density, Bz) == 'HSS')   # calculado para todos os pontos
+        dst_from_hac[is_hss] *= 1.1
         hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
@@ -312,14 +314,14 @@ class ProductionHACModel:
         # Mapeamento HAC -> Dst
         hac_norm = np.clip(hac_total, 0, 800) / 800.0
         dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0   # escala consistente
-        dst_from_hac = np.clip(-450 * hac_norm - 150 * dhdt_norm - 30, -600, 20)
+        dst_from_hac = -520 * hac_norm - 150 * dhdt_norm - 30
 
         # Core dummy (estável)
         dst_core = np.full(n, -20.0)
         bz_factor = np.clip((-Bz) / 15.0, 0, 1)
         v_factor = np.clip((Vsw - 400) / 400, 0, 1)
         activity = bz_factor * v_factor
-        blend = np.clip(activity ** 1.5, 0.1, 0.95)
+        blend = np.clip(activity ** 1.2, 0.1, 0.95)
         dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
         dst_hybrid = np.clip(dst_hybrid, -600, 50)
 
