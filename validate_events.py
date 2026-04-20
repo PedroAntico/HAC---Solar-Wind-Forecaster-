@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação HAC++ final (lag suavizado, sem clipping agressivo)
+validate_events.py - Validação HAC++ final com carregamento robusto de dados.
 """
 
 import pandas as pd
@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 from hac_final import (
     ProductionHACModel,
     PhysicalFieldsCalculator,
-    HACPhysicsConfig,
     normalize_omni_columns
 )
 from hac_core import evaluate_event
@@ -28,53 +27,77 @@ OMNI_FILE = "data/omni_2000_2020.csv"
 DST_FILE = "data/dst_kyoto_2000_2020.csv"
 
 # =========================
-# CARREGAMENTO DST (IAGA-2002)
+# CARREGAMENTO DST (ROBUSTO)
 # =========================
 def load_dst_kyoto(filepath):
-    print(f"\n📥 Carregando DST Kyoto: {filepath}")
-    data_lines = []
-    with open(filepath, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('|') or line.startswith('DATE'):
-                continue
-            parts = line.split()
-            if len(parts) >= 4:
-                data_lines.append(parts)
-    if not data_lines:
-        raise ValueError("❌ Nenhum dado DST")
-    df = pd.DataFrame(data_lines, columns=['date', 'time', 'doy', 'dst'])
-    df['time_tag'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
-    df['dst'] = pd.to_numeric(df['dst'], errors='coerce')
+    print(f"\n📥 Carregando DST: {filepath}")
+
+    df = pd.read_csv(filepath)
+    df.columns = [c.lower().strip() for c in df.columns]
+
+    # Detectar coluna de tempo
+    if 'time_tag' not in df.columns:
+        if 'date' in df.columns and 'time' in df.columns:
+            df['time_tag'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+        else:
+            df['time_tag'] = pd.to_datetime(df.iloc[:, 0])
+
+    # Detectar coluna DST
+    dst_col = [c for c in df.columns if 'dst' in c][0]
+    df['dst'] = pd.to_numeric(df[dst_col], errors='coerce')
+
     df = df.dropna(subset=['time_tag', 'dst']).sort_values('time_tag')
-    df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
-    print(f"   ✅ {len(df)} pontos, Dst range: {df['dst'].min():.1f} – {df['dst'].max():.1f} nT")
+
+    print(f"   ✅ {len(df)} pontos")
+    print(f"   • Range: {df['dst'].min():.1f} → {df['dst'].max():.1f} nT")
     return df[['time_tag', 'dst']]
 
+
 # =========================
-# CARREGAMENTO OMNI (SEM DST)
+# CARREGAMENTO OMNI (LIMPEZA AGRESSIVA)
 # =========================
 def load_omni_clean(filepath):
     print(f"\n📥 Carregando OMNI: {filepath}")
+
     df = pd.read_csv(filepath)
     df = normalize_omni_columns(df, allow_partial=True)
-    if 'time_tag' not in df.columns:
-        raise ValueError("❌ OMNI sem time_tag")
+
     df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
     df = df.dropna(subset=['time_tag']).sort_values('time_tag')
+
+    # Remover DST se existir
     if 'dst' in df.columns:
-        print("   ⚠️ Removendo DST do OMNI")
         df = df.drop(columns=['dst'])
+
+    # Converter unidades se necessário
     if 'speed' in df.columns and df['speed'].median() > 2000:
         print("   ⚠️ Convertendo m/s → km/s")
-        df['speed'] = df['speed'] / 1000.0
-    for col, default in [('speed', 400), ('density', 5), ('bz_gsm', 0)]:
-        if col not in df.columns:
-            df[col] = default
-        else:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(default)
-    print(f"   ✅ {len(df)} pontos, V: {df['speed'].min():.0f}–{df['speed'].max():.0f} km/s, Bz: {df['bz_gsm'].min():.1f}–{df['bz_gsm'].max():.1f} nT")
+        df['speed'] /= 1000.0
+
+    # Remover flags inválidas
+    invalid_flags = [999, 9999, 99999, 999.9, 9999.9]
+    for col in ['speed', 'density', 'bz_gsm']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[col] = df[col].replace(invalid_flags, np.nan)
+
+    # Filtrar valores físicos absurdos
+    df = df[
+        (df['speed'] > 100) & (df['speed'] < 2000) &
+        (df['density'] > 0.1) & (df['density'] < 200) &
+        (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
+    ].copy()
+
+    # Preencher gaps curtos
+    df['speed'] = df['speed'].ffill(limit=3).fillna(400)
+    df['density'] = df['density'].ffill(limit=3).fillna(5)
+    df['bz_gsm'] = df['bz_gsm'].fillna(0)
+
+    print(f"   ✅ {len(df)} pontos limpos")
+    print(f"   • V: {df['speed'].min():.0f}–{df['speed'].max():.0f} km/s")
+    print(f"   • Bz: {df['bz_gsm'].min():.1f}–{df['bz_gsm'].max():.1f} nT")
     return df
+
 
 # =========================
 # LAG DINÂMICO (MÉDIA LOCAL)
@@ -82,6 +105,7 @@ def load_omni_clean(filepath):
 def compute_dynamic_lag(speed):
     lag = 1.5e6 / (speed * 3600.0)
     return np.clip(lag, 0.3, 1.5)
+
 
 # =========================
 # PREPARA EVENTO (LAG SUAVIZADO)
@@ -121,8 +145,9 @@ def prepare_event_data(omni_df, dst_df, start, end):
         print(f"   ⚠️ Alto reuso de índices OMNI ({reuse_ratio*100:.1f}%)")
     return event_data
 
+
 # =========================
-# VALIDAÇÃO
+# VALIDAÇÃO DE UM EVENTO
 # =========================
 def validate_event(omni_df, dst_df, name, start, end):
     print(f"\n🌌 {name}")
@@ -134,14 +159,14 @@ def validate_event(omni_df, dst_df, name, start, end):
     print(f"   • Pontos: {len(event)}")
     print(f"   • Dst obs mín: {event['dst'].min():.1f} nT")
 
-    # Amostra
+    # Amostra de alinhamento
     print("\n   🔍 Amostra:")
     print(event[['time_tag', 'dst', 'bz_gsm', 'speed']].head(2).to_string(index=False))
 
-    # Campos físicos
+    # Calcular campos físicos
     event = PhysicalFieldsCalculator.compute_all_fields(event)
 
-    # Diagnóstico do coupling (após remoção do clipping agressivo)
+    # Diagnóstico do coupling
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
     print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
 
@@ -151,16 +176,20 @@ def validate_event(omni_df, dst_df, name, start, end):
     _, dst_pred, _ = model.predict_storm_indicators(hac)
     dst_pred = np.clip(dst_pred, -500, 50)
 
-    metrics = evaluate_event(event['time_tag'].values, event['dst'].values, dst_pred)
+    metrics = evaluate_event(
+        time=event['time_tag'].values,
+        dst_obs=event['dst'].values,
+        dst_pred=dst_pred
+    )
 
     print(f"   • Dst pred mín: {dst_pred.min():.1f} nT")
-    print(f"   • Corr: {metrics['correlation']:.3f}")
+    print(f"   • Correlação: {metrics['correlation']:.3f}")
     print(f"   • MAE: {metrics['MAE']:.1f} nT")
-    print(f"   • Erro mín: {metrics['min_Dst_error_nT']:.1f} nT")
+    print(f"   • Erro mín Dst: {metrics['min_Dst_error_nT']:.1f} nT")
 
     # Plot
-    plt.figure(figsize=(12,5))
-    plt.plot(event['time_tag'], event['dst'], 'b-', label='Kyoto')
+    plt.figure(figsize=(12, 5))
+    plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst Kyoto')
     plt.plot(event['time_tag'], dst_pred, 'r--', label='HAC++')
     plt.axhline(-50, c='gray', ls=':', alpha=0.5)
     plt.axhline(-100, c='orange', ls=':', alpha=0.5)
@@ -173,23 +202,25 @@ def validate_event(omni_df, dst_df, name, start, end):
     plt.close()
     return metrics
 
+
 # =========================
 # MAIN
 # =========================
 def main():
-    print("="*70)
-    print("🚀 HAC++ VALIDAÇÃO FINAL (SEM CLIPPING, LAG SUAVIZADO)")
-    print("="*70)
+    print("=" * 70)
+    print("🚀 HAC++ VALIDAÇÃO FINAL (CARREGAMENTO ROBUSTO)")
+    print("=" * 70)
 
     omni = load_omni_clean(OMNI_FILE)
     dst = load_dst_kyoto(DST_FILE)
 
+    # Verificação rápida do Halloween
     print("\n🔍 Verificação Halloween 2003:")
     h = dst[(dst['time_tag'] >= "2003-10-28") & (dst['time_tag'] <= "2003-11-02")]
     if len(h) > 0:
         print(f"   • Dst mín Kyoto: {h['dst'].min():.1f} nT")
     else:
-        print("   ❌ Sem dados")
+        print("   ❌ Sem dados para o período")
 
     results = []
     for name, (start, end) in EVENTS.items():
@@ -198,16 +229,17 @@ def main():
             results.append(m)
 
     if results:
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("📈 MÉTRICAS MÉDIAS")
-        print("="*70)
+        print("=" * 70)
         print(f"   • Correlação: {np.mean([m['correlation'] for m in results]):.3f}")
         print(f"   • MAE: {np.mean([m['MAE'] for m in results]):.1f} nT")
         print(f"   • Erro mín Dst: {np.mean([m['min_Dst_error_nT'] for m in results]):.1f} nT")
     else:
         print("\n⚠️ Nenhum evento validado.")
 
-    print("\n✅ Concluído.")
+    print("\n✅ Validação concluída.")
+
 
 if __name__ == "__main__":
     main()
