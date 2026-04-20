@@ -224,36 +224,74 @@ def validate_event(config, df, name, start, end, is_test=True):
 
     print(f"\n🌌 {name} {'[TESTE]' if is_test else '[TREINO]'}")
 
+    # =========================
+    # Corte do evento
+    # =========================
     event = df[(df['time_tag'] >= start) & (df['time_tag'] <= end)].copy()
 
     if len(event) < 20:
         print("⚠️ poucos dados")
         return None
 
+    # =========================
+    # Campos físicos
+    # =========================
     event = PhysicalFieldsCalculator.compute_all_fields(event)
 
-    model = ProductionHACModel()
+    # =========================
+    # 🔥 Lag físico (ESSENCIAL)
+    # =========================
+    lag_hours = (1500000 / event['speed']) / 3600.0
+    lag_hours = np.clip(lag_hours, 0.3, 1.5)
+    lag_steps = lag_hours.round().astype(int)
 
-    model.core.config.HAC_REF = config.HAC_REF
-    model.core.config.Q_FACTOR = config.Q_FACTOR
-    model.core.config.TAU_DST = config.TAU_DST
-    model.core.config.DST_Q = config.DST_Q
+    shifted = np.zeros(len(event))
+    for i in range(len(event)):
+        step = lag_steps.iloc[i]
+        if i - step >= 0:
+            shifted[i] = event['coupling_signal'].iloc[i - step]
+        else:
+            shifted[i] = 0
+
+    event['coupling_signal'] = shifted
+    event = event.dropna()
+
+    # =========================
+    # Modelo HAC++
+    # =========================
+    model = ProductionHACModel(config=config)
 
     hac = model.compute_hac_system(event)
     _, dst_pred, levels = model.predict_storm_indicators(hac)
 
     dst_pred = np.clip(dst_pred, DST_MIN_PHYSICAL, DST_MAX_PHYSICAL)
 
+    # =========================
+    # Métricas
+    # =========================
     metrics = evaluate_event(
         time=event['time_tag'].values,
         dst_obs=event['dst'].values,
         dst_pred=dst_pred
     )
 
-    print(f"Dst real: {event['dst'].min():.1f}")
-    print(f"Dst pred: {dst_pred.min():.1f}")
-    print(f"Corr: {metrics['correlation']:.3f}")
-    print(f"MAE: {metrics['MAE']:.1f}")
+    # =========================
+    # Diagnóstico
+    # =========================
+    print(f"   Dst real mín: {event['dst'].min():.1f} nT")
+    print(f"   Dst pred mín: {dst_pred.min():.1f} nT")
+    print(f"   Correlação:   {metrics['correlation']:.3f}")
+    print(f"   MAE:          {metrics['MAE']:.1f} nT")
+    print(f"   Timing erro:  {metrics.get('peak_time_error_min', 0):.0f} min")
+
+    # =========================
+    # Sanidade física
+    # =========================
+    if np.max(event['speed']) > 2000:
+        print("⚠️ ALERTA: velocidades irreais detectadas (dados OMNI sujos)")
+
+    if np.max(event['coupling_signal']) > 1e5:
+        print("⚠️ ALERTA: coupling explosivo (possível erro de escala)")
 
     return metrics
 
