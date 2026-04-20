@@ -81,15 +81,27 @@ def normalize_omni_columns(df, allow_partial=False):
     df.rename(columns=rename_map, inplace=True)
     return df
 
-def detect_regime(v, density, bz):
-    if density > 8 and bz < -8:
-        return 'CME'
-    elif v > 600 and density < 5:
-        return 'HSS'
-    elif density < 2:
-        return 'SIR'
-    else:
-        return 'Quiet'
+def detect_regime_array(v, density, bz):
+    """
+    Classifica o regime de vento solar para arrays.
+    Prioridade: CME > HSS > SIR > Quiet.
+    """
+    n = len(v)
+    regime = np.full(n, 'Quiet', dtype=object)
+
+    # HSS: velocidade alta e densidade baixa
+    mask_hss = (v > 600) & (density < 5)
+    regime[mask_hss] = 'HSS'
+
+    # CME: densidade alta e Bz negativo (sobrescreve HSS se ambas)
+    mask_cme = (density > 8) & (bz < -8)
+    regime[mask_cme] = 'CME'
+
+    # SIR: densidade muito baixa (sobrescreve se for o caso, mas geralmente não conflita)
+    mask_sir = (density < 2)
+    regime[mask_sir] = 'SIR'
+
+    return regime
 
 # ============================================================
 # 1. CARREGAMENTO ROBUSTO DE DADOS OMNI
@@ -305,12 +317,14 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-        is_hss = (detect_regime(Vsw, density, Bz) == 'HSS')   # calculado para todos os pontos
-        dst_from_hac[is_hss] *= 1.1
         hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
+        regimes = detect_regime_array(Vsw, density, Bz)
+        is_hss = (regimes == 'HSS')
+        dst_from_hac[is_hss] *= 1.1
 
+        
         # Mapeamento HAC -> Dst
         hac_norm = np.clip(hac_total, 0, 800) / 800.0
         dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0   # escala consistente
