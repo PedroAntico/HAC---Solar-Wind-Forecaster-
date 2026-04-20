@@ -42,7 +42,7 @@ DST_MAX_PHYSICAL = 50
 # =========================
 def load_omni(filepath):
     print(f"\n📥 Carregando OMNI: {filepath}")
-    
+
     df = pd.read_csv(filepath)
     df = normalize_omni_columns(df, allow_partial=True)
 
@@ -55,43 +55,67 @@ def load_omni(filepath):
     # =========================
     # Conversão numérica
     # =========================
-    df['speed'] = pd.to_numeric(df.get('speed', 400), errors='coerce')
-    df['density'] = pd.to_numeric(df.get('density', 5), errors='coerce')
-    df['bz_gsm'] = pd.to_numeric(df.get('bz_gsm', 0), errors='coerce')
+    for col, default in [('speed', 400), ('density', 5), ('bz_gsm', 0)]:
+        df[col] = pd.to_numeric(df.get(col, default), errors='coerce')
 
     # =========================
-    # Remover valores OMNI inválidos (CRÍTICO)
+    # Remover valores OMNI inválidos
     # =========================
-    invalid_values = [999, 9999, 99999, 999999, 9999999,
-                      999.9, 9999.9, 99999.9]
+    invalid_values = [
+        999, 9999, 99999, 999999, 9999999,
+        999.9, 9999.9, 99999.9
+    ]
 
     for col in ['speed', 'density', 'bz_gsm']:
         df[col] = df[col].replace(invalid_values, np.nan)
 
     # =========================
-    # Preencher faltantes
+    # 🔥 CORREÇÃO AUTOMÁTICA DE UNIDADE (CRÍTICO)
     # =========================
-    df['speed'] = df['speed'].fillna(400)
-    df['density'] = df['density'].fillna(5)
+    if df['speed'].median() > 2000:
+        print("   ⚠️ Detectado speed em m/s → convertendo para km/s")
+        df['speed'] = df['speed'] / 1000.0
+
+    # =========================
+    # Preencher faltantes (após correção)
+    # =========================
+    df['speed'] = df['speed'].fillna(method='ffill').fillna(400)
+    df['density'] = df['density'].fillna(method='ffill').fillna(5)
     df['bz_gsm'] = df['bz_gsm'].fillna(0)
 
     # =========================
-    # FILTRO FÍSICO (ESSENCIAL)
+    # 🔥 FILTRO FÍSICO INTELIGENTE
     # =========================
-    df = df[
-        (df['speed'] > 200) & (df['speed'] < 1500) &
-        (df['density'] > 0.1) & (df['density'] < 100) &
-        (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
-    ]
+    mask = (
+        (df['speed'] > 250) & (df['speed'] < 1200) &
+        (df['density'] > 0.1) & (df['density'] < 50) &
+        (df['bz_gsm'] > -80) & (df['bz_gsm'] < 80)
+    )
+
+    removed = len(df) - mask.sum()
+    df = df[mask]
 
     df = df.reset_index(drop=True)
 
+    # =========================
+    # Diagnóstico final
+    # =========================
     print(f"   ✅ {len(df)} pontos válidos após limpeza")
-    print(f"   • V range: {df['speed'].min():.1f} – {df['speed'].max():.1f}")
-    print(f"   • Bz range: {df['bz_gsm'].min():.1f} – {df['bz_gsm'].max():.1f}")
+    print(f"   🧹 Removidos: {removed}")
+    print(f"   • V range: {df['speed'].min():.1f} – {df['speed'].max():.1f} km/s")
+    print(f"   • Bz range: {df['bz_gsm'].min():.1f} – {df['bz_gsm'].max():.1f} nT")
+    print(f"   • Density range: {df['density'].min():.1f} – {df['density'].max():.1f}")
+
+    # =========================
+    # ⚠️ ALERTAS DE QUALIDADE
+    # =========================
+    if df['speed'].std() < 20:
+        print("   ⚠️ ALERTA: velocidade quase constante → dados suspeitos")
+
+    if len(df) < 100000:
+        print("   ⚠️ ALERTA: dataset pequeno demais para validação robusta")
 
     return df
-
 
 def load_dst(filepath):
     print(f"\n📥 Carregando DST: {filepath}")
