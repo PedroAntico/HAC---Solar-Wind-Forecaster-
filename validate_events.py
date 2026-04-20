@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validate_events.py - Validação HAC++ com alinhamento causal correto.
+validate_events.py - Validação HAC++ com alinhamento causal e calibração robusta.
 """
 
 import pandas as pd
@@ -35,20 +35,28 @@ CALIBRATION_FILE = "hac_calibration.json"
 # CARREGAMENTO DOS DADOS
 # =========================
 def load_dst_kyoto(filepath):
-    """Carrega Dst do Kyoto (formato CSV simples)."""
+    """Carrega Dst do Kyoto, garante datetime e filtra valores absurdos."""
     print(f"\n📥 Carregando DST: {filepath}")
     df = pd.read_csv(filepath)
     df.columns = [c.lower().strip() for c in df.columns]
 
+    # Garantir time_tag como datetime
     if 'time_tag' not in df.columns:
         if 'date' in df.columns and 'time' in df.columns:
-            df['time_tag'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+            df['time_tag'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
         else:
-            df['time_tag'] = pd.to_datetime(df.iloc[:, 0])
+            df['time_tag'] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
+    else:
+        df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
 
+    # Identificar coluna DST
     dst_col = [c for c in df.columns if 'dst' in c][0]
     df['dst'] = pd.to_numeric(df[dst_col], errors='coerce')
+
+    # Filtrar valores fisicamente impossíveis
+    df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
     df = df.dropna(subset=['time_tag', 'dst']).sort_values('time_tag')
+
     print(f"   ✅ {len(df)} pontos, Dst: {df['dst'].min():.1f} a {df['dst'].max():.1f} nT")
     return df[['time_tag', 'dst']]
 
@@ -88,7 +96,7 @@ def load_omni_clean(filepath):
     return df
 
 # =========================
-# ALINHAMENTO CAUSAL (LAG DINÂMICO)
+# LAG DINÂMICO
 # =========================
 def compute_dynamic_lag(speed):
     """Lag em horas: distância ~1.5e6 km / velocidade."""
@@ -98,26 +106,27 @@ def compute_dynamic_lag(speed):
 def align_omni_to_dst(omni_df, dst_df):
     """
     Para cada timestamp do Dst, busca o OMNI mais recente
-    antes de (t_dst - lag), onde lag depende da velocidade local.
+    antes de (t_dst - lag), com lag baseado no percentil 75 da velocidade recente.
     """
     dst_sorted = dst_df.sort_values('time_tag').copy()
-    times_dst = dst_sorted['time_tag'].values
+    times_dst = dst_sorted['time_tag'].values.astype('datetime64[ns]')
 
     omni_sorted = omni_df.sort_values('time_tag').copy()
-    times_omni = omni_sorted['time_tag'].values
+    times_omni = omni_sorted['time_tag'].values.astype('datetime64[ns]')
 
     indices = []
     for t_dst in times_dst:
         # Índice do OMNI mais recente até t_dst (para estimar velocidade)
         idx_now = np.searchsorted(times_omni, t_dst, side='right') - 1
         idx_now = max(0, min(idx_now, len(omni_sorted)-1))
-        # Média local da velocidade (4 pontos)
+        # Usar percentil 75 para capturar rajadas de velocidade (CME)
         w_start = max(0, idx_now - 3)
         w_end = min(len(omni_sorted), idx_now + 1)
-        speed_avg = omni_sorted.iloc[w_start:w_end]['speed'].mean()
-        lag_h = compute_dynamic_lag(speed_avg)
+        speed_vals = omni_sorted.iloc[w_start:w_end]['speed']
+        speed_eff = np.percentile(speed_vals, 75) if len(speed_vals) > 1 else speed_vals.mean()
+        lag_h = compute_dynamic_lag(speed_eff)
 
-        target_time = t_dst - pd.Timedelta(hours=lag_h)
+        target_time = t_dst - np.timedelta64(int(lag_h * 3600), 's')
         idx_lag = np.searchsorted(times_omni, target_time, side='right') - 1
         idx_lag = max(0, min(idx_lag, len(omni_sorted)-1))
         indices.append(idx_lag)
@@ -128,7 +137,7 @@ def align_omni_to_dst(omni_df, dst_df):
     return aligned.reset_index(drop=True)
 
 # =========================
-# CALIBRAÇÃO GLOBAL (COM DADOS ALINHADOS)
+# CALIBRAÇÃO GLOBAL
 # =========================
 def global_calibration(df_aligned):
     """Calibra HAC_REF e Q_FACTOR usando dados já alinhados."""
@@ -154,6 +163,11 @@ def global_calibration(df_aligned):
     dt = np.maximum(dt, 1.0)
 
     core.fit_calibration(coupling, dt, df_aligned['dst'].values)
+
+    # Proteção contra Q_FACTOR nulo
+    if abs(core.config.Q_FACTOR) < 1e-5:
+        print("   ⚠️ Q_FACTOR muito baixo → ajustando para -0.01")
+        core.config.Q_FACTOR = -0.01
 
     hac_raw = comp['raw']
     hac_ref = np.percentile(hac_raw, 99.5)
@@ -234,13 +248,13 @@ def validate_event(config, df_aligned, name, start, end):
 # =========================
 def main():
     print("=" * 70)
-    print("🚀 HAC++ VALIDAÇÃO COM ALINHAMENTO CAUSAL")
+    print("🚀 HAC++ VALIDAÇÃO COM ALINHAMENTO CAUSAL (CORRIGIDO)")
     print("=" * 70)
 
     omni = load_omni_clean(OMNI_FILE)
     dst = load_dst_kyoto(DST_FILE)
 
-    # Alinhar OMNI ao Dst (lag dinâmico)
+    # Alinhar OMNI ao Dst (lag dinâmico com percentil 75)
     print("\n🔗 Alinhando OMNI → Dst (lag dinâmico)...")
     df_aligned = align_omni_to_dst(omni, dst)
     print(f"   ✅ Dataset alinhado: {len(df_aligned)} pontos")
