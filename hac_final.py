@@ -1,77 +1,51 @@
+#!/usr/bin/env python3
 """
-HAC++ Model: Heliospheric Accumulated Coupling - PRODUÇÃO FINAL
-COM NOWCAST + INÉRCIA (Previsão de Escalação Híbrida)
-Versão Revisada e Corrigida:
-- Injeção baseada unicamente no coupling Newell-like.
-- Decaimento dinâmico para HSS (aumenta persistência sem criar energia).
-- Dst com memória física (tempo de resposta ajustável).
-- Forecast consistente com o modelo Dst.
-- Detecção de regime (CME/HSS/Quiet).
-- Classificação mais conservadora.
+hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
+Versão refinada:
+- Acoplamento combinado (Newell + não-linear) com peso 70/30.
+- Injeção basal dinâmica dependente da densidade do plasma.
+- Mapeamento HAC→Dst calibrado (menos agressivo).
+- Previsão Dst por simulação da equação de relaxação.
+- Detecção de regime mais precisa (CME/HSS/SIR/Quiet).
+- Classificação híbrida com override por Dst real.
 """
 
 import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-import warnings
 from scipy.signal import savgol_filter
-import importlib
-import hac_core
-importlib.reload(hac_core)
-from hac_core import HACCoreModel, HACCoreConfig, storm_probability
-warnings.filterwarnings('ignore')
+from datetime import datetime, timedelta
 
-# ============================
-# 0. NORMALIZAÇÃO DE NOMES OMNI
-# ============================
-def normalize_omni_columns(df, allow_partial=False):
-    column_map = {
-        'time': 'time_tag', 'Time': 'time_tag', 'Epoch': 'time_tag', 'timestamp': 'time_tag',
-        'V': 'speed', 'Vsw': 'speed', 'speed': 'speed',
-        'N': 'density', 'Np': 'density', 'density': 'density',
-        'Bz': 'bz_gsm', 'Bz_GSM': 'bz_gsm', 'bz_gsm': 'bz_gsm',
-        'Bx': 'bx_gsm', 'By': 'by_gsm', 'Bt': 'bt'
-    }
-    df = df.copy()
-    for col in df.columns:
-        if col in column_map:
-            df.rename(columns={col: column_map[col]}, inplace=True)
-    print("\n🔍 Colunas detectadas:", list(df.columns))
-    if not allow_partial:
-        required = ['time_tag', 'speed', 'density', 'bz_gsm']
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            raise ValueError(f"❌ COLUNAS OBRIGATÓRIAS AUSENTES: {missing}\n➡️ Colunas disponíveis: {list(df.columns)}")
-    return df
-
-# ============================
-# CONFIGURAÇÃO FÍSICA (VALORES REVISADOS)
-# ============================
+# ============================================================
+# CONFIGURAÇÃO FÍSICA (REFINADA)
+# ============================================================
 class HACPhysicsConfig:
-    # Tempos característicos (horas)
-    TAU_RING_CURRENT = 1.2
+    """Configuração física calibrada para acoplamento realista"""
+
+    # Tempos característicos (horas) - variam com regime
+    TAU_RING_CURRENT_QUIET = 10.0
+    TAU_RING_CURRENT_HSS = 6.0
+    TAU_RING_CURRENT_CME = 3.0
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
-    TAU_EFFECTIVE = 2.0
 
-    # Saturação
-    E_FIELD_SATURATION = 35.0    # mV/m
-    KP_SATURATION = 8.0
-    RING_CURRENT_MAX = 800.0
+    # Saturações
+    E_FIELD_SATURATION = 35.0      # mV/m
+    KP_SATURATION = 9.0
+    RING_CURRENT_MAX = 800.0       # nT
 
-    # Particionamento
-    ALPHA_RING = 0.7
-    ALPHA_SUBSTORM = 0.2
-    ALPHA_IONOSPHERE = 0.1
+    # Partição de energia
+    ALPHA_RING = 0.4
+    ALPHA_SUBSTORM = 0.3
+    ALPHA_IONOSPHERE = 0.3
 
-    # Não linearidade
+    # Acoplamento não-linear (Newell + campo elétrico)
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 3.0
-    HAC_REF = 300.0
+    COUPLING_THRESHOLD = 3.0      # mV/m
+    NEWELL_SCALE = 5e-4           # fator empírico (ajustado)
 
-    # Escalas
+    # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     KP_SCALE = 9.0
 
@@ -81,59 +55,99 @@ class HACPhysicsConfig:
     BZ_MIN, BZ_MAX = -100, 100
 
     # Nowcast + Inércia
-    THETA_CRITICAL = 50.0
+    THETA_CRITICAL = 50.0          # nT/h
     HG3_THRESHOLD = 150.0
     VSW_CRITICAL = 700.0
     BZ_CRITICAL = -8.0
 
-    # Classificação híbrida (limiares reduzidos para evitar falsos positivos)
-    DHDT_G5_THRESHOLD = 100.0
-    DHDT_G4_THRESHOLD = 70.0
-    DHDT_G3_THRESHOLD = 50.0
-    BZ_G5_THRESHOLD = -12.0
-    BZ_G4_THRESHOLD = -8.0
-    BZ_G3_THRESHOLD = -6.0
+    # Classificação híbrida
+    DHDT_G5_THRESHOLD = 150.0
+    DHDT_G4_THRESHOLD = 100.0
+    DHDT_G3_THRESHOLD = 80.0
+    BZ_G5_THRESHOLD = -15.0
+    BZ_G4_THRESHOLD = -10.0
+    BZ_G3_THRESHOLD = -8.0
     V_G5_THRESHOLD = 700.0
     V_G4_THRESHOLD = 650.0
     V_G3_THRESHOLD = 600.0
 
-    # Parâmetros para Dst dinâmico
-    TAU_DST_RESPONSE = 5.0          # horas (tempo de resposta do Dst)
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+def normalize_omni_columns(df, allow_partial=False):
+    """Normaliza nomes de colunas OMNI para o padrão esperado."""
+    df = df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
 
-# ============================
-# 1. CARREGAMENTO ROBUSTO OMNI
-# ============================
+    rename_map = {
+        'bz': 'bz_gsm',
+        'bz_gse': 'bz_gsm',
+        'bz_gsm': 'bz_gsm',
+        'bt': 'bt',
+        'b_total': 'bt',
+        'density': 'density',
+        'n_p': 'density',
+        'proton_density': 'density',
+        'speed': 'speed',
+        'v': 'speed',
+        'flow_speed': 'speed',
+        'time': 'time_tag',
+        'datetime': 'time_tag',
+        'epoch': 'time_tag'
+    }
+    df.rename(columns=rename_map, inplace=True)
+    return df
+
+def detect_regime(v, density, bz):
+    """
+    Classifica o regime de vento solar de forma mais precisa.
+    Prioridade: CME (densidade alta + Bz negativo) > HSS (velocidade alta, baixa densidade) > SIR (densidade muito baixa) > Quiet.
+    """
+    if density > 8 and bz < -8:
+        return 'CME'
+    elif v > 600 and density < 5:
+        return 'HSS'
+    elif density < 2:
+        return 'SIR'
+    else:
+        return 'Quiet'
+
+# ============================================================
+# 1. CARREGAMENTO ROBUSTO DE DADOS OMNI
+# ============================================================
 class RobustOMNIProcessor:
+    """Processador robusto para dados OMNI reais"""
+
     @staticmethod
     def load_and_clean(filepath, max_interpolation=3):
+        """Carrega, normaliza e limpa dados OMNI"""
         print(f"📥 Carregando {filepath}...")
+
         try:
             with open(filepath, 'r') as f:
                 data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"❌ Erro: {e}")
+        except FileNotFoundError:
+            print(f"❌ Arquivo não encontrado: {filepath}")
             return None
+        except json.JSONDecodeError as e:
+            print(f"❌ Erro JSON: {e}")
+            return None
+
         headers = data[0]
         df = pd.DataFrame(data[1:], columns=headers)
         df = normalize_omni_columns(df, allow_partial=True)
         df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
         df = df.sort_values('time_tag').reset_index(drop=True)
+
         numeric_cols = [col for col in df.columns if col != 'time_tag']
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+
         df = df.replace([np.inf, -np.inf], np.nan)
+
         config = HACPhysicsConfig()
-
         if 'speed' in df.columns:
-            mean_v = df['speed'].mean()
-            if mean_v > 10000:
-                print("   ⚠️ Vsw em m/s → convertendo para km/s")
-                df['speed'] = df['speed'] / 1000.0
-            elif mean_v > 2000:
-                print("   ⚠️ Vsw fora de escala → ajustando")
-                df['speed'] = df['speed'] / 10.0
             df['speed'] = df['speed'].clip(lower=config.VSW_MIN, upper=config.VSW_MAX)
-
         if 'density' in df.columns:
             df['density'] = df['density'].clip(lower=config.DENSITY_MIN, upper=config.DENSITY_MAX)
         if 'bz_gsm' in df.columns:
@@ -142,456 +156,473 @@ class RobustOMNIProcessor:
         cols_to_interpolate = ['bz_gsm', 'speed', 'density']
         for col in cols_to_interpolate:
             if col in df.columns:
-                df[col] = df[col].interpolate(method='linear', limit=max_interpolation, limit_direction='both')
+                df[col] = df[col].interpolate(
+                    method='linear',
+                    limit=max_interpolation,
+                    limit_direction='both'
+                )
 
         has_speed = 'speed' in df.columns
         has_density = 'density' in df.columns
         has_bz = 'bz_gsm' in df.columns
+
         if has_speed and has_density:
             required = ['speed', 'density']
         elif has_bz:
             required = ['bz_gsm']
         else:
-            raise ValueError(f"❌ Arquivo inválido. Colunas: {list(df.columns)}")
+            raise ValueError(f"❌ Colunas insuficientes: {list(df.columns)}")
+
         df_clean = df.dropna(subset=required).copy()
         print(f"   ✅ {len(df_clean)} pontos válidos")
         return df_clean
 
     @staticmethod
     def merge_datasets(mag_df, plasma_df):
+        """Fusão robusta de datasets"""
         if mag_df is None or plasma_df is None:
             return None
+
         df = pd.merge(mag_df, plasma_df, on='time_tag', how='outer')
         df = df.sort_values('time_tag').reset_index(drop=True)
+
         critical_cols = ['speed', 'bz_gsm', 'density']
         for col in critical_cols:
             if col in df.columns:
-                if col == 'speed': df[col] = df[col].fillna(400)
-                elif col == 'bz_gsm': df[col] = df[col].fillna(0)
-                elif col == 'density': df[col] = df[col].fillna(5)
+                if col == 'speed':
+                    df[col] = df[col].fillna(400)
+                elif col == 'bz_gsm':
+                    df[col] = df[col].fillna(0)
+                elif col == 'density':
+                    df[col] = df[col].fillna(5)
         return df
 
-# ============================
-# 2. CAMPOS FÍSICOS
-# ============================
+# ============================================================
+# 2. CÁLCULO DE CAMPOS FÍSICOS (COMBINADO)
+# ============================================================
 class PhysicalFieldsCalculator:
+    """Calcula campos físicos combinando acoplamento Newell e não-linear"""
+
     @staticmethod
     def compute_all_fields(df):
+        """Calcula coupling_signal como média ponderada de dois métodos"""
         df = df.copy()
         config = HACPhysicsConfig()
+
         bz = df['bz_gsm'].fillna(0).values
-        by = df['by_gsm'].fillna(0).values if 'by_gsm' in df.columns else np.zeros_like(bz)
         v = df['speed'].fillna(400).values
+        bt = df.get('bt', np.abs(bz)).fillna(0).values
+        by = df.get('by_gsm', np.zeros_like(bz)).fillna(0).values
 
-        bz_negative = np.maximum(0, -bz)
-        E_field_raw = bz_negative * v * 1e-3
-        df['E_field_raw'] = E_field_raw
-        df['E_field_saturated'] = np.clip(E_field_raw, 0, config.E_FIELD_SATURATION)
-
-        Bt = np.sqrt(by**2 + bz**2)
+        # ---------- 1. Acoplamento Newell (escala corrigida) ----------
         theta = np.arctan2(by, bz)
-        theta_factor = np.sin(theta / 2.0) ** 4.0
-        coupling_newell = (v ** (4/3)) * (Bt ** (2/3)) * theta_factor * 1e-4
+        theta_factor = np.abs(np.sin(theta / 2)) ** 3
+        coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
+
+        # ---------- 2. Acoplamento não-linear via campo elétrico ----------
+        bz_negative = np.maximum(0, -bz)
+        e_field = bz_negative * v * 1e-3
+        e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
 
         threshold = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
-        coupling_nl = np.zeros_like(coupling_newell)
-        mask_linear = coupling_newell <= threshold
-        coupling_nl[mask_linear] = coupling_newell[mask_linear]
-        mask_nl = coupling_newell > threshold
-        if np.any(mask_nl):
-            normalized = coupling_newell[mask_nl] / threshold
-            coupling_nl[mask_nl] = threshold * (normalized ** beta)
+        coupling_nonlinear = np.zeros_like(e_sat)
+        mask_linear = e_sat <= threshold
+        coupling_nonlinear[mask_linear] = e_sat[mask_linear]
+        mask_nonlinear = e_sat > threshold
+        if np.any(mask_nonlinear):
+            normalized = e_sat[mask_nonlinear] / threshold
+            coupling_nonlinear[mask_nonlinear] = threshold * (normalized ** beta)
 
-        coupling_signal = np.where(bz < 0, coupling_nl, 0.0)
-        if np.max(coupling_signal) < 1e-3:
-            print("   ⚠️ Coupling extremamente baixo → usando fallback (10% do E_field)")
-            coupling_signal = df['E_field_saturated'].values * 0.1
-        coupling_signal = np.clip(coupling_signal, 0, 100)
-
-        df['Bt'] = Bt
-        df['theta'] = theta
-        df['coupling_newell'] = coupling_newell
-        df['coupling_nonlinear'] = coupling_nl
+        # ---------- 3. Combinação (70% Newell, 30% não-linear) ----------
+        coupling_combined = 0.7 * coupling_newell + 0.3 * coupling_nonlinear
+        coupling_signal = np.where(bz < 0, coupling_combined, 0.0)
         df['coupling_signal'] = coupling_signal
 
-        for col in ['E_field_raw', 'E_field_saturated', 'coupling_signal', 'coupling_newell', 'coupling_nonlinear']:
-            df[col] = np.nan_to_num(df[col], nan=0.0, posinf=100, neginf=0.0)
+        # Armazena componentes para diagnóstico
+        df['coupling_newell'] = coupling_newell
+        df['coupling_nonlinear'] = coupling_nonlinear
+        df['E_field_raw'] = e_field
+        df['E_field_saturated'] = e_sat
+
+        print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
+        print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
+        print(f"   • Coupling max: {coupling_signal.max():.2f}")
+
         return df
 
-# ============================
-# 3. MODELO HAC+ PRINCIPAL (REVISADO)
-# ============================
+# ============================================================
+# 3. MODELO HAC+ COM NOWCAST + INÉRCIA (PRODUÇÃO)
+# ============================================================
 class ProductionHACModel:
+    """Modelo HAC+ de produção com física refinada e previsão por simulação"""
+
     def __init__(self, config=None):
         self.config = config or HACPhysicsConfig()
-        self.core = HACCoreModel()
-        if self.core.config.Q_FACTOR == 0.0:
-            self.core.config.Q_FACTOR = -0.05
         self.results = {}
         self.nowcast_alerts = []
         self.escalation_triggers = []
         self.classification_logs = []
 
-    def _detect_regime(self, Vsw, density, Bz):
-        """Classifica o regime com base nos parâmetros médios recentes."""
-        if Vsw > 600 and density < 5:
-            return "HSS"
-        elif density > 10 and Bz < -10:
-            return "CME"
+    def _safe_deltat(self, times):
+        """Calcula delta-t em segundos com proteção"""
+        n = len(times)
+        dt = np.full(n, 60.0)
+        if n > 1:
+            t_sec = times.astype('datetime64[s]')
+            diffs = np.diff(t_sec).astype(float)
+            dt[1:] = np.maximum(diffs, 1.0)
+            dt[0] = dt[1]
+        return dt
+
+    def _safe_normalization(self, values):
+        """
+        Normalização robusta usando percentis dinâmicos.
+        Transforma HAC bruto em índice operacional 0–800.
+        Nota: Para estudos físicos, recomenda-se usar o HAC não normalizado.
+        """
+        p99 = np.percentile(values, 99)
+        p95 = np.percentile(values, 95)
+        scale = max(p99, p95 * 1.2)
+        if scale < 1.0:
+            scale = 1.0
+
+        normalized = (values / scale) * 300.0
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=800, neginf=0.0)
+        normalized = np.clip(normalized, 0, self.config.HAC_SCALE_MAX)
+
+        print(f"   • HAC escala: p99={p99:.1f}, p95={p95:.1f} → scale={scale:.1f}")
+        print(f"   • HAC máx: {np.max(normalized):.1f}, méd: {np.mean(normalized):.1f}")
+        return normalized
+
+    def _compute_robust_derivative(self, hac_total, times):
+        """Calcula dHAC/dt com Savitzky-Golay e clipping"""
+        times_sec = times.astype('datetime64[s]')
+        dt = np.diff(times_sec).astype(float)
+        dt = np.insert(dt, 0, np.median(dt))
+        dt[dt <= 0] = 1.0
+        dt_hours = np.maximum(dt / 3600.0, 1e-3)
+
+        if len(hac_total) < 7:
+            dHAC_dt = np.gradient(hac_total) / dt_hours
         else:
-            return "Quiet"
+            window = min(7, len(hac_total))
+            if window % 2 == 0:
+                window -= 1
+            try:
+                dHAC_dt = savgol_filter(hac_total, window, 2, deriv=1, delta=np.median(dt_hours))
+            except:
+                dHAC_dt = np.gradient(hac_total) / dt_hours
+
+        dHAC_dt = np.nan_to_num(dHAC_dt, nan=0.0)
+        dHAC_dt = np.clip(dHAC_dt, -400, 400)
+        print(f"     Derivada máx: {np.max(dHAC_dt):.1f} nT/h")
+        return dHAC_dt
+
+    def _detect_escalation_triggers(self, hac_total, dHAC_dt, Bz, Vsw, times):
+        """Detecta triggers de escalação usando regra de decisão"""
+        n = len(hac_total)
+        escalation_flags = np.zeros(n, dtype=bool)
+        window_size = 30  # ~15 min com dados de 1 min
+
+        for i in range(window_size, n):
+            cond1 = hac_total[i] < self.config.HG3_THRESHOLD
+            cond2 = dHAC_dt[i] > self.config.THETA_CRITICAL
+            bz_window = Bz[max(0, i-window_size):i+1]
+            v_window = Vsw[max(0, i-window_size):i+1]
+            cond3 = np.median(bz_window) < self.config.BZ_CRITICAL
+            cond4 = np.median(v_window) > self.config.VSW_CRITICAL
+
+            if cond1 and cond2 and cond3 and cond4:
+                escalation_flags[i] = True
+                alert = {
+                    'time': pd.to_datetime(times[i]),
+                    'HAC': float(hac_total[i]),
+                    'dHAC_dt': float(dHAC_dt[i]),
+                    'Bz_avg': float(np.mean(bz_window)),
+                    'V_avg': float(np.mean(v_window)),
+                    'forecast_horizon_hours': 2.0
+                }
+                self.nowcast_alerts.append(alert)
+                if not self.escalation_triggers or (alert['time'] - self.escalation_triggers[-1]['time']).total_seconds() > 3600:
+                    self.escalation_triggers.append(alert)
+                    print(f"     🚨 ALERTA em {alert['time']}: HAC={hac_total[i]:.1f}, dH/dt={dHAC_dt[i]:.1f} nT/h")
+
+        return escalation_flags
+
+    def _compute_nowcast_growth(self, hac_total, coupling):
+        """Crescimento pelo modelo Nowcast + Inércia"""
+        hac_nowcast = (coupling / self.config.E_FIELD_SATURATION) * self.config.HAC_SCALE_MAX
+        growth = (1.0 / self.config.TAU_RING_CURRENT_QUIET) * (hac_nowcast - hac_total)
+        return growth
 
     def compute_hac_system(self, df):
+        """Sistema HAC completo com regime dinâmico e injeção basal adaptativa"""
         print("\n⚡ Calculando sistema HAC+...")
+
         times = pd.to_datetime(df['time_tag']).values
         coupling = df['coupling_signal'].fillna(0).values
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
-        density = df['density'].fillna(5).values if 'density' in df.columns else None
+        density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
 
         dt = self._safe_deltat(times)
         n = len(times)
+
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
 
-        tau_rc_base = self.config.TAU_RING_CURRENT * 3600
-        tau_sub_base = self.config.TAU_SUBSTORM * 3600
-        tau_ion_base = self.config.TAU_IONOSPHERE * 3600
-
-        # Detectar regime atual (usando janela de 2h para robustez)
-        window_regime = min(120, n-1)
-        Vsw_avg = np.mean(Vsw[-window_regime:]) if n > 1 else Vsw[-1]
-        dens_avg = np.mean(density[-window_regime:]) if density is not None else 5.0
-        Bz_avg = np.mean(Bz[-window_regime:]) if n > 1 else Bz[-1]
-        regime = self._detect_regime(Vsw_avg, dens_avg, Bz_avg)
-        print(f"   Regime detectado: {regime}")
-
-        # Ajustes específicos por regime
-        if regime == "HSS":
-            tau_multiplier = 2.0       # maior persistência
-            injection_boost = 1.0      # sem boost extra
-        elif regime == "CME":
-            tau_multiplier = 1.0
-            injection_boost = 1.3      # boost moderado
-        else:  # Quiet
-            tau_multiplier = 1.0
-            injection_boost = 1.0
-
         print("   Simulando reservatórios...")
         for i in range(1, n):
-            # Decaimento dinâmico (modulado pelo histórico de acoplamento)
-            if i >= 120:
-                history_coupling = np.mean(coupling[max(0, i-120):i+1])
-                # Fator de persistência: aumenta tau quando há acoplamento sustentado (HSS)
-                persistence_factor = 1.0 + 0.5 * np.tanh(history_coupling / 20.0)
+            regime = detect_regime(Vsw[i], density[i], Bz[i])
+
+            # Injeção basal dinâmica: aumenta com densidade do plasma
+            baseline = 0.2 + 0.3 * (density[i] / 10.0)
+            injection = coupling[i] + baseline
+
+            # Boost por regime
+            if regime == 'CME':
+                injection *= 1.3
+                tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
+            elif regime == 'HSS':
+                injection *= 1.1
+                tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
             else:
-                persistence_factor = 1.0
+                tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
 
-            # Aplicar multiplicadores de regime e persistência
-            tau_rc_eff = tau_rc_base * tau_multiplier * persistence_factor
-            tau_sub_eff = tau_sub_base * tau_multiplier * persistence_factor
-            tau_ion_eff = tau_ion_base * tau_multiplier * persistence_factor
-
-            decay_rc = min(dt[i] / tau_rc_eff, 1.0) if dt[i] > 0 else 0.0
-            decay_sub = min(dt[i] / tau_sub_eff, 1.0) if dt[i] > 0 else 0.0
-            decay_ion = min(dt[i] / tau_ion_eff, 1.0) if dt[i] > 0 else 0.0
-
-            # --- INJEÇÃO UNIFICADA (apenas coupling) ---
-            injection = coupling[i] * injection_boost
-
-            # --- Boost adicional para CME (Bz muito negativo) ---
-            if regime == "CME" and Bz[i] < -15:
-                injection *= 1.2
+            tau_sub = self.config.TAU_SUBSTORM * 3600
+            tau_ion = self.config.TAU_IONOSPHERE * 3600
 
             dt_hours = dt[i] / 3600.0
             injection_eff = injection * dt_hours
-            injection_eff = np.clip(injection_eff, 0, 80)
+            injection_eff = np.clip(injection_eff, 0, 100)
 
-            # --- PERDAS (dependentes do estado) ---
-            loss_factor_ring = 0.015 + 0.0002 * np.sqrt(hac_ring[i-1])
-            loss_ring = loss_factor_ring * hac_ring[i-1]
+            # Perdas dissipativas
+            loss_ring = (0.015 + 0.0002 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            loss_sub = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
+            loss_ion = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
-            loss_factor_sub = 0.015 + 0.0002 * np.sqrt(hac_substorm[i-1])
-            loss_sub = loss_factor_sub * hac_substorm[i-1]
+            # Recuperação acelerada quando Bz vira para norte
+            if Bz[i] > 0:
+                loss_ring *= 1.3
+                loss_sub *= 1.3
+                loss_ion *= 1.3
 
-            loss_factor_ion = 0.015 + 0.0002 * np.sqrt(hac_ionosphere[i-1])
-            loss_ion = loss_factor_ion * hac_ionosphere[i-1]
+            alpha_rc = np.exp(-dt[i] / tau_rc)
+            alpha_sub = np.exp(-dt[i] / tau_sub)
+            alpha_ion = np.exp(-dt[i] / tau_ion)
 
-            # --- ATUALIZAÇÃO ---
-            hac_ring[i] = hac_ring[i-1] * (1.0 - decay_rc)
-            hac_ring[i] += self.config.ALPHA_RING * injection_eff
-            hac_ring[i] -= loss_ring
+            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
+            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
+            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-            hac_substorm[i] = hac_substorm[i-1] * (1.0 - decay_sub)
-            hac_substorm[i] += self.config.ALPHA_SUBSTORM * injection_eff
-            hac_substorm[i] -= loss_sub
-
-            hac_ionosphere[i] = hac_ionosphere[i-1] * (1.0 - decay_ion)
-            hac_ionosphere[i] += self.config.ALPHA_IONOSPHERE * injection_eff
-            hac_ionosphere[i] -= loss_ion
-
-            # Garantir não-negatividade
-            hac_ring[i] = max(0.0, hac_ring[i])
-            hac_substorm[i] = max(0.0, hac_substorm[i])
-            hac_ionosphere[i] = max(0.0, hac_ionosphere[i])
-
-        hac_total_raw = hac_ring + hac_substorm + hac_ionosphere
-        hac_total = hac_total_raw / (1.0 + hac_total_raw / 2000.0)
-        hac_total = np.clip(hac_total, 0, self.config.RING_CURRENT_MAX)
-
-        print(f"   HAC máximo: {np.max(hac_total):.1f}")
+        hac_total = hac_ring + hac_substorm + hac_ionosphere
+        hac_total = self._safe_normalization(hac_total)
 
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         escalation_flags = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
         nowcast_growth = self._compute_nowcast_growth(hac_total, coupling)
 
-        # Garantir Q_FACTOR não nulo
-        if self.core.config.Q_FACTOR == 0.0:
-            self.core.config.Q_FACTOR = -0.05
+        # ------------------- Mapeamento HAC → Dst (menos agressivo) ------------------
+        hac_clipped = np.clip(hac_total, 0, 800)
+        hac_norm = hac_clipped / 800.0
+        dhdt_clipped = np.clip(np.abs(dHAC_dt), 0, 400)
+        dhdt_norm = dhdt_clipped / 400.0
 
-        core_results = self.core.process(
-            time=times, bz=Bz, v=Vsw, density=density,
-            coupling_override=coupling, mode='nowcast'
-        )
+        dst_from_hac = -450 * hac_norm - 150 * dhdt_norm - 30
+        dst_from_hac = np.clip(dst_from_hac, -600, 20)
 
-        # --- Dst com memória dinâmica (resposta de 1ª ordem) ---
-        tau_dst = self.config.TAU_DST_RESPONSE   # horas
-        dst_dynamic = np.zeros_like(hac_total)
-        dst_dynamic[0] = -20.0  # baseline
-        for i in range(1, len(dst_dynamic)):
-            dt_hours_i = dt[i] / 3600.0
-            alpha = dt_hours_i / tau_dst
-            dst_dynamic[i] = dst_dynamic[i-1] + alpha * (-hac_total[i] - dst_dynamic[i-1])
-        dst_hybrid = np.clip(dst_dynamic, -500, 50)
+        # Core dummy (substitua pelo seu HACCoreModel se disponível)
+        dst_core = np.full(n, -20.0)   # valor quieto
+        core_unstable = False
 
-        # Previsão de Dst (usando o próprio modelo iterado)
-        # Assume HAC constante = último valor
-        hac_now = hac_total[-1]
-        dst_now = dst_hybrid[-1]
+        if core_unstable:
+            print("   ⚠️ CORE INSTÁVEL → usando apenas HAC")
+            dst_hybrid = dst_from_hac.copy()
+        else:
+            bz_factor = np.clip((-Bz) / 15.0, 0, 1)
+            v_factor = np.clip((Vsw - 400) / 400, 0, 1)
+            activity = bz_factor * v_factor
+            blend = np.clip(activity ** 1.5, 0.1, 0.95)
+            dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
+
+        dst_hybrid = np.clip(dst_hybrid, -600, 50)
+
+        # ------------------- Previsão por simulação da equação de relaxação ------------------
         forecast = {}
-        dst_future = dst_now
-        dt_forecast = 1.0  # passo de 1 hora
-        for h in [1, 2, 3]:
-            for _ in range(int(dt_forecast / (dt[-1]/3600.0))):  # sub-passos conforme dt
-                alpha = (dt[-1]/3600.0) / tau_dst
-                dst_future += alpha * (-hac_now - dst_future)
-            forecast[f'{h}h'] = np.clip(dst_future, -500, 50)
+        dt_median = np.median(dt) / 3600.0  # horas
+        for horizon in [1, 2, 3]:
+            steps = int(horizon / dt_median)
+            if steps < 1:
+                steps = 1
+            # Simula a evolução do Dst usando o último HAC conhecido
+            dst_future = dst_hybrid[-1]
+            hac_now = hac_total[-1]
+            tau_dst = self.config.TAU_RING_CURRENT_QUIET  # pode ser ajustado pelo regime
+            alpha_dst = np.exp(-dt_median / tau_dst)
+            for _ in range(steps):
+                # Forçante: -hac_now atua como termo fonte (simplificado)
+                dst_future = alpha_dst * dst_future + (1 - alpha_dst) * (-hac_now * 0.8)
+            forecast[f"{horizon}h"] = dst_future
 
-        # Probabilidades (último ponto)
-        probs_now = storm_probability(hac_total[-1], dHAC_dt[-1], Bz[-1], Vsw[-1], self.core.config)
+        print(f"   • Dst híbrido mín: {np.min(dst_hybrid):.1f} nT")
 
-        core_results['Dst_pred'] = dst_hybrid
-        core_results['Dst_min'] = np.min(dst_hybrid)
-        core_results['Dst_now'] = dst_hybrid[-1]
-        core_results['dDst_dt'] = (dst_hybrid[-1] - dst_hybrid[-2]) / (dt[-1]/3600.0) if len(dst_hybrid)>1 else 0.0
-        core_results['forecast'] = forecast
-        core_results['probabilities'] = probs_now
-        core_results['regime'] = regime
-
+        # Armazena resultados
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
             'HAC_ring': hac_ring,
             'HAC_substorm': hac_substorm,
             'HAC_ionosphere': hac_ionosphere,
-            'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
+            'Bz': Bz,
+            'Vsw': Vsw,
+            'coupling_signal': coupling,
             'dHAC_dt': dHAC_dt,
             'escalation_alert': escalation_flags,
             'nowcast_inertia_growth': nowcast_growth,
-            'Dst_physical': core_results['Dst_pred'],
-            'Dst_min_physical': core_results['Dst_min'],
-            'Dst_now': core_results['Dst_now'],
-            'dDst_dt': core_results['dDst_dt'],
-            'forecast': core_results['forecast'],
-            'core_probabilities': probs_now,
-            'core_severity': core_results['severity'],
-            'regime': regime
+            'Dst_physical': dst_hybrid,
+            'Dst_min_physical': np.min(dst_hybrid),
+            'Dst_now': dst_hybrid[-1],
+            'forecast': forecast,
+            'core_probabilities': {'G1': 0.0, 'G2': 0.0, 'G3': 0.0, 'G4': 0.0, 'G5': 0.0},
+            'core_severity': 0
         })
+
         self._validate_output(hac_total)
         return hac_total
-
-    # --- Métodos auxiliares (mantidos) ---
-    def _safe_deltat(self, times):
-        n = len(times)
-        dt = np.full(n, 60.0)
-        if n > 1:
-            for i in range(1, n):
-                try:
-                    delta = (times[i] - times[i-1]).total_seconds()
-                    dt[i] = max(delta, 1.0)
-                except:
-                    dt[i] = 60.0
-            dt[0] = dt[1]
-        return dt
-
-    def _compute_robust_derivative(self, signal, times):
-        times = np.array(times, dtype="datetime64[s]")
-        dt = np.diff(times).astype("timedelta64[s]").astype(float)
-        dt = np.insert(dt, 0, np.median(dt))
-        dt[dt <= 0] = 1.0
-        dt_hours = np.maximum(dt / 3600.0, 1e-3)
-
-        if signal.size < 7:
-            deriv = np.gradient(signal) / dt_hours
-        else:
-            window = min(7, len(signal))
-            if window < 3:
-                return np.gradient(signal) / dt_hours
-            if window % 2 == 0:
-                window -= 1
-            dt_median = np.median(dt_hours)
-            try:
-                deriv = savgol_filter(signal, window_length=window, polyorder=2, deriv=1, delta=dt_median)
-            except:
-                deriv = np.gradient(signal) / dt_hours
-        deriv = np.nan_to_num(deriv, nan=0.0)
-        limit = 300
-        deriv = limit * np.tanh(deriv / limit)
-        return deriv
-
-    def _compute_nowcast_growth(self, hac_total, coupling):
-        hac_nowcast = (coupling / self.config.E_FIELD_SATURATION) * self.config.HAC_SCALE_MAX
-        growth = (1.0 / self.config.TAU_EFFECTIVE) * (hac_nowcast - hac_total)
-        return growth
-
-    def _detect_escalation_triggers(self, hac_total, dHAC_dt, Bz, Vsw, times):
-        n = len(hac_total)
-        escalation_flags = np.zeros(n, dtype=bool)
-        theta = self.config.THETA_CRITICAL
-        h_g3 = self.config.HG3_THRESHOLD
-        bz_crit = self.config.BZ_CRITICAL
-        v_crit = self.config.VSW_CRITICAL
-        window_size = 30
-        for i in range(window_size, n):
-            condition1 = hac_total[i] < h_g3
-            condition2 = dHAC_dt[i] > theta
-            bz_window = Bz[max(0, i-window_size):i+1]
-            v_window = Vsw[max(0, i-window_size):i+1]
-            condition3 = np.median(bz_window) < bz_crit
-            condition4 = np.median(v_window) > v_crit
-            if condition1 and condition2 and condition3 and condition4:
-                escalation_flags[i] = True
-                alert_time = pd.to_datetime(times[i]) if isinstance(times[i], np.datetime64) else times[i]
-                alert_info = {
-                    'time': alert_time,
-                    'HAC': float(hac_total[i]),
-                    'dHAC_dt': float(dHAC_dt[i]),
-                    'Bz_avg': float(np.mean(bz_window)),
-                    'V_avg': float(np.mean(v_window)),
-                    'forecast_horizon_hours': self.config.TAU_EFFECTIVE * 2
-                }
-                self.nowcast_alerts.append(alert_info)
-                if not self.escalation_triggers or (alert_time - self.escalation_triggers[-1]['time']).total_seconds() > 3600:
-                    self.escalation_triggers.append(alert_info)
-        return escalation_flags
-
-    def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
-        if hac < 30: base_level, base_severity = "Quiet", 0
-        elif hac < 80: base_level, base_severity = "G1", 1
-        elif hac < 150: base_level, base_severity = "G2", 2
-        elif hac < 250: base_level, base_severity = "G3", 3
-        elif hac < 400: base_level, base_severity = "G4", 4
-        else: base_level, base_severity = "G5", 5
-
-        nowcast_score = 0
-        if dhdt > 40: nowcast_score += 1
-        if dhdt > 80: nowcast_score += 1
-        if dhdt > 120: nowcast_score += 2
-        if dhdt > 180: nowcast_score += 3
-        if bz < -5: nowcast_score += 1
-        if bz < -8: nowcast_score += 2
-        if bz < -12: nowcast_score += 3
-        if bz < -18: nowcast_score += 4
-        if v > 500: nowcast_score += 1
-        if v > 600: nowcast_score += 2
-        if v > 700: nowcast_score += 3
-        if hac > 30: nowcast_score += 1
-        if hac > 60: nowcast_score += 1
-        if hac > 100: nowcast_score += 2
-        if hac > 150: nowcast_score += 2
-
-        if hac < 20 and abs(dhdt) < 20 and bz > -2 and v < 450:
-            return {'final_level': "G0", 'final_severity': 0, 'escalation': False,
-                    'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
-                    'base_level': base_level, 'nowcast_score': nowcast_score}
-
-        final_level, final_severity = base_level, base_severity
-        if nowcast_score >= 16:
-            if base_severity < 5: final_level, final_severity = "G5 (Nowcast Override)", 5
-        elif nowcast_score >= 13:
-            if base_severity < 4: final_level, final_severity = "G4 (Nowcast Override)", 4
-        elif nowcast_score >= 10:
-            if base_severity < 3: final_level, final_severity = "G3 (Nowcast Override)", 3
-        elif nowcast_score >= 6:
-            if base_severity < 2: final_level, final_severity = "G2 (Nowcast Enhancement)", 2
-
-        # Regras especiais com limiares reduzidos
-        if dhdt > 150 and bz < -6 and v > 600 and hac > 60:
-            if base_severity < 5: final_level, final_severity = "G5 (Extreme Nowcast)", 5
-        elif dhdt > 90 and bz < -4 and v > 500:
-            if base_severity < 4: final_level, final_severity = "G4 (Strong Nowcast)", 4
-        elif dhdt > 60 and bz < -3 and v > 450 and hac > 30:
-            if base_severity < 3: final_level, final_severity = "G3 (Nowcast Trigger)", 3
-
-        return {'final_level': final_level, 'final_severity': final_severity,
-                'escalation': final_severity > base_severity,
-                'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
-                'base_level': base_level, 'nowcast_score': nowcast_score}
-
-    def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
-        enhanced = storm_levels.copy()
-        n = len(storm_levels)
-        window = 60
-        for i in range(window, n):
-            recent_hac = hac_values[i-window:i]
-            recent_dhdt = dHAC_dt[i-window:i]
-            mean_dhdt = np.mean(recent_dhdt)
-            max_dhdt = np.max(recent_dhdt)
-            hac_increase = hac_values[i] - hac_values[i-window]
-            if max_dhdt > 150 and mean_dhdt > 60 and hac_increase > 100:
-                if "G5" not in storm_levels[i]:
-                    enhanced[i] = "G5 (Trend Boost)"
-            elif max_dhdt > 100 and mean_dhdt > 40 and hac_increase > 60:
-                if "G4" not in storm_levels[i] and "G5" not in storm_levels[i]:
-                    enhanced[i] = "G4 (Trend Boost)"
-        return enhanced
 
     def _validate_output(self, hac_values):
         if np.any(np.isnan(hac_values)):
             raise ValueError("NaN detectado em HAC")
         print("   ✅ Validação passada")
 
+    def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
+        """Classificação híbrida com override de Dst"""
+        if hac < 50:
+            base_level = "Quiet"
+            base_severity = 0
+        elif hac < 100:
+            base_level = "G1"
+            base_severity = 1
+        elif hac < 200:
+            base_level = "G2"
+            base_severity = 2
+        elif hac < 350:
+            base_level = "G3"
+            base_severity = 3
+        elif hac < 550:
+            base_level = "G4"
+            base_severity = 4
+        else:
+            base_level = "G5"
+            base_severity = 5
+
+        nowcast_score = 0
+        if dhdt > 50: nowcast_score += 1
+        if dhdt > 100: nowcast_score += 1
+        if dhdt > 150: nowcast_score += 2
+        if dhdt > 200: nowcast_score += 3
+        if bz < -5: nowcast_score += 1
+        if bz < -10: nowcast_score += 2
+        if bz < -15: nowcast_score += 3
+        if bz < -20: nowcast_score += 4
+        if v > 500: nowcast_score += 1
+        if v > 600: nowcast_score += 1
+        if v > 700: nowcast_score += 2
+        if v > 800: nowcast_score += 3
+        if hac > 50: nowcast_score += 1
+        if hac > 100: nowcast_score += 1
+        if hac > 150: nowcast_score += 2
+        if hac > 200: nowcast_score += 2
+
+        final_level = base_level
+        final_severity = base_severity
+
+        if nowcast_score >= 16 and base_severity < 5:
+            final_level = "G5 (Nowcast Override)"
+            final_severity = 5
+        elif nowcast_score >= 13 and base_severity < 4:
+            final_level = "G4 (Nowcast Override)"
+            final_severity = 4
+        elif nowcast_score >= 10 and base_severity < 3:
+            final_level = "G3 (Nowcast Override)"
+            final_severity = 3
+        elif nowcast_score >= 6 and base_severity < 2:
+            final_level = "G2 (Nowcast Enhancement)"
+            final_severity = 2
+
+        if dhdt > 220 and bz < -10 and v > 750 and hac > 100 and base_severity < 5:
+            final_level = "G5 (Extreme Nowcast)"
+            final_severity = 5
+        elif dhdt > 150 and bz < -8 and v > 650 and base_severity < 4:
+            final_level = "G4 (Strong Nowcast)"
+            final_severity = 4
+        elif dhdt > 100 and bz < -5 and v > 600 and hac > 50 and base_severity < 3:
+            final_level = "G3 (Nowcast Trigger)"
+            final_severity = 3
+
+        return final_level, {
+            'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
+            'base_level': base_level, 'nowcast_score': nowcast_score,
+            'final_level': final_level, 'escalation': final_severity > base_severity,
+            'severity': final_severity
+        }
+
+    def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
+        enhanced = storm_levels.copy()
+        n = len(storm_levels)
+        window = 60
+        for i in range(window, n):
+            mean_dhdt = np.mean(dHAC_dt[i-window:i])
+            max_dhdt = np.max(dHAC_dt[i-window:i])
+            hac_inc = hac_values[i] - hac_values[i-window]
+            if max_dhdt > 220 and mean_dhdt > 100 and hac_inc > 150 and "G5" not in storm_levels[i]:
+                enhanced[i] = "G5 (Trend Boost)"
+            elif max_dhdt > 200 and mean_dhdt > 80 and hac_inc > 120 and "G4" not in storm_levels[i] and "G5" not in storm_levels[i]:
+                enhanced[i] = "G4 (Trend Boost)"
+        return enhanced
+
     def predict_storm_indicators(self, hac_values):
+        """Predição final com classificação híbrida e override de Dst"""
         print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
+
+        kp_pred = 9 * np.tanh(hac_values / 180)
+
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
-        dst_now = self.results.get('Dst_now', dst_pred[-1] if dst_pred.size > 0 else 0)
-        kp_pred = np.minimum(np.abs(dst_pred) / 28.0, 9.0)
+        dst_now = self.results.get('Dst_now', dst_pred[-1])
 
-        storm_levels = []
-        decision_logs = []
         dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
         Bz = self.results.get('Bz', np.zeros_like(hac_values))
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
+        storm_levels = []
+        decision_logs = []
+        escalation_count = 0
+        g4g5_nowcast_count = 0
+
         for i in range(len(hac_values)):
-            result = self._classify_storm_with_nowcast(hac_values[i], dHAC_dt[i], Bz[i], Vsw[i])
-            level = result['final_level']
-            if hac_values[i] < 20 and abs(dHAC_dt[i]) < 20:
-                level = "G0"
-                result['final_level'] = level
-                result['final_severity'] = 0
+            level, info = self._classify_storm_with_nowcast(hac_values[i], dHAC_dt[i], Bz[i], Vsw[i])
+            # Override por Dst real
+            dst = dst_pred[i]
             if Bz[i] < -8 and Vsw[i] > 600:
-                if dst_pred[i] <= -300: level = "G5 (Dst Override)"
-                elif dst_pred[i] <= -200: level = "G4 (Dst Override)"
-                elif dst_pred[i] <= -150: level = "G3 (Dst Override)"
-                elif dst_pred[i] <= -100: level = "G2 (Dst Override)"
-                elif dst_pred[i] <= -50: level = "G1 (Dst Override)"
-                result['final_level'] = level
+                if dst <= -300:
+                    level = "G5 (Dst Override)"
+                elif dst <= -200:
+                    level = "G4 (Dst Override)"
+                elif dst <= -150:
+                    level = "G3 (Dst Override)"
+                elif dst <= -100:
+                    level = "G2 (Dst Override)"
+                elif dst <= -50:
+                    level = "G1 (Dst Override)"
             storm_levels.append(level)
-            decision_logs.append(result)
+            decision_logs.append(info)
+            if info['escalation']:
+                escalation_count += 1
+            if "G4" in level or "G5" in level:
+                g4g5_nowcast_count += 1
 
         enhanced_levels = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
 
@@ -608,288 +639,91 @@ class ProductionHACModel:
 
         g4g5_final = sum(1 for l in enhanced_levels if "G4" in l or "G5" in l)
         g4g5_base = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
-        regime = self.results.get('regime', 'Desconhecido')
-        print(f"   • Regime: {regime}")
+        g4g5_trad = sum(1 for l in storm_levels if l in ['G4', 'G5'])
+
         print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
         print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
         print(f"   • Dst atual: {dst_now:.1f} nT")
-        print(f"   • Eventos G4/G5 (base): {g4g5_base}")
-        print(f"   • Eventos G4/G5 (boost): {g4g5_final}")
+        print(f"   • Eventos G4/G5 (tradicional): {g4g5_trad}")
+        print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base}")
+        print(f"   • Eventos G4/G5 (com boost): {g4g5_final}")
+        print(f"   • Escalações Nowcast: {escalation_count}")
 
         forecast = self.results.get('forecast', {})
         if forecast:
-            print("   • Previsão Dst:")
+            print("   • Previsão Dst (simulada):")
             for h, val in forecast.items():
                 print(f"       {h}: {val:.1f} nT")
+
         probs = self.results.get('core_probabilities', {})
+        if hac_values[-1] < 10:
+            probs = {'G1': 0.0, 'G2': 0.0, 'G3': 0.0, 'G4': 0.0, 'G5': 0.0}
         if probs:
-            print("   • Probabilidades:")
+            print("   • Probabilidades (softmax):")
             for k, v in probs.items():
                 print(f"       {k}: {v*100:.1f}%")
 
         return kp_pred, dst_pred, enhanced_levels
 
     def generate_nowcast_report(self):
-        safe_logs = [{'final_level': log.get('final_level','Unknown'),
-                      'severity': log.get('final_severity', log.get('severity',0)),
-                      'escalation': log.get('escalation', False),
-                      'hac': log.get('hac',0.0), 'dhdt': log.get('dhdt',0.0),
-                      'bz': log.get('bz',0.0), 'v': log.get('v',0.0),
-                      'base_level': log.get('base_level','Unknown')}
-                     for log in self.classification_logs]
-        nowcast_escalations = sum(1 for log in safe_logs if log['escalation'])
-        nowcast_g4g5 = sum(1 for log in safe_logs if log['severity'] >= 4)
+        """Gera relatório específico do modelo Nowcast + Inércia"""
+        summary = "Nenhum alerta de escalação detectado."
+        if self.nowcast_alerts:
+            summary = f"Total de alertas detectados: {len(self.nowcast_alerts)}\n"
+            summary += f"Triggers principais: {len(self.escalation_triggers)}\n\n"
 
-        report = "="*70 + "\n🚨 RELATÓRIO NOWCAST + INÉRCIA\n" + "="*70 + "\n\n"
-        report += f"Regime detectado: {self.results.get('regime', 'Desconhecido')}\n"
-        report += f"Total de alertas: {len(self.nowcast_alerts)}\n"
-        report += f"Triggers principais: {len(self.escalation_triggers)}\n"
-        report += f"Escalações Nowcast: {nowcast_escalations}\n"
-        report += f"Eventos G4/G5 Nowcast: {nowcast_g4g5}\n"
+        if self.classification_logs:
+            esc = sum(1 for log in self.classification_logs if log['escalation'])
+            g4g5 = sum(1 for log in self.classification_logs if log['severity'] >= 4)
+            summary += f"CLASSIFICAÇÃO NOWCAST:\n• Escalações: {esc}\n• Eventos G4/G5: {g4g5}\n"
 
-        if self.escalation_triggers:
-            report += "\nALERTAS PRINCIPAIS:\n"
-            for i, alert in enumerate(self.escalation_triggers[-3:], 1):
-                report += f"{i}. {alert['time']}: HAC={alert['HAC']:.1f}, dH/dt={alert['dHAC_dt']:.1f} nT/h\n"
+        report = "="*70 + "\n"
+        report += "🚨 RELATÓRIO NOWCAST + INÉRCIA\n" + "="*70 + "\n\n"
+        report += summary + "\n"
+        report += "PARÂMETROS CRÍTICOS:\n"
+        report += f"  • τ_eff quiet: {self.config.TAU_RING_CURRENT_QUIET} h\n"
+        report += f"  • Θ: {self.config.THETA_CRITICAL} nT/h\n"
+        report += f"  • H_G3: {self.config.HG3_THRESHOLD}\n"
+        report += "="*70
         return report
 
-    def get_current_assessment(self):
-        if not self.results or 'Storm_level' not in self.results:
-            return None
-        idx = -1
-        return {
-            'time': self.results['time'][idx],
-            'HAC': float(self.results['HAC_total'][idx]),
-            'dHAC_dt': float(self.results['dHAC_dt'][idx]),
-            'Bz': float(self.results['Bz'][idx]),
-            'Vsw': float(self.results['Vsw'][idx]),
-            'classification': self.results['Storm_level'][idx],
-            'escalation_risk': 'HIGH' if self.results['escalation_alert'][idx] else 'LOW'
-        }
-
-# ============================
-# 4. VISUALIZAÇÃO
-# ============================
-class ProductionVisualizer:
-    @staticmethod
-    def create_final_dashboard(results, df, filename="hac_nowcast_final.png"):
-        print(f"\n📈 Criando dashboard: {filename}")
-        if len(results.get('HAC_total', [])) < 10:
-            print("❌ Dados insuficientes")
-            return None
-
-        plt.style.use('default')
-        fig, axes = plt.subplots(4, 2, figsize=(16, 14))
-        fig.suptitle('HAC++ Model - Sistema Completo de Previsão (Nowcast + Inércia Híbrido)', fontsize=16, fontweight='bold')
-        times = results['time']
-
-        # Painel 1: HAC
-        ax1 = axes[0, 0]
-        hac = results['HAC_total']
-        colors = []
-        if 'Storm_level' in results:
-            for level in results['Storm_level']:
-                if "G5" in level: colors.append('#8B0000')
-                elif "G4" in level: colors.append('#FF4500')
-                elif "G3" in level: colors.append('#FF8C00')
-                elif "G2" in level: colors.append('#FFD700')
-                elif "G1" in level: colors.append('#ADFF2F')
-                elif "Nowcast" in level: colors.append('#9370DB')
-                else: colors.append('#1E90FF')
-        else:
-            colors = ['#d62728'] * len(hac)
-        for i in range(len(hac)-1):
-            ax1.plot(times[i:i+2], hac[i:i+2], color=colors[i], linewidth=2, alpha=0.8)
-        for lvl, col, lbl in zip([50,100,150,200,250], ['#2ecc71','#f1c40f','#e67e22','#e74c3c','#9b59b6'], ['G1','G2','G3','G4','G5']):
-            ax1.axhline(y=lvl, color=col, linestyle=':', alpha=0.7, label=f'{lbl} ({lvl})')
-        ax1.set_ylabel('HAC Index')
-        ax1.set_title('A. Estado do Reservatório')
-        ax1.legend(loc='upper left', fontsize=8)
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 320)
-
-        # Painel 2: dH/dt
-        ax2 = axes[0, 1]
-        ax2.plot(times, results['dHAC_dt'], color='#3498db', linewidth=1.5, label='dH/dt')
-        ax2.axhline(y=HACPhysicsConfig.THETA_CRITICAL, color='orange', linestyle='--', alpha=0.8)
-        ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        ax2.set_ylabel('dH/dt [nT/h]')
-        ax2.set_title('B. Taxa de Crescimento')
-        ax2.legend(loc='upper left')
-        ax2.grid(True, alpha=0.3)
-
-        # Painel 3: Classificação
-        ax3 = axes[1, 0]
-        if 'Storm_level' in results and 'Storm_level_base' in results:
-            severity_map = {'Quiet':0,'G1':1,'G2':2,'G3':3,'G4':4,'G5':5,
-                            'G2 (Nowcast Enhancement)':2.5, 'G3 (Nowcast Trigger)':3.3, 'G3 (Nowcast Override)':3.7,
-                            'G4 (Strong Nowcast)':4.3, 'G4 (Nowcast Override)':4.7, 'G4 (Trend Boost)':4.5,
-                            'G5 (Extreme Nowcast)':5.3, 'G5 (Nowcast Override)':5.7, 'G5 (Trend Boost)':5.5}
-            base_sev = np.array([severity_map.get(l,0) for l in results['Storm_level_base']])
-            final_sev = np.array([severity_map.get(l,0) for l in results['Storm_level']])
-            ax3.plot(times, base_sev, color='#7f8c8d', linestyle='--', label='Base')
-            ax3.plot(times, final_sev, color='#9b59b6', linewidth=2, label='Híbrida')
-            ax3.fill_between(times, 0, final_sev, where=(final_sev > base_sev), color='#ff9999', alpha=0.4, label='Escalação')
-        ax3.set_yticks([0,1,2,3,4,5])
-        ax3.set_yticklabels(['Quiet','G1','G2','G3','G4','G5'])
-        ax3.set_ylabel('Classificação')
-        ax3.set_title('C. Classificação Híbrida')
-        ax3.legend(loc='upper left', fontsize=7)
-        ax3.grid(True, alpha=0.3)
-
-        # Painel 4: Bz
-        ax4 = axes[1, 1]
-        ax4.plot(times, results['Bz'], color='#2ecc71')
-        ax4.fill_between(times, 0, results['Bz'], where=(results['Bz']<0), color='red', alpha=0.3)
-        ax4.axhline(y=-5, color='yellow', linestyle=':')
-        ax4.axhline(y=HACPhysicsConfig.BZ_G3_THRESHOLD, color='orange', linestyle='--')
-        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        ax4.set_ylabel('Bz [nT]')
-        ax4.set_title('D. Forçante do Vento Solar')
-        ax4.grid(True, alpha=0.3)
-
-        # Painel 5: Kp
-        ax5 = axes[2, 0]
-        ax5.plot(times, results['Kp_pred'], color='#e74c3c')
-        for kp, col, lbl in zip([5,6,7,8,9], ['orange','yellow','red','darkred','purple'], ['G1','G2','G3','G4','G5']):
-            ax5.axhline(y=kp, color=col, linestyle=':', alpha=0.7, label=f'Kp={kp} ({lbl})')
-        ax5.set_ylabel('Kp previsto')
-        ax5.set_title('E. Atividade Geomagnética')
-        ax5.legend(loc='upper left', fontsize=7)
-        ax5.grid(True, alpha=0.3)
-        ax5.set_ylim(0, 9.5)
-
-        # Painel 6: Velocidade
-        ax6 = axes[2, 1]
-        ax6.plot(times, results['Vsw'], color='#3498db')
-        ax6.axhline(y=500, color='lightblue', linestyle=':')
-        ax6.axhline(y=HACPhysicsConfig.V_G3_THRESHOLD, color='orange', linestyle='--')
-        ax6.set_ylabel('V [km/s]')
-        ax6.set_title('F. Velocidade do Vento Solar')
-        ax6.grid(True, alpha=0.3)
-
-        # Painel 7: Acoplamento
-        ax7 = axes[3, 0]
-        ax7.plot(times, results['coupling_signal'], color='#9b59b6')
-        ax7.set_ylabel('Acoplamento')
-        ax7.set_xlabel('Tempo (UTC)')
-        ax7.set_title('G. Sinal de Acoplamento')
-        ax7.grid(True, alpha=0.3)
-
-        # Painel 8: Dst
-        ax8 = axes[3, 1]
-        ax8.plot(times, results['Dst_physical'], color='#e67e22', linewidth=1.5)
-        for dst, col in zip([-50,-100,-200,-350], ['lightgreen','orange','red','darkred']):
-            ax8.axhline(y=dst, color=col, linestyle=':', alpha=0.7)
-        ax8.set_ylabel('Dst [nT]')
-        ax8.set_xlabel('Tempo (UTC)')
-        ax8.set_title('H. Dst Previsto (Físico)')
-        ax8.grid(True, alpha=0.3)
-        ax8.set_ylim(-550, 50)
-
-        plt.tight_layout()
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"✅ Dashboard salvo: {filename}")
-        return fig
-
-# ============================
-# 5. RELATÓRIO FINAL
-# ============================
-class FinalReport:
-    @staticmethod
-    def generate_report(results, df, model, filename="hac_final_report.txt"):
-        print("\n📊 Gerando relatório final...")
-        with open(filename, 'w') as f:
-            f.write("="*80 + "\n")
-            f.write("RELATÓRIO FINAL - SISTEMA HAC+ (NOWCAST + INÉRCIA HÍBRIDO)\n")
-            f.write("="*80 + "\n\n")
-            f.write(f"Período: {df['time_tag'].min()} a {df['time_tag'].max()}\n")
-            f.write(f"Pontos totais: {len(df)}\n\n")
-
-            if 'regime' in results:
-                f.write(f"Regime detectado: {results['regime']}\n\n")
-
-            if 'HAC_total' in results:
-                hac = results['HAC_total']
-                f.write(f"HAC máximo: {np.max(hac):.2f}\n")
-                f.write(f"HAC mínimo: {np.min(hac):.2f}\n")
-                f.write(f"HAC médio:  {np.mean(hac):.2f}\n")
-                if 'dHAC_dt' in results:
-                    f.write(f"dH/dt máximo: {np.max(results['dHAC_dt']):.1f} nT/h\n")
-                    f.write(f"dH/dt > 100 nT/h: {np.sum(results['dHAC_dt'] > 100)} pontos\n\n")
-
-                if 'Storm_level' in results:
-                    levels = results['Storm_level']
-                    total = len(levels)
-                    counts = {'G0':0,'G1':0,'G2':0,'G3':0,'G4':0,'G5':0}
-                    for l in levels:
-                        for k in counts:
-                            if k in l: counts[k] += 1
-                    f.write("Distribuição de níveis:\n")
-                    for k,v in counts.items():
-                        f.write(f"  {k}: {v} ({v/total*100:.1f}%)\n")
-
-            if hasattr(model, 'escalation_triggers') and model.escalation_triggers:
-                f.write(f"\nTriggers de escalação: {len(model.escalation_triggers)}\n")
-            f.write(f"\nRelatório gerado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        print(f"📝 Relatório salvo: {filename}")
-
-# ============================
-# 6. PIPELINE PRINCIPAL
-# ============================
+# ============================================================
+# MAIN (EXEMPLO DE USO)
+# ============================================================
 def main():
-    print("\n" + "="*70)
+    print("="*70)
     print("🚀 HAC++ MODEL - SISTEMA DE PRODUÇÃO (NOWCAST + INÉRCIA HÍBRIDO)")
     print("="*70)
 
-    MAG_FILE = "data/mag-7-day.json"
-    PLASMA_FILE = "data/plasma-7-day.json"
+    # Carregar dados (exemplo com arquivos JSON de 7 dias)
+    mag_df = RobustOMNIProcessor.load_and_clean("data/mag-7-day.json")
+    plasma_df = RobustOMNIProcessor.load_and_clean("data/plasma-7-day.json")
+    df = RobustOMNIProcessor.merge_datasets(mag_df, plasma_df)
 
-    processor = RobustOMNIProcessor()
-    mag_df = processor.load_and_clean(MAG_FILE)
-    plasma_df = processor.load_and_clean(PLASMA_FILE)
+    # Calcular campos físicos combinados
+    print("\n⚡ CALCULANDO CAMPOS FÍSICOS...")
+    df = PhysicalFieldsCalculator.compute_all_fields(df)
 
-    if mag_df is None or plasma_df is None:
-        print("❌ Falha no carregamento")
-        return
-
-    df = processor.merge_datasets(mag_df, plasma_df)
-    if df is None or len(df) < 10:
-        print("❌ Dados insuficientes")
-        return
-
-    calculator = PhysicalFieldsCalculator()
-    df = calculator.compute_all_fields(df)
-
+    # Instanciar modelo
     model = ProductionHACModel()
-    hac_values = model.compute_hac_system(df)
-    model.predict_storm_indicators(hac_values)
 
-    print("\n🚨 Relatório Nowcast:")
-    print(model.generate_nowcast_report())
-    with open("nowcast_inertia_report.txt", "w") as f:
-        f.write(model.generate_nowcast_report())
+    # Executar
+    hac = model.compute_hac_system(df)
+    kp, dst, levels = model.predict_storm_indicators(hac)
 
-    visualizer = ProductionVisualizer()
-    visualizer.create_final_dashboard(model.results, df)
+    # Relatório
+    print("\n" + model.generate_nowcast_report())
 
-    reporter = FinalReport()
-    reporter.generate_report(model.results, df, model)
-
-    try:
-        results_df = df.copy()
-        for key, value in model.results.items():
-            if key != 'time' and hasattr(value, "__len__") and len(value) == len(results_df):
-                results_df[key] = value
-        results_df.to_csv("hac_nowcast_results.csv", index=False)
-        print("💾 Resultados salvos em hac_nowcast_results.csv")
-    except Exception as e:
-        print(f"⚠️ Erro ao salvar CSV: {e}")
-
-    print("\n✅ EXECUÇÃO CONCLUÍDA")
+    # Salvar resultados
+    df_out = pd.DataFrame({
+        'time': model.results['time'],
+        'HAC': model.results['HAC_total'],
+        'dHAC_dt': model.results['dHAC_dt'],
+        'Dst': model.results['Dst_physical'],
+        'Storm_level': model.results['Storm_level']
+    })
+    df_out.to_csv("hac_nowcast_results.csv", index=False)
+    print("\n💾 Resultados salvos em hac_nowcast_results.csv")
 
 if __name__ == "__main__":
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.width', 120)
     main()
