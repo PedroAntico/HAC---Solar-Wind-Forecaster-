@@ -184,14 +184,18 @@ class PhysicalFieldsCalculator:
 
         # Combinado (60% Newell, 40% não-linear)
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
-
-        # Normalização robusta
+        
+        # Normalização leve (apenas para evitar valores extremos, sem achatar o sinal)
         scale = np.percentile(coupling_comb, 99)
         if scale > 1e-6:
-            coupling_comb = coupling_comb / scale
-        coupling_comb = np.clip(coupling_comb, 0, 5)
-
-        coupling_signal = np.where(bz < 0, coupling_comb, 0.0)
+            coupling_norm = coupling_comb / scale
+        else:
+            coupling_norm = coupling_comb
+        
+        # NÃO limitar agressivamente – deixar a física ditar a amplitude
+        # Apenas um teto muito alto para segurança numérica
+        coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
+        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto, apenas para evitar outliers absurdos
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
