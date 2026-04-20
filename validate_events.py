@@ -80,7 +80,7 @@ def load_omni_clean(filepath):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             df[col] = df[col].replace(invalid_flags, np.nan)
-
+            
     # Filtrar valores físicos absurdos
     df = df[
         (df['speed'] > 100) & (df['speed'] < 2000) &
@@ -88,6 +88,7 @@ def load_omni_clean(filepath):
         (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
     ].copy()
 
+    df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
     # Preencher gaps curtos
     df['speed'] = df['speed'].ffill(limit=3).fillna(400)
     df['density'] = df['density'].ffill(limit=3).fillna(5)
@@ -115,10 +116,10 @@ def prepare_event_data(omni_df, dst_df, start, end):
     if len(dst_event) == 0:
         return None
     dst_event = dst_event.sort_values('time_tag')
-    times_dst = dst_event['time_tag'].values
+    times_dst = dst_event['time_tag'].to_numpy(dtype='datetime64[s]')
 
     omni_hist = omni_df[omni_df['time_tag'] <= end].copy().sort_values('time_tag')
-    times_omni = omni_hist['time_tag'].values
+    times_omni = omni_hist['time_tag'].to_numpy(dtype='datetime64[s]')
 
     indices = []
     for t_dst in times_dst:
