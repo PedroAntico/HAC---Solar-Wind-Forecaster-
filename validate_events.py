@@ -116,9 +116,32 @@ def merge_data(omni, dst):
         dst.sort_values('time_tag'),
         on='time_tag',
         tolerance=pd.Timedelta("1h"),
-        direction='nearest'
+        direction='nearest',
+        suffixes=('', '_dst')
     )
 
+    # =========================
+    # 🔥 GARANTIR COLUNA DST
+    # =========================
+    possible_dst_cols = [c for c in df.columns if 'dst' in c.lower()]
+
+    if not possible_dst_cols:
+        print("❌ Colunas disponíveis:")
+        print(df.columns)
+        raise ValueError("DST não encontrado após merge")
+
+    # pega a coluna correta automaticamente
+    for col in possible_dst_cols:
+        if col == 'dst':
+            df['dst'] = df[col]
+            break
+        elif 'dst' in col:
+            df['dst'] = df[col]
+            break
+
+    # =========================
+    # LIMPEZA FINAL
+    # =========================
     df = df.dropna(subset=['dst'])
 
     print(f"   ✅ final: {len(df)} pontos")
