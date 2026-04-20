@@ -68,15 +68,32 @@ def load_dst(filepath):
 
 
 def merge_data(omni, dst):
+    print("\n🔗 Fazendo merge OMNI + DST...")
+
     df = pd.merge_asof(
         omni.sort_values('time_tag'),
         dst.sort_values('time_tag'),
         on='time_tag',
         direction='nearest',
-        tolerance=pd.Timedelta("1h")
+        tolerance=pd.Timedelta("1h"),
+        suffixes=('_omni', '_dst')
     )
+
+    # 🔥 GARANTIR DST
+    if 'dst' not in df.columns:
+        if 'dst_dst' in df.columns:
+            df['dst'] = df['dst_dst']
+        elif 'dst_y' in df.columns:
+            df['dst'] = df['dst_y']
+        else:
+            print("❌ Colunas disponíveis após merge:")
+            print(df.columns)
+            raise ValueError("DST não encontrado após merge")
+
+    # remover lixo
     df = df.dropna(subset=['dst'])
-    print(f"✅ Merge final: {len(df)}")
+
+    print(f"   ✅ final: {len(df)} pontos")
     return df
 
 
