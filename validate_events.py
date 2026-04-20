@@ -41,31 +41,96 @@ DST_MAX_PHYSICAL = 50
 # LOAD
 # =========================
 def load_omni(filepath):
+    print(f"\n📥 Carregando OMNI: {filepath}")
+    
     df = pd.read_csv(filepath)
     df = normalize_omni_columns(df, allow_partial=True)
 
+    # =========================
+    # Tempo
+    # =========================
     df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
     df = df.dropna(subset=['time_tag']).sort_values('time_tag')
 
-    df['speed'] = pd.to_numeric(df.get('speed', 400), errors='coerce').fillna(400)
-    df['density'] = pd.to_numeric(df.get('density', 5), errors='coerce').fillna(5)
-    df['bz_gsm'] = pd.to_numeric(df.get('bz_gsm', 0), errors='coerce').fillna(0)
+    # =========================
+    # Conversão numérica
+    # =========================
+    df['speed'] = pd.to_numeric(df.get('speed', 400), errors='coerce')
+    df['density'] = pd.to_numeric(df.get('density', 5), errors='coerce')
+    df['bz_gsm'] = pd.to_numeric(df.get('bz_gsm', 0), errors='coerce')
 
-    print(f"✅ OMNI: {len(df)} pontos")
+    # =========================
+    # Remover valores OMNI inválidos (CRÍTICO)
+    # =========================
+    invalid_values = [999, 9999, 99999, 999999, 9999999,
+                      999.9, 9999.9, 99999.9]
+
+    for col in ['speed', 'density', 'bz_gsm']:
+        df[col] = df[col].replace(invalid_values, np.nan)
+
+    # =========================
+    # Preencher faltantes
+    # =========================
+    df['speed'] = df['speed'].fillna(400)
+    df['density'] = df['density'].fillna(5)
+    df['bz_gsm'] = df['bz_gsm'].fillna(0)
+
+    # =========================
+    # FILTRO FÍSICO (ESSENCIAL)
+    # =========================
+    df = df[
+        (df['speed'] > 200) & (df['speed'] < 1500) &
+        (df['density'] > 0.1) & (df['density'] < 100) &
+        (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
+    ]
+
+    df = df.reset_index(drop=True)
+
+    print(f"   ✅ {len(df)} pontos válidos após limpeza")
+    print(f"   • V range: {df['speed'].min():.1f} – {df['speed'].max():.1f}")
+    print(f"   • Bz range: {df['bz_gsm'].min():.1f} – {df['bz_gsm'].max():.1f}")
+
     return df
 
 
 def load_dst(filepath):
+    print(f"\n📥 Carregando DST: {filepath}")
+    
     df = pd.read_csv(filepath)
-    df.columns = [c.lower() for c in df.columns]
+    df.columns = [c.strip().lower() for c in df.columns]
 
+    # =========================
+    # Garantir colunas
+    # =========================
+    if 'time_tag' not in df.columns:
+        raise ValueError("❌ Coluna time_tag não encontrada no DST")
+
+    # Detectar coluna DST automaticamente
+    if 'dst' not in df.columns:
+        for col in df.columns:
+            if 'dst' in col:
+                df.rename(columns={col: 'dst'}, inplace=True)
+                break
+
+    if 'dst' not in df.columns:
+        raise ValueError(f"❌ Coluna DST não encontrada. Colunas: {df.columns}")
+
+    # =========================
+    # Conversão
+    # =========================
     df['time_tag'] = pd.to_datetime(df['time_tag'], errors='coerce')
-    df['dst'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
+    df['dst'] = pd.to_numeric(df['dst'], errors='coerce')
 
-    df = df.dropna().sort_values('time_tag')
-    print(f"✅ DST: {len(df)} pontos")
+    # =========================
+    # Limpeza
+    # =========================
+    df = df.dropna(subset=['time_tag', 'dst'])
+    df = df.sort_values('time_tag').reset_index(drop=True)
+
+    print(f"   ✅ {len(df)} pontos DST válidos")
+    print(f"   • Dst range: {df['dst'].min():.1f} – {df['dst'].max():.1f}")
+
     return df
-
 
 def merge_data(omni, dst):
     print("\n🔗 Fazendo merge OMNI + DST...")
