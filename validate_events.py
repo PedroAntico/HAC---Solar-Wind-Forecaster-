@@ -47,7 +47,8 @@ def load_dst_kyoto(filepath):
     df['dst'] = pd.to_numeric(df[dst_col], errors='coerce')
 
     df = df.dropna(subset=['time_tag', 'dst']).sort_values('time_tag')
-
+    df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
+    
     print(f"   ✅ {len(df)} pontos")
     print(f"   • Range: {df['dst'].min():.1f} → {df['dst'].max():.1f} nT")
     return df[['time_tag', 'dst']]
@@ -87,7 +88,7 @@ def load_omni_clean(filepath):
         (df['density'] > 0.1) & (df['density'] < 200) &
         (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
     ].copy()
-        df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
+    
     # Preencher gaps curtos
     df['speed'] = df['speed'].ffill(limit=3).fillna(400)
     df['density'] = df['density'].ffill(limit=3).fillna(5)
