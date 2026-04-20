@@ -81,26 +81,27 @@ def normalize_omni_columns(df, allow_partial=False):
     df.rename(columns=rename_map, inplace=True)
     return df
 
+def _detect_regime_scalar(v, density, bz):
+    """Versão escalar para uso dentro do loop de simulação."""
+    if density > 8 and bz < -8:
+        return 'CME'
+    elif v > 600 and density < 5:
+        return 'HSS'
+    elif density < 2:
+        return 'SIR'
+    else:
+        return 'Quiet'
+
 def detect_regime_array(v, density, bz):
     """
-    Classifica o regime de vento solar para arrays.
+    Versão vetorizada para aplicação de blend e boost.
     Prioridade: CME > HSS > SIR > Quiet.
     """
     n = len(v)
     regime = np.full(n, 'Quiet', dtype=object)
-
-    # HSS: velocidade alta e densidade baixa
-    mask_hss = (v > 600) & (density < 5)
-    regime[mask_hss] = 'HSS'
-
-    # CME: densidade alta e Bz negativo (sobrescreve HSS se ambas)
-    mask_cme = (density > 8) & (bz < -8)
-    regime[mask_cme] = 'CME'
-
-    # SIR: densidade muito baixa (sobrescreve se for o caso, mas geralmente não conflita)
-    mask_sir = (density < 2)
-    regime[mask_sir] = 'SIR'
-
+    regime[(v > 600) & (density < 5)] = 'HSS'
+    regime[(density > 8) & (bz < -8)] = 'CME'   # sobrescreve HSS se conflito
+    regime[(density < 2)] = 'SIR'
     return regime
 
 # ============================================================
