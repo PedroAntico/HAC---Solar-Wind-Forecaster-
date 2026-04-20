@@ -76,11 +76,11 @@ def load_omni(filepath):
         print("   ⚠️ Detectado speed em m/s → convertendo para km/s")
         df['speed'] = df['speed'] / 1000.0
 
+   # =========================
+    # Preencher faltantes (pandas >= 2.0)
     # =========================
-    # Preencher faltantes (após correção)
-    # =========================
-    df['speed'] = df['speed'].fillna(method='ffill').fillna(400)
-    df['density'] = df['density'].fillna(method='ffill').fillna(5)
+    df['speed'] = df['speed'].ffill().fillna(400)
+    df['density'] = df['density'].ffill().fillna(5)
     df['bz_gsm'] = df['bz_gsm'].fillna(0)
 
     # =========================
