@@ -87,8 +87,7 @@ def load_omni_clean(filepath):
         (df['density'] > 0.1) & (df['density'] < 200) &
         (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
     ].copy()
-
-    df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
+        df = df[(df['dst'] > -1000) & (df['dst'] < 500)]
     # Preencher gaps curtos
     df['speed'] = df['speed'].ffill(limit=3).fillna(400)
     df['density'] = df['density'].ffill(limit=3).fillna(5)
