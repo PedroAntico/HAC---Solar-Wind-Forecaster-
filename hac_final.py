@@ -44,7 +44,7 @@ class HACPhysicsConfig:
 
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 300.0       # fator de normalização (aumentado para 300)
+    HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -357,18 +357,16 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
     
         # ============================================================
-        # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton)
-        # dDst/dt = Q(t) - Dst / tau
+        # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
         tau_dst_base = 8.0   # horas
-        k_dst = 12.0          # fator de conversão HAC -> taxa de injeção (nT/h)
-    
+        k_dst = 20.0          # fator de escala (nT/h por sqrt(HAC))
+        
         dst_physical = np.zeros(n)
-        dst_physical[0] = -20.0   # valor inicial calmo
-    
+        dst_physical[0] = -20.0
+        
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-            # Ajuste de tau conforme regime
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             if regime_i == 'CME':
                 tau_dst = 3.0
@@ -376,22 +374,24 @@ class ProductionHACModel:
                 tau_dst = 5.0
             else:
                 tau_dst = tau_dst_base
-    
+        
             alpha = np.exp(-dt_hours / tau_dst)
-    
-            # Termo de injeção Q(t) a partir do HAC (já normalizado)
-            Q_injection = k_dst * hac_total[i]
-    
-            # Eficiência extra para Bz muito negativo
-            if Bz[i] < -10:
-                Q_injection *= 1.3
-            elif Bz[i] < -5:
-                Q_injection *= 1.1
-    
-            # Equação de relaxação
-            dst_physical[i] = alpha * dst_physical[i-1] + (1 - alpha) * (-Q_injection)
-    
-        dst_physical = np.clip(dst_physical, -600, 50)
+        
+            # Injeção sublinear: raiz quadrada do HAC
+            # Apenas quando HAC > 0 (evita sqrt de negativo)
+            hac_val = max(0, hac_total[i])
+            Q_injection = k_dst * np.sqrt(hac_val)
+        
+            # Pequeno boost apenas para Bz extremamente negativo (opcional)
+            if Bz[i] < -15:
+                Q_injection *= 1.2
+        
+            # Equação de relaxação (sem tanh, apenas física linear)
+            dst_raw = alpha * dst_physical[i-1] + (1 - alpha) * (-Q_injection)
+            dst_physical[i] = dst_raw
+        
+        # Clipping físico suave (apenas para evitar extrapolação extrema)
+        dst_physical = np.clip(dst_physical, -500, 50)
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
         # Previsão por simulação (estendendo a equação de evolução)
@@ -400,13 +400,13 @@ class ProductionHACModel:
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
-            hac_fut = hac_total[-1]   # mantemos HAC constante (aproximação)
+            hac_fut = max(0, hac_total[-1])
             tau = tau_dst_base
             alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
-                Q_fut = k_dst * hac_fut
+                Q_fut = k_dst * np.sqrt(hac_fut)
                 dst_fut = alpha * dst_fut + (1 - alpha) * (-Q_fut)
-            forecast[f"{h}h"] = dst_fut
+            forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
     
         self.results.update({
             'time': times, 'HAC_total': hac_total, 'dHAC_dt': dHAC_dt,
