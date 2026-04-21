@@ -40,7 +40,7 @@ class HACPhysicsConfig:
 
     # Acoplamento não-linear
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 3.0      # mV/m
+    COUPLING_THRESHOLD = 2.0      # mV/m
     NEWELL_SCALE = 5e-4
 
     # Escalas operacionais
