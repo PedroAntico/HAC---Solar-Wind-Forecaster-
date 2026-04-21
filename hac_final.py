@@ -162,6 +162,7 @@ class PhysicalFieldsCalculator:
         config = HACPhysicsConfig()
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
+        
         # bt seguro: se não existir, usa valor absoluto de bz como fallback
         if 'bt' in df.columns:
             bt = df['bt'].fillna(0).values
@@ -169,12 +170,26 @@ class PhysicalFieldsCalculator:
             bt = np.abs(bz)
         by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
 
-        # Newell
+        # ------------------------------------------------------------
+        # 1. Acoplamento Newell modificado (paliativo para baixa resolução)
+        #    - exp_b aumentado para dar mais peso ao Bz (original = 2/3)
+        #    - scale_factor para aumentar o ganho global
+        # ------------------------------------------------------------
+        EXP_V = 4/3
+        EXP_B = 1.2          # sensibilidade aumentada ao campo magnético
+        SCALE_FACTOR = 1.5   # ganho adicional
+        
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
-        coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
+        coupling_newell = (SCALE_FACTOR * 
+                          (v ** EXP_V) * 
+                          (bt ** EXP_B) * 
+                          theta_factor * 
+                          config.NEWELL_SCALE)
 
-        # Não-linear (E-field)
+        # ------------------------------------------------------------
+        # 2. Acoplamento não-linear via campo elétrico (mantido)
+        # ------------------------------------------------------------
         bz_neg = np.maximum(0, -bz)
         e_field = bz_neg * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
@@ -182,20 +197,28 @@ class PhysicalFieldsCalculator:
         beta = config.BETA_NONLINEAR
         coupling_nl = np.where(e_sat <= thr, e_sat, thr * ((e_sat / thr) ** beta))
 
-        # Combinado (60% Newell, 40% não-linear)
+        # ------------------------------------------------------------
+        # 3. Combinação (60% Newell, 40% não-linear)
+        # ------------------------------------------------------------
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
-        # Normalização leve (apenas para evitar valores extremos, sem achatar o sinal)
+        # ------------------------------------------------------------
+        # 4. Normalização leve (evita valores extremos, mas não achata)
+        # ------------------------------------------------------------
         scale = np.percentile(coupling_comb, 99)
         if scale > 1e-6:
             coupling_norm = coupling_comb / scale
         else:
             coupling_norm = coupling_comb
         
-        # NÃO limitar agressivamente – deixar a física ditar a amplitude
-        # Apenas um teto muito alto para segurança numérica
+        # Sinal apenas quando Bz é negativo (acoplamento efetivo)
         coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto, apenas para evitar outliers absurdos
+        # Teto alto apenas para segurança numérica (não limita a física)
+        coupling_signal = np.clip(coupling_signal, 0, 20)
+        
+        # ------------------------------------------------------------
+        # 5. Armazenar resultados
+        # ------------------------------------------------------------
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
