@@ -172,8 +172,8 @@ def global_calibration(df_aligned):
         core.config.Q_FACTOR = -0.01
 
     hac_raw = comp['raw']
-    hac_ref = np.percentile(hac_raw, 99.5)
-    core.config.HAC_REF = np.clip(hac_ref, 100, 5000)
+    hac_ref = np.percentile(hac_raw, 99)
+    core.config.HAC_REF = np.clip(hac_ref, 50.0)
 
     print(f"   • HAC_REF: {core.config.HAC_REF:.1f}")
     print(f"   • Q_FACTOR: {core.config.Q_FACTOR:.5f}")
