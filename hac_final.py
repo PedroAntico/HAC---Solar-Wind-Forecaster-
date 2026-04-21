@@ -45,7 +45,7 @@ class HACPhysicsConfig:
 
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 150.0       # fator de normalização (antes 300)
+    HAC_NORM_FACTOR = 300.0       # fator de normalização (antes 300)
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -368,7 +368,7 @@ class ProductionHACModel:
         # Mapeamento HAC -> Dst
         hac_norm = np.clip(hac_total, 0, 800) / 800.0
         dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0
-        dst_from_hac = -520 * hac_norm - 150 * dhdt_norm - 30
+        dst_from_hac = -800 * hac_norm - 200 * dhdt_norm - 40
     
         # Regimes vetorizados para blend e boost
         regimes = detect_regime_array(Vsw, density, Bz)
@@ -401,7 +401,7 @@ class ProductionHACModel:
         # Core dummy (estável)
         dst_core = np.full(n, -20.0)
         dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
-        dst_hybrid = np.clip(dst_hybrid, -600, 50)
+        dst_hybrid = np.clip(dst_hybrid, -800, 50)
     
         # Previsão por simulação
         forecast = {}
