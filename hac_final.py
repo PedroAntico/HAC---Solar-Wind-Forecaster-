@@ -178,19 +178,18 @@ class PhysicalFieldsCalculator:
         dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
         dt_hours = np.maximum(dt_sec / 3600.0, 1e-6)
 
-        # Constante de tempo da memória (pode ser movida para config)
-        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 2.0)  # horas
+        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 2.0)
         
-        bz_neg = np.minimum(0, bz)          # apenas parte negativa (≤0)
+        bz_neg = np.minimum(0, bz)
         bz_eff = np.zeros_like(bz)
-        bz_eff[0] = bz_neg[0]               # inicialização correta
+        bz_eff[0] = bz_neg[0]
 
         for i in range(1, len(bz)):
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
 
         # ------------------------------------------------------------
-        # 1. Acoplamento Newell (mantido original, sem alterações)
+        # 1. Acoplamento Newell (original)
         # ------------------------------------------------------------
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
@@ -199,7 +198,6 @@ class PhysicalFieldsCalculator:
         # ------------------------------------------------------------
         # 2. Acoplamento não-linear via campo elétrico (com Bz persistente)
         # ------------------------------------------------------------
-        # Usar -bz_eff (positivo) como magnitude do campo elétrico
         e_field = (-bz_eff) * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
         thr = config.COUPLING_THRESHOLD
@@ -211,23 +209,21 @@ class PhysicalFieldsCalculator:
         # ------------------------------------------------------------
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
-        # Normalização adaptativa (evita valores extremos)
+        # Normalização adaptativa
         scale = np.percentile(coupling_comb, 99)
         if scale > 1e-6:
             coupling_norm = coupling_comb / scale
         else:
             coupling_norm = coupling_comb
         
-        # Sinal apenas quando Bz é negativo (usa bz original para máscara)
         coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto de segurança
+        coupling_signal = np.clip(coupling_signal, 0, 20)
         
-        # Armazenar resultados
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
         df['E_field_raw'] = e_field
-        df['bz_eff'] = bz_eff  # útil para diagnóstico
+        df['bz_eff'] = bz_eff
 
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
         print(f"   • Bz eff min: {bz_eff.min():.1f} nT")
@@ -374,7 +370,7 @@ class ProductionHACModel:
         # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
         tau_dst_base = 8.0   # horas
-        k_dst = 25.0          # fator de escala (nT/h por sqrt(HAC))
+        k_dst = 18.0          # fator de escala (nT/h por sqrt(HAC))
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
@@ -393,8 +389,10 @@ class ProductionHACModel:
         
             # Injeção sublinear: raiz quadrada do HAC
             # Apenas quando HAC > 0 (evita sqrt de negativo)
-            hac_val = max(0, hac_total[i])
-            Q_injection = k_dst * np.sqrt(hac_val)
+            hac_val = max(0.0, hac_total[i])
+            hac_thr = 30.0   # limiar de ativação (HAC abaixo disso não injeta energia)
+            hac_eff = max(0.0, hac_val - hac_thr)
+            Q_injection = k_dst * np.sqrt(hac_eff)
         
             # Pequeno boost apenas para Bz extremamente negativo (opcional)
             if Bz[i] < -15:
@@ -415,6 +413,10 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             hac_fut = max(0, hac_total[-1])
+            if hac_fut < 30.0:
+                Q_fut = 0.0
+            else:
+                Q_fut = k_dst * np.sqrt(hac_fut - 30.0)
             tau = tau_dst_base
             alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
