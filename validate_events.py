@@ -208,7 +208,7 @@ def validate_event(config_core, df_aligned, name, start, end):
     event = PhysicalFieldsCalculator.compute_all_fields(event)
     # TESTE DIAGNÓSTICO: amplificar artificialmente o coupling
     #event['coupling_signal'] = event['coupling_signal'] * 5.0
-    print("   ⚠️ TESTE: coupling_signal multiplicado por 5")
+    #print("   ⚠️ TESTE: coupling_signal multiplicado por 5")
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
     print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
 
