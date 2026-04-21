@@ -2,13 +2,12 @@
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
 Versão final corrigida (abril/2026):
-- Normalização HAC *150 (mais realista)
-- Derivada limitada a ±150 nT/h
-- Override por Dst como "clipping" de classificações infladas
-- Kp com saturação mais suave (tanh(hac/300))
-- Acoplamento combinado (Newell + não-linear)
-- Injeção basal dinâmica
-- Previsão Dst por simulação da equação de relaxação
+- Acoplamento combinado (Newell + não-linear) com ajuste para baixa resolução.
+- Reservatórios HAC com injeção dinâmica e perdas dependentes de Bz.
+- Evolução temporal do Dst (equação de Burton) – essencial para tempestades prolongadas.
+- Normalização HAC adaptativa (fator 300).
+- Classificação híbrida com override por Dst.
+- Previsão por simulação da equação de relaxação.
 """
 
 import json
@@ -40,12 +39,12 @@ class HACPhysicsConfig:
 
     # Acoplamento não-linear
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 2.0      # mV/m
-    NEWELL_SCALE = 5e-4
+    COUPLING_THRESHOLD = 2.0      # mV/m (reduzido para ativar mais cedo)
+    NEWELL_SCALE = 5e-4           # será multiplicado por fator adicional
 
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 300.0       # fator de normalização (antes 300)
+    HAC_NORM_FACTOR = 300.0       # fator de normalização (aumentado para 300)
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -153,7 +152,7 @@ class RobustOMNIProcessor:
         return df
 
 # ============================================================
-# 2. CÁLCULO DE CAMPOS FÍSICOS
+# 2. CÁLCULO DE CAMPOS FÍSICOS (COM AJUSTES PARA BAIXA RESOLUÇÃO)
 # ============================================================
 class PhysicalFieldsCalculator:
     @staticmethod
@@ -163,7 +162,7 @@ class PhysicalFieldsCalculator:
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
         
-        # bt seguro: se não existir, usa valor absoluto de bz como fallback
+        # bt seguro
         if 'bt' in df.columns:
             bt = df['bt'].fillna(0).values
         else:
@@ -171,13 +170,11 @@ class PhysicalFieldsCalculator:
         by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
 
         # ------------------------------------------------------------
-        # 1. Acoplamento Newell modificado (paliativo para baixa resolução)
-        #    - exp_b aumentado para dar mais peso ao Bz (original = 2/3)
-        #    - scale_factor para aumentar o ganho global
+        # 1. Acoplamento Newell modificado (maior sensibilidade a Bz)
         # ------------------------------------------------------------
         EXP_V = 4/3
-        EXP_B = 1.2          # sensibilidade aumentada ao campo magnético
-        SCALE_FACTOR = 1.5   # ganho adicional
+        EXP_B = 1.2          # original 2/3, aumentado para dar mais peso a Bz
+        SCALE_FACTOR = 1.5   # ganho adicional para compensar baixa resolução
         
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
@@ -188,7 +185,7 @@ class PhysicalFieldsCalculator:
                           config.NEWELL_SCALE)
 
         # ------------------------------------------------------------
-        # 2. Acoplamento não-linear via campo elétrico (mantido)
+        # 2. Acoplamento não-linear via campo elétrico
         # ------------------------------------------------------------
         bz_neg = np.maximum(0, -bz)
         e_field = bz_neg * v * 1e-3
@@ -202,23 +199,17 @@ class PhysicalFieldsCalculator:
         # ------------------------------------------------------------
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
-        # ------------------------------------------------------------
-        # 4. Normalização leve (evita valores extremos, mas não achata)
-        # ------------------------------------------------------------
+        # Normalização leve (evita valores extremos, mas não achata)
         scale = np.percentile(coupling_comb, 99)
         if scale > 1e-6:
             coupling_norm = coupling_comb / scale
         else:
             coupling_norm = coupling_comb
         
-        # Sinal apenas quando Bz é negativo (acoplamento efetivo)
+        # Sinal apenas quando Bz é negativo
         coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
-        # Teto alto apenas para segurança numérica (não limita a física)
-        coupling_signal = np.clip(coupling_signal, 0, 20)
+        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto
         
-        # ------------------------------------------------------------
-        # 5. Armazenar resultados
-        # ------------------------------------------------------------
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
@@ -231,7 +222,7 @@ class PhysicalFieldsCalculator:
         return df
 
 # ============================================================
-# 3. MODELO HAC+ (PRODUÇÃO)
+# 3. MODELO HAC+ COM EVOLUÇÃO TEMPORAL DO DST
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None):
@@ -327,7 +318,7 @@ class ProductionHACModel:
             baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
 
-            # Reforço físico por Bz negativo (resposta imediata a tempestades)
+            # Reforço físico por Bz negativo
             if Bz[i] < -5:
                 boost_bz = 1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0)
                 injection *= boost_bz
@@ -365,64 +356,63 @@ class ProductionHACModel:
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
     
-        # Mapeamento HAC -> Dst
-        hac_norm = np.clip(hac_total, 0, 800) / 800.0
-        dhdt_norm = np.clip(np.abs(dHAC_dt), 0, 150) / 150.0
-        dst_from_hac = -800 * hac_norm - 200 * dhdt_norm - 40
+        # ============================================================
+        # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton)
+        # dDst/dt = Q(t) - Dst / tau
+        # ============================================================
+        tau_dst_base = 8.0   # horas
+        k_dst = 12.0          # fator de conversão HAC -> taxa de injeção (nT/h)
     
-        # Regimes vetorizados para blend e boost
-        regimes = detect_regime_array(Vsw, density, Bz)
+        dst_physical = np.zeros(n)
+        dst_physical[0] = -20.0   # valor inicial calmo
     
-        # Boost dinâmico para HSS (depende da velocidade)
-        is_hss = (regimes == 'HSS')
-        if np.any(is_hss):
-            hss_strength = np.clip((Vsw[is_hss] - 500) / 300.0, 0.0, 1.0)
-            hss_boost = 1.0 + 0.15 * hss_strength
-            dst_from_hac[is_hss] *= hss_boost
+        for i in range(1, n):
+            dt_hours = dt[i] / 3600.0
+            # Ajuste de tau conforme regime
+            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            if regime_i == 'CME':
+                tau_dst = 3.0
+            elif regime_i == 'HSS':
+                tau_dst = 5.0
+            else:
+                tau_dst = tau_dst_base
     
-        dst_from_hac = np.clip(dst_from_hac, -600, 20)
+            alpha = np.exp(-dt_hours / tau_dst)
     
-        # Blend diferenciado por regime
-        # Mapeamento HAC -> Dst com ganho dinâmico
-        bz_factor = np.clip(-Bz / 20.0, 0.0, 1.0)
-        v_factor = np.clip((Vsw - 400) / 600.0, 0.0, 1.0)
-        
-        dynamic_gain = 300.0 + 300.0 * bz_factor + 200.0 * v_factor
-        dst_from_hac = -dynamic_gain * hac_norm - 100.0 * dhdt_norm - 20.0
-        activity = bz_factor * v_factor
+            # Termo de injeção Q(t) a partir do HAC (já normalizado)
+            Q_injection = k_dst * hac_total[i]
     
-        blend = np.where(
-            regimes == 'CME',
-            activity ** 1.0,   # CME: resposta mais agressiva
-            activity ** 1.3    # HSS / Quiet: mais amortecido
-        )
-        blend = np.clip(blend, 0.1, 0.95)
+            # Eficiência extra para Bz muito negativo
+            if Bz[i] < -10:
+                Q_injection *= 1.3
+            elif Bz[i] < -5:
+                Q_injection *= 1.1
     
-        # Core dummy (estável)
-        dst_core = np.full(n, -20.0)
-        dst_hybrid = (1 - blend) * dst_core + blend * dst_from_hac
-        dst_hybrid = np.clip(dst_hybrid, -800, 50)
+            # Equação de relaxação
+            dst_physical[i] = alpha * dst_physical[i-1] + (1 - alpha) * (-Q_injection)
     
-        # Previsão por simulação
+        dst_physical = np.clip(dst_physical, -600, 50)
+        print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
+    
+        # Previsão por simulação (estendendo a equação de evolução)
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
-            dst_fut = dst_hybrid[-1]
-            hac_now = hac_total[-1]
-            tau = self.config.TAU_RING_CURRENT_QUIET
+            dst_fut = dst_physical[-1]
+            hac_fut = hac_total[-1]   # mantemos HAC constante (aproximação)
+            tau = tau_dst_base
             alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
-                dst_fut = alpha * dst_fut + (1 - alpha) * (-hac_now * 0.8)
+                Q_fut = k_dst * hac_fut
+                dst_fut = alpha * dst_fut + (1 - alpha) * (-Q_fut)
             forecast[f"{h}h"] = dst_fut
-    
-        print(f"   • Dst híbrido mín: {np.min(dst_hybrid):.1f} nT")
     
         self.results.update({
             'time': times, 'HAC_total': hac_total, 'dHAC_dt': dHAC_dt,
             'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
-            'Dst_physical': dst_hybrid, 'Dst_min_physical': np.min(dst_hybrid),
-            'Dst_now': dst_hybrid[-1], 'forecast': forecast
+            'Dst_physical': dst_physical, 'Dst_min_physical': np.min(dst_physical),
+            'Dst_now': dst_physical[-1], 'forecast': forecast
         })
         self._validate_output(hac_total)
         return hac_total
@@ -569,7 +559,7 @@ class ProductionHACModel:
         return report
 
 # ============================================================
-# MAIN
+# MAIN (EXEMPLO DE USO)
 # ============================================================
 def main():
     print("="*70)
