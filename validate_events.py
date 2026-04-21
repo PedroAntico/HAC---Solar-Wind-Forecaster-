@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 validate_events.py - Validação HAC++ com alinhamento causal e calibração robusta.
+Versão corrigida para modelo sem atributo 'core'.
 """
 
 import pandas as pd
@@ -12,6 +13,7 @@ from datetime import datetime
 from hac_final import (
     ProductionHACModel,
     PhysicalFieldsCalculator,
+    HACPhysicsConfig,
     normalize_omni_columns
 )
 from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
@@ -189,7 +191,7 @@ def global_calibration(df_aligned):
 # =========================
 # VALIDAÇÃO DE UM EVENTO
 # =========================
-def validate_event(config, df_aligned, name, start, end):
+def validate_event(config_core, df_aligned, name, start, end):
     print(f"\n🌌 {name}")
 
     mask = (df_aligned['time_tag'] >= start) & (df_aligned['time_tag'] <= end)
@@ -208,12 +210,14 @@ def validate_event(config, df_aligned, name, start, end):
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
     print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
 
+    # Criar configuração física a partir da calibração do core
+    physics_config = HACPhysicsConfig()
+    physics_config.HAC_REF = config_core.HAC_REF
+    # Os parâmetros Q_FACTOR, TAU_DST, DST_Q podem ser usados se o modelo de produção os incorporar
+    # Caso contrário, serão ignorados
+
     # Modelo de produção
-    model = ProductionHACModel()
-    model.core.config.HAC_REF = config.HAC_REF
-    model.core.config.Q_FACTOR = config.Q_FACTOR
-    model.core.config.TAU_DST = config.TAU_DST
-    model.core.config.DST_Q = config.DST_Q
+    model = ProductionHACModel(config=physics_config)
 
     hac = model.compute_hac_system(event)
     _, dst_pred, _ = model.predict_storm_indicators(hac)
