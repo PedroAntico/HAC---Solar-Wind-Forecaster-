@@ -23,8 +23,8 @@ from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
 # =========================
 EVENTS = {
     "Halloween_2003": ("2003-10-28", "2003-11-02"),
-    #"St_Patrick_2015": ("2015-03-17", "2015-03-20"),
-    #"Carrington_like_2012": ("2012-07-22", "2012-07-25"),
+    "St_Patrick_2015": ("2015-03-17", "2015-03-20"),
+    "Carrington_like_2012": ("2012-07-22", "2012-07-25"),
 }
 
 TRAIN_END_DATE = "2014-12-31"
