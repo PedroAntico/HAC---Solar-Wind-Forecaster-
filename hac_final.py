@@ -26,6 +26,7 @@ class HACPhysicsConfig:
     TAU_RING_CURRENT_CME = 3.0
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
+    TAU_BZ_MEMORY = 2.0
 
     # Saturações
     E_FIELD_SATURATION = 35.0      # mV/m
@@ -169,26 +170,37 @@ class PhysicalFieldsCalculator:
             bt = np.abs(bz)
         by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
 
-        # ------------------------------------------------------------
-        # 1. Acoplamento Newell modificado (maior sensibilidade a Bz)
-        # ------------------------------------------------------------
-        EXP_V = 4/3
-        EXP_B = 1.2          # original 2/3, aumentado para dar mais peso a Bz
-        SCALE_FACTOR = 1.5   # ganho adicional para compensar baixa resolução
+        # ========================================================
+        # Bz efetivo com memória exponencial (persistência)
+        # ========================================================
+        time_sec = pd.to_datetime(df['time_tag']).values.astype('datetime64[s]')
+        dt_sec = np.diff(time_sec).astype(float)
+        dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
+        dt_hours = np.maximum(dt_sec / 3600.0, 1e-6)
+
+        # Constante de tempo da memória (pode ser movida para config)
+        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 2.0)  # horas
         
-        theta = np.arctan2(by, bz)
-        theta_factor = np.abs(np.sin(theta / 2)) ** 3
-        coupling_newell = (SCALE_FACTOR * 
-                          (v ** EXP_V) * 
-                          (bt ** EXP_B) * 
-                          theta_factor * 
-                          config.NEWELL_SCALE)
+        bz_neg = np.minimum(0, bz)          # apenas parte negativa (≤0)
+        bz_eff = np.zeros_like(bz)
+        bz_eff[0] = bz_neg[0]               # inicialização correta
+
+        for i in range(1, len(bz)):
+            alpha = np.exp(-dt_hours[i] / tau_bz)
+            bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
 
         # ------------------------------------------------------------
-        # 2. Acoplamento não-linear via campo elétrico
+        # 1. Acoplamento Newell (mantido original, sem alterações)
         # ------------------------------------------------------------
-        bz_neg = np.maximum(0, -bz)
-        e_field = bz_neg * v * 1e-3
+        theta = np.arctan2(by, bz)
+        theta_factor = np.abs(np.sin(theta / 2)) ** 3
+        coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
+
+        # ------------------------------------------------------------
+        # 2. Acoplamento não-linear via campo elétrico (com Bz persistente)
+        # ------------------------------------------------------------
+        # Usar -bz_eff (positivo) como magnitude do campo elétrico
+        e_field = (-bz_eff) * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
         thr = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
@@ -199,28 +211,30 @@ class PhysicalFieldsCalculator:
         # ------------------------------------------------------------
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
-        # Normalização leve (evita valores extremos, mas não achata)
+        # Normalização adaptativa (evita valores extremos)
         scale = np.percentile(coupling_comb, 99)
         if scale > 1e-6:
             coupling_norm = coupling_comb / scale
         else:
             coupling_norm = coupling_comb
         
-        # Sinal apenas quando Bz é negativo
+        # Sinal apenas quando Bz é negativo (usa bz original para máscara)
         coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto
+        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto de segurança
         
+        # Armazenar resultados
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
         df['coupling_nonlinear'] = coupling_nl
         df['E_field_raw'] = e_field
+        df['bz_eff'] = bz_eff  # útil para diagnóstico
 
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
+        print(f"   • Bz eff min: {bz_eff.min():.1f} nT")
         print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
         print(f"   • Coupling max: {coupling_signal.max():.2f}")
 
         return df
-
 # ============================================================
 # 3. MODELO HAC+ COM EVOLUÇÃO TEMPORAL DO DST
 # ============================================================
