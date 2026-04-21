@@ -412,11 +412,10 @@ class ProductionHACModel:
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
-            hac_fut = max(0, hac_total[-1])
-            if hac_fut < 30.0:
-                Q_fut = 0.0
-            else:
-                Q_fut = k_dst * np.sqrt(hac_fut - 30.0)
+            hac_fut = max(0.0, hac_total[-1])
+            hac_eff_fut = max(0.0, hac_fut - 30.0)
+            Q_fut = k_dst * np.sqrt(hac_eff_fut)
+            
             tau = tau_dst_base
             alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
