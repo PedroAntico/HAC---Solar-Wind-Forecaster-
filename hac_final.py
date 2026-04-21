@@ -26,7 +26,7 @@ class HACPhysicsConfig:
     TAU_RING_CURRENT_CME = 3.0
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
-    TAU_BZ_MEMORY = 2.0
+    TAU_BZ_MEMORY = 3.0
 
     # Saturações
     E_FIELD_SATURATION = 35.0      # mV/m
@@ -390,7 +390,7 @@ class ProductionHACModel:
             # Injeção sublinear: raiz quadrada do HAC
             # Apenas quando HAC > 0 (evita sqrt de negativo)
             hac_val = max(0.0, hac_total[i])
-            hac_thr = 30.0   # limiar de ativação (HAC abaixo disso não injeta energia)
+            hac_thr = 40.0   # limiar de ativação (HAC abaixo disso não injeta energia)
             hac_eff = max(0.0, hac_val - hac_thr)
             Q_injection = k_dst * np.sqrt(hac_eff)
         
