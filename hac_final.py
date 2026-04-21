@@ -42,7 +42,8 @@ class HACPhysicsConfig:
     BETA_NONLINEAR = 2.2
     COUPLING_THRESHOLD = 2.0      # mV/m (reduzido para ativar mais cedo)
     NEWELL_SCALE = 5e-4           # será multiplicado por fator adicional
-
+    COUPLING_SCALE = 5000.00
+    
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
@@ -178,7 +179,7 @@ class PhysicalFieldsCalculator:
         dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
         dt_hours = np.maximum(dt_sec / 3600.0, 1e-6)
 
-        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 2.0)
+        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 1.0)
         
         bz_neg = np.minimum(0, bz)
         bz_eff = np.zeros_like(bz)
@@ -210,11 +211,7 @@ class PhysicalFieldsCalculator:
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
         # Normalização adaptativa
-        scale = np.percentile(coupling_comb, 99)
-        if scale > 1e-6:
-            coupling_norm = coupling_comb / scale
-        else:
-            coupling_norm = coupling_comb
+        coupling_norm = coupling_comb / config.COUPLING_SCALE
         
         coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
         coupling_signal = np.clip(coupling_signal, 0, 20)
@@ -370,7 +367,7 @@ class ProductionHACModel:
         # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
         tau_dst_base = 8.0   # horas
-        k_dst = 18.0          # fator de escala (nT/h por sqrt(HAC))
+        k_dst = 15.0          # fator de escala (nT/h por sqrt(HAC))
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
