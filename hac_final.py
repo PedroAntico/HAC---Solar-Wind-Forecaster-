@@ -212,11 +212,16 @@ class PhysicalFieldsCalculator:
         # ------------------------------------------------------------
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         
-        # Normalização adaptativa
-        coupling_norm = coupling_comb / config.COUPLING_SCALE
+        # Normalização adaptativa por percentil (restaura amplitude física)
+        scale = np.percentile(coupling_comb, 99)
+        if scale > 1e-6:
+            coupling_norm = coupling_comb / scale
+        else:
+            coupling_norm = coupling_comb
         
-        coupling_signal = np.where(bz < 0, coupling_norm, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)
+        # Sinal apenas quando Bz efetivo é negativo (condição mais física)
+        coupling_signal = np.where(bz_eff < 0, coupling_norm, 0.0)
+        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto de segurança
         
         df['coupling_signal'] = coupling_signal
         df['coupling_newell'] = coupling_newell
