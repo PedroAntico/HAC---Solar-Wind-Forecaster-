@@ -348,9 +348,9 @@ def main():
     # ⚠️ OVERRIDE MANUAL: a auto-calibração foi enviesada por excesso de dados calmos.
     # Parâmetros manuais otimizados (equilibram Halloween e evitam overshoot extremo)
     params = {
-        'k_dst': 6.0,
-        'HAC_Q_SCALE': 25.0,
-        'hac_thr': 45.0
+        'k_dst': 1.0,
+        'HAC_Q_SCALE': 196.0,
+        'hac_thr': 10.0
     }
     
     physics_config = HACPhysicsConfig()
