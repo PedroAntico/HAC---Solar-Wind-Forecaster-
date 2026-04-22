@@ -47,7 +47,8 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-
+    HAC_Q_SCALE = 60.0
+    
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
     DENSITY_MIN, DENSITY_MAX = 0.1, 100
@@ -391,34 +392,36 @@ class ProductionHACModel:
         # EVOLUÇÃO TEMPORAL DO Dst (Burton exato, tau dinâmico, injeção suave)
         # ============================================================
         tau_rec_base = 12.0      # horas
-        k_dst = 3.8              # recalibrado para a forma exata
+        k_dst = 2.0              # recalibrado para evitar saturação
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
         
-        Q_prev = 0.0             # para suavização da injeção
+        Q_prev = 0.0
         
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
             
-            # Tau dinâmico: tempestades intensas recuperam mais lentamente
+            # Tau dinâmico
             tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
             
-            # Injeção sublinear com limiar dinâmico
+            # Limiar dinâmico (ligeiramente mais alto)
+            # Injeção sublinear com escala corrigida
             hac_val = max(0.0, hac_eff[i])
-            hac_thr = 30.0 + 0.1 * self.config.HAC_REF
+            hac_thr = 40.0 + 0.1 * self.config.HAC_REF
             hac_eff_val = max(0.0, hac_val - hac_thr)
-            Q_raw = k_dst * np.sqrt(hac_eff_val)
             
-            # Suavização temporal da injeção (evita spikes)
+            # ESCALA CORRIGIDA: normaliza o HAC antes da raiz
+            hac_scaled = hac_eff_val / HAC_Q_SCALE
+            Q_raw = k_dst * np.sqrt(hac_scaled)   # k_dst agora na faixa 5–10
+            
+            # Suavização
             Q_injection = 0.7 * Q_prev + 0.3 * Q_raw
             Q_prev = Q_injection
             
-            # Pequeno boost apenas para Bz extremamente negativo
             if Bz[i] < -15:
                 Q_injection *= 1.2
             
-            # Forma exata de Burton (válida para qualquer dt)
             alpha = np.exp(-dt_hours / tau_dynamic)
             dst_raw = (dst_physical[i-1] * alpha 
                        - Q_injection * tau_dynamic * (1.0 - alpha))
@@ -430,12 +433,12 @@ class ProductionHACModel:
         # Previsão por simulação (usando HAC efetivo do último ponto)
         forecast = {}
         dt_median = np.median(dt) / 3600.0
-        Q_fut = Q_prev   # parte da injeção já suavizada no último instante
+        Q_fut = Q_prev
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             hac_fut = max(0.0, hac_eff[-1])
-            hac_thr_fut = 30.0 + 0.1 * self.config.HAC_REF
+            hac_thr_fut = 40.0 + 0.1 * self.config.HAC_REF
             hac_eff_fut = max(0.0, hac_fut - hac_thr_fut)
             for _ in range(steps):
                 tau_dyn = tau_rec_base * (1.0 + abs(dst_fut) / 100.0)
