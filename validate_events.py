@@ -329,6 +329,19 @@ def main():
     df_test  = df_aligned[df_aligned['time_tag'] > TRAIN_END_DATE].copy()
     print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
+    # Calcular HAC no treino (necessário para a auto-calibração)
+    print("\n⚙️ Preparando conjunto de treino para auto-calibração...")
+    df_train_aligned = align_omni_to_dst(omni, dst, start=TRAIN_START, end=TRAIN_END_DATE)
+    # Calcular campos físicos e HAC no treino
+    df_train_aligned = PhysicalFieldsCalculator.compute_all_fields(df_train_aligned)
+    model_temp = ProductionHACModel()
+    hac_train = model_temp.compute_hac_system(df_train_aligned)
+    df_train_aligned['HAC_total'] = hac_train
+    
+    # Auto-calibração
+    params = auto_calibrate_parameters(df_train_aligned)
+
+
     # Calibração
     config = global_calibration(df_train)
 
