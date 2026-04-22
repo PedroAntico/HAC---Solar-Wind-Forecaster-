@@ -47,7 +47,9 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    
+    HAC_Q_SCALE = 20.0
+    K_DST = 8.0
+    HAC_THR = 40.0
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
     DENSITY_MIN, DENSITY_MAX = 0.1, 100
@@ -330,7 +332,7 @@ class ProductionHACModel:
         for i in range(1, n):
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
-            
+    
             # Baseline adaptativa
             if coupling[i] < 0.02 and bz_eff_i > -3.0:
                 baseline = 0.05 + 0.1 * (density[i] / 10.0)
@@ -342,7 +344,7 @@ class ProductionHACModel:
             if Bz[i] < -5:
                 boost_bz = 1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0)
                 injection *= boost_bz
-            
+    
             if regime == 'CME':
                 injection *= 1.3
                 tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
@@ -390,47 +392,50 @@ class ProductionHACModel:
         # ============================================================
         # EVOLUÇÃO TEMPORAL DO Dst (Burton exato, tau dinâmico, injeção suave)
         # ============================================================
-        tau_rec_base = 10.0      # horas
-        k_dst = 2.5              # recalibrado para evitar saturação
-        HAC_Q_SCALE = 80.00
-        
+        # Parâmetros calibrados (obtidos via auto‑calibração no script de validação)
+        tau_rec_base = 10.0      # horas (pode ser movido para config)
+        k_dst = getattr(self.config, 'K_DST', 6.5)
+        HAC_Q_SCALE = getattr(self.config, 'HAC_Q_SCALE', 45.0)
+        hac_thr = getattr(self.config, 'HAC_THR', 38.0)
+    
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
-        
+    
         Q_prev = 0.0
-        
+    
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-            
-            # Tau dinâmico
+    
+            # Tau dinâmico: tempestades intensas recuperam mais lentamente
             tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-            
-            # Limiar dinâmico (ligeiramente mais alto)
+    
             # Injeção sublinear com escala corrigida
             hac_val = max(0.0, hac_eff[i])
-            hac_thr = 45.0 + 0.1 * self.config.HAC_REF
             hac_eff_val = max(0.0, hac_val - hac_thr)
-            
-            # ESCALA CORRIGIDA: normaliza o HAC antes da raiz
+    
+            # Normalização crítica (escala física)
             hac_scaled = hac_eff_val / HAC_Q_SCALE
-            Q_raw = k_dst * np.sqrt(hac_scaled)   # k_dst agora na faixa 5–10
-            
-            # Suavização
+            Q_raw = k_dst * np.sqrt(hac_scaled)
+    
+            # Suavização temporal da injeção
             Q_injection = 0.7 * Q_prev + 0.3 * Q_raw
             Q_prev = Q_injection
-            
+    
+            # Pequeno boost para Bz extremamente negativo
             if Bz[i] < -15:
                 Q_injection *= 1.2
-            
+    
             alpha = np.exp(-dt_hours / tau_dynamic)
-            dst_raw = (dst_physical[i-1] * alpha 
+            dst_raw = (dst_physical[i-1] * alpha
                        - Q_injection * tau_dynamic * (1.0 - alpha))
             dst_physical[i] = dst_raw
-        
+    
         dst_physical = np.clip(dst_physical, -500, 50)
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
-        # Previsão por simulação (usando HAC efetivo do último ponto)
+        # ============================================================
+        # PREVISÃO (forecast) com os mesmos parâmetros calibrados
+        # ============================================================
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         Q_fut = Q_prev
@@ -438,15 +443,14 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             hac_fut = max(0.0, hac_eff[-1])
-            hac_thr_fut = 40.0 + 0.1 * self.config.HAC_REF
-            hac_eff_fut = max(0.0, hac_fut - hac_thr_fut)
+            hac_eff_fut = max(0.0, hac_fut - hac_thr)
             for _ in range(steps):
                 tau_dyn = tau_rec_base * (1.0 + abs(dst_fut) / 100.0)
                 alpha = np.exp(-dt_median / tau_dyn)
-                Q_fut = k_dst * np.sqrt(hac_eff_fut)
+                Q_fut = k_dst * np.sqrt(hac_eff_fut / HAC_Q_SCALE)
                 dst_fut = dst_fut * alpha - Q_fut * tau_dyn * (1.0 - alpha)
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
-            
+    
         self.results.update({
             'time': times, 'HAC_total': hac_total, 'dHAC_dt': dHAC_dt,
             'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
