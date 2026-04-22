@@ -190,9 +190,8 @@ class PhysicalFieldsCalculator:
         for i in range(1, len(bz)):
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
-
-        bz_eff = bz_eff * 2.0
-        
+        bz_eff = np.clip(bz_eff, -50.0, 0.0)   # evita amplificação irrealista
+                
         # ------------------------------------------------------------
         # 1. Acoplamento Newell (original)
         # ------------------------------------------------------------
