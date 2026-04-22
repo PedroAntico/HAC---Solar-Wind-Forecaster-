@@ -390,8 +390,8 @@ class ProductionHACModel:
         # ============================================================
         # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
-        tau_dst_base = 8.0   # horas
-        k_dst = 25.0          # fator de escala (nT/h por sqrt(HAC))
+        tau_dst_base = 12.0   # horas
+        k_dst = 30.0          # fator de escala (nT/h por sqrt(HAC))
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
