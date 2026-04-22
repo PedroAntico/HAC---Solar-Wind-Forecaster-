@@ -188,18 +188,26 @@ def global_calibration(df_aligned):
 
     return core.config
     
-def auto_calibrate_parameters(df_train):
+def auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20):
     """
-    Calibra automaticamente k_dst, HAC_Q_SCALE e hac_thr
-    usando regressão linear entre √(HAC_eff / scale) e -dDst/dt.
+    Calibra automaticamente k_dst, HAC_Q_SCALE e hac_thr usando regressão
+    ponderada pela intensidade do Dst. Isso evita que períodos calmos dominem a otimização.
     """
     import numpy as np
-    from scipy.optimize import minimize
+    from scipy.optimize import differential_evolution
 
     print("\n🔧 AUTO-CALIBRAÇÃO DE PARÂMETROS (HAC → Dst)\n")
 
-    dst = df_train['dst'].values
-    hac = df_train['HAC_total'].values
+    # Filtrar períodos muito calmos (opcional, recomendado)
+    if filter_quiet:
+        mask_quiet = df_train['dst'] < dst_threshold
+        df_calib = df_train[mask_quiet].copy()
+        print(f"   • Filtrando Dst < {dst_threshold} nT: {len(df_calib)} pontos restantes")
+    else:
+        df_calib = df_train.copy()
+
+    dst = df_calib['dst'].values
+    hac = df_calib['HAC_total'].values
 
     # Derivada do Dst (nT/h) – assumindo dados horários
     dt_hours = 1.0
@@ -211,7 +219,9 @@ def auto_calibrate_parameters(df_train):
     hac = hac[mask]
     dDst_dt = dDst_dt[mask]
 
-    # Função objetivo para otimização
+    # Pesos proporcionais à intensidade do Dst (eventos mais intensos pesam mais)
+    weights = np.clip(np.abs(dst) / 50.0, 1.0, 10.0)
+
     def objective(params):
         k, scale, thr = params
         if k <= 0 or scale <= 0 or thr < 0:
@@ -219,19 +229,17 @@ def auto_calibrate_parameters(df_train):
         hac_eff = np.maximum(0, hac - thr)
         X = np.sqrt(hac_eff / scale)
         valid = X > 0
-        if np.sum(valid) < 100:
+        if np.sum(valid) < 50:
             return 1e9
         Y = -dDst_dt[valid]
         Xv = X[valid]
-        # Regressão linear forçando o coeficiente k
+        w = weights[valid]
         Q_pred = k * Xv
-        mse = np.mean((Q_pred - Y)**2)
+        mse = np.average((Q_pred - Y)**2, weights=w)
         return mse
 
-    # Otimização com limites razoáveis
-    from scipy.optimize import differential_evolution
-    bounds = [(1.0, 20.0), (10.0, 200.0), (10.0, 80.0)]
-    result = differential_evolution(objective, bounds, maxiter=50, disp=False)
+    bounds = [(0.5, 15.0), (10.0, 300.0), (5.0, 80.0)]
+    result = differential_evolution(objective, bounds, maxiter=80, disp=False, seed=42)
 
     k_dst, HAC_Q_SCALE, hac_thr = result.x
     best_score = result.fun
@@ -239,7 +247,7 @@ def auto_calibrate_parameters(df_train):
     print(f"✅ k_dst ótimo:        {k_dst:.3f}")
     print(f"✅ HAC_Q_SCALE ótimo:  {HAC_Q_SCALE:.1f}")
     print(f"✅ hac_thr ótimo:      {hac_thr:.1f}")
-    print(f"📉 Erro quadrático médio: {best_score:.3f}")
+    print(f"📉 Erro quadrático médio (ponderado): {best_score:.3f}")
 
     return {
         'k_dst': k_dst,
