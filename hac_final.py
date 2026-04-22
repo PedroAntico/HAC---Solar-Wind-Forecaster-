@@ -189,6 +189,8 @@ class PhysicalFieldsCalculator:
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
 
+        bz_eff = bz_eff * 2.0
+        
         # ------------------------------------------------------------
         # 1. Acoplamento Newell (original)
         # ------------------------------------------------------------
@@ -395,7 +397,7 @@ class ProductionHACModel:
             # Injeção sublinear: raiz quadrada do HAC
             # Apenas quando HAC > 0 (evita sqrt de negativo)
             hac_val = max(0.0, hac_total[i])
-            hac_thr = 40.0   # limiar de ativação (HAC abaixo disso não injeta energia)
+            hac_thr = 30.0   # limiar de ativação (HAC abaixo disso não injeta energia)
             hac_eff = max(0.0, hac_val - hac_thr)
             Q_injection = k_dst * np.sqrt(hac_eff)
         
