@@ -350,27 +350,28 @@ def main():
     hac_train = model_temp.compute_hac_system(df_train)
     df_train['HAC_total'] = hac_train
 
-    # Auto-calibração dos parâmetros HAC → Dst
-    params = auto_calibrate_parameters(df_train)
+    # Auto-calibração (retorna parâmetros brutos)
+    params_raw = auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20)
     
-    # ⚠️ OVERRIDE MANUAL: a auto-calibração foi enviesada por excesso de dados calmos.
-    # Parâmetros manuais otimizados (equilibram Halloween e evitam overshoot extremo)
-    params = {
-        'k_dst': 1.0,
-        'HAC_Q_SCALE': 196.0,
-        'hac_thr': 10.0
-    }
+    # FATORES DE CORREÇÃO EMPÍRICOS (compensam a dinâmica discreta de Burton)
+    CORR_SCALE = 0.3      # reduz HAC_Q_SCALE → aumenta sensibilidade
+    CORR_K = 6.0          # aumenta k_dst → compensa atenuação
+    CORR_THR = 10.0       # eleva threshold → evita injeção em calmaria
     
     physics_config = HACPhysicsConfig()
-    physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
-    physics_config.K_DST = params['k_dst']
-    physics_config.HAC_THR = params['hac_thr']
-
-    print(f"\n🔧 Parâmetros auto-calibrados aplicados:")
+    physics_config.HAC_Q_SCALE = params_raw['HAC_Q_SCALE'] * CORR_SCALE
+    physics_config.K_DST = params_raw['k_dst'] * CORR_K
+    physics_config.HAC_THR = params_raw['hac_thr'] + CORR_THR
+    
+    print(f"\n🔧 Parâmetros auto‑calibrados (brutos):")
+    print(f"   • k_dst = {params_raw['k_dst']:.3f}")
+    print(f"   • HAC_Q_SCALE = {params_raw['HAC_Q_SCALE']:.1f}")
+    print(f"   • hac_thr = {params_raw['hac_thr']:.1f}")
+    
+    print(f"\n🔧 Parâmetros APÓS correção empírica:")
     print(f"   • HAC_Q_SCALE: {physics_config.HAC_Q_SCALE:.1f}")
     print(f"   • K_DST: {physics_config.K_DST:.3f}")
     print(f"   • HAC_THR: {physics_config.HAC_THR:.1f}")
-
     # Calibração global do core (HAC_REF, Q_FACTOR) – mantida para compatibilidade
     config_core = global_calibration(df_train)
 
