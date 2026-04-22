@@ -42,7 +42,7 @@ class HACPhysicsConfig:
     BETA_NONLINEAR = 2.2
     COUPLING_THRESHOLD = 2.0      # mV/m (reduzido para ativar mais cedo)
     NEWELL_SCALE = 5e-4           # será multiplicado por fator adicional
-    COUPLING_SCALE = 5000.00
+    COUPLING_SCALE = 100.00
     
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
@@ -367,7 +367,7 @@ class ProductionHACModel:
         # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
         tau_dst_base = 8.0   # horas
-        k_dst = 18.0          # fator de escala (nT/h por sqrt(HAC))
+        k_dst = 25.0          # fator de escala (nT/h por sqrt(HAC))
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
