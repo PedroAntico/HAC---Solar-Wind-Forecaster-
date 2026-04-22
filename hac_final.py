@@ -322,7 +322,14 @@ class ProductionHACModel:
         print("   Simulando reservatórios...")
         for i in range(1, n):
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
-            baseline = 0.15 + 0.25 * (density[i] / 10.0)
+            # Obter Bz efetivo (já calculado no DataFrame)
+            bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
+            
+            # Baseline reduzida se não houver Bz negativo persistente
+            if bz_eff_i > -2.0:   # próximo de zero ou positivo
+                baseline = 0.05 + 0.1 * (density[i] / 10.0)
+            else:
+                baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
 
             # Reforço físico por Bz negativo
@@ -387,7 +394,7 @@ class ProductionHACModel:
             # Injeção sublinear: raiz quadrada do HAC
             # Apenas quando HAC > 0 (evita sqrt de negativo)
             hac_val = max(0.0, hac_total[i])
-            hac_thr = 40.0   # limiar de ativação (HAC abaixo disso não injeta energia)
+            hac_thr = 50.0   # limiar de ativação (HAC abaixo disso não injeta energia)
             hac_eff = max(0.0, hac_val - hac_thr)
             Q_injection = k_dst * np.sqrt(hac_eff)
         
@@ -410,7 +417,7 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             hac_fut = max(0.0, hac_total[-1])
-            hac_eff_fut = max(0.0, hac_fut - 30.0)
+            hac_eff_fut = max(0.0, hac_fut - 50.0)
             Q_fut = k_dst * np.sqrt(hac_eff_fut)
             
             tau = tau_dst_base
