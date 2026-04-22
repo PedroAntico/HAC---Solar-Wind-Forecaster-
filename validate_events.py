@@ -330,10 +330,6 @@ def main():
     df_aligned = align_omni_to_dst(omni, dst)
     print(f"   ✅ Dataset alinhado: {len(df_aligned)} pontos")
 
-    # Divisão treino/teste
-    #df_train = df_aligned[df_aligned['time_tag'] <= TRAIN_END_DATE].copy()
-    df_test  = df_aligned[df_aligned['time_tag'] > TRAIN_END_DATE].copy()
-    print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
     # ========== AUTO-CALIBRAÇÃO NO CONJUNTO DE TREINO ==========
     print("\n⚙️ Preparando conjunto de treino para auto-calibração...")
@@ -351,7 +347,7 @@ def main():
     physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
     physics_config.K_DST = params['k_dst']
     physics_config.HAC_THR = params['hac_thr']
-
+    print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
     # Calibração
     config = global_calibration(df_train)
