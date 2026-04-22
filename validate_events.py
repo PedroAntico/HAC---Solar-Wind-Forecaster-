@@ -250,7 +250,11 @@ def auto_calibrate_parameters(df_train):
 # =========================
 # VALIDAÇÃO DE UM EVENTO
 # =========================
-def validate_event(config_core, df_aligned, name, start, end):
+def validate_event(config_core, df_aligned, name, start, end, physics_config):
+    """
+    Valida um único evento usando o modelo de produção com os parâmetros
+    auto‑calibrados fornecidos em physics_config.
+    """
     print(f"\n🌌 {name}")
 
     mask = (df_aligned['time_tag'] >= start) & (df_aligned['time_tag'] <= end)
@@ -263,48 +267,47 @@ def validate_event(config_core, df_aligned, name, start, end):
     print(f"   • Pontos: {len(event)}")
     print(f"   • Dst obs mín: {event['dst'].min():.1f} nT")
 
-    # Calcular campos físicos (coupling etc.)
+    # Calcular campos físicos (inclui coupling e bz_eff)
     event = PhysicalFieldsCalculator.compute_all_fields(event)
-    # TESTE DIAGNÓSTICO: amplificar artificialmente o coupling
-    #event['coupling_signal'] = event['coupling_signal'] * 5.0
-    #print("   ⚠️ TESTE: coupling_signal multiplicado por 5")
+
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
     print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
 
-    # Criar configuração física a partir da calibração do core
-    physics_config = HACPhysicsConfig()
+    # Aplicar os parâmetros auto‑calibrados à configuração física
+    # (HAC_REF e outros podem vir do core, se necessário)
     physics_config.HAC_REF = config_core.HAC_REF
-    # Os parâmetros Q_FACTOR, TAU_DST, DST_Q podem ser usados se o modelo de produção os incorporar
-    # Caso contrário, serão ignorados
 
-    # Modelo de produção
+    # Instanciar o modelo de produção com a configuração completa
     model = ProductionHACModel(config=physics_config)
 
+    # Executar o pipeline completo
     hac = model.compute_hac_system(event)
     _, dst_pred, _ = model.predict_storm_indicators(hac)
+
+    # Clipping de segurança (valores fisicamente impossíveis)
     dst_pred = np.clip(dst_pred, -500, 50)
 
+    # Métricas de avaliação
     metrics = evaluate_event(
         time=event['time_tag'].values,
         dst_obs=event['dst'].values,
         dst_pred=dst_pred
     )
 
-    results = []
-    for name, (start, end) in EVENTS.items():
-        m = validate_event(config_core, df_aligned, name, start, end, physics_config)
-        if m:
-            results.append(m)
-    
     print(f"   • Dst pred mín: {dst_pred.min():.1f} nT")
     print(f"   • Correlação: {metrics['correlation']:.3f}")
     print(f"   • MAE: {metrics['MAE']:.1f} nT")
     print(f"   • Erro mín Dst: {metrics['min_Dst_error_nT']:.1f} nT")
 
-    # Plot
+    # Gerar gráfico comparativo
     plt.figure(figsize=(12, 5))
-    plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst Kyoto')
-    plt.plot(event['time_tag'], dst_pred, 'r--', label='HAC++')
+    plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst Kyoto', linewidth=2)
+    plt.plot(event['time_tag'], dst_pred, 'r--', label='HAC++ previsto', linewidth=2)
+    plt.axhline(y=-50, color='gray', linestyle=':', alpha=0.5)
+    plt.axhline(y=-100, color='orange', linestyle=':', alpha=0.5)
+    plt.axhline(y=-200, color='red', linestyle=':', alpha=0.5)
+    plt.xlabel('Tempo (UTC)')
+    plt.ylabel('Dst [nT]')
     plt.title(f'{name} - Corr={metrics["correlation"]:.2f}, MAE={metrics["MAE"]:.0f} nT')
     plt.legend()
     plt.grid(alpha=0.3)
