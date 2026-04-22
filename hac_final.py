@@ -391,8 +391,8 @@ class ProductionHACModel:
         # EVOLUÇÃO TEMPORAL DO Dst (Burton exato, tau dinâmico, injeção suave)
         # ============================================================
         tau_rec_base = 12.0      # horas
-        k_dst = 2.0              # recalibrado para evitar saturação
-        HAC_Q_SCALE = 60.00
+        k_dst = 10.0              # recalibrado para evitar saturação
+        HAC_Q_SCALE = 15.00
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
