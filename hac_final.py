@@ -329,18 +329,16 @@ class ProductionHACModel:
         print("   Simulando reservatórios...")
         for i in range(1, n):
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
-            # Obter Bz efetivo (já calculado no DataFrame)
-            # Obter Bz efetivo (já calculado no DataFrame)
             bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
             
-            # Baseline adaptativa: reduzida apenas quando NÃO há acoplamento significativo
+            # Baseline adaptativa
             if coupling[i] < 0.02 and bz_eff_i > -3.0:
                 baseline = 0.05 + 0.1 * (density[i] / 10.0)
             else:
                 baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
-
-            # Reforço físico por Bz negativo
+    
+            # Reforço por Bz negativo
             if Bz[i] < -5:
                 boost_bz = 1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0)
                 injection *= boost_bz
@@ -378,6 +376,17 @@ class ProductionHACModel:
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
     
+        # ========================================================
+        # HAC efetivo com memória exponencial (persistência)
+        # ========================================================
+        tau_hac = 2.0  # horas
+        hac_eff = np.zeros(n)
+        hac_eff[0] = hac_total[0]
+        for i in range(1, n):
+            dt_hours = dt[i] / 3600.0
+            alpha_hac = np.exp(-dt_hours / tau_hac)
+            hac_eff[i] = alpha_hac * hac_eff[i-1] + (1 - alpha_hac) * hac_total[i]
+    
         # ============================================================
         # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
         # ============================================================
@@ -399,39 +408,34 @@ class ProductionHACModel:
         
             alpha = np.exp(-dt_hours / tau_dst)
         
-            # Injeção sublinear: raiz quadrada do HAC
-            # Apenas quando HAC > 0 (evita sqrt de negativo)
-            hac_val = max(0.0, hac_total[i])
-            hac_thr = 30.0   # limiar de ativação (HAC abaixo disso não injeta energia)
-            hac_eff = max(0.0, hac_val - hac_thr)
-            Q_injection = k_dst * np.sqrt(hac_eff)
+            # Injeção sublinear usando HAC efetivo (com memória)
+            hac_val = max(0.0, hac_eff[i])
+            hac_thr = 35.0
+            hac_eff_val = max(0.0, hac_val - hac_thr)
+            Q_injection = k_dst * np.sqrt(hac_eff_val)
         
-            # Pequeno boost apenas para Bz extremamente negativo (opcional)
+            # Pequeno boost apenas para Bz extremamente negativo
             if Bz[i] < -15:
                 Q_injection *= 1.2
         
-            # Equação de relaxação (sem tanh, apenas física linear)
             dst_raw = alpha * dst_physical[i-1] + (1 - alpha) * (-Q_injection)
             dst_physical[i] = dst_raw
         
-        # Clipping físico suave (apenas para evitar extrapolação extrema)
         dst_physical = np.clip(dst_physical, -500, 50)
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
-        # Previsão por simulação (estendendo a equação de evolução)
+        # Previsão por simulação (usando HAC efetivo do último ponto)
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
-            hac_fut = max(0.0, hac_total[-1])
-            hac_eff_fut = max(0.0, hac_fut - 40.0)
-            Q_fut = k_dst * np.sqrt(hac_eff_fut)
-            
+            hac_fut = max(0.0, hac_eff[-1])
+            hac_eff_fut = max(0.0, hac_fut - 35.0)
             tau = tau_dst_base
             alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
-                Q_fut = k_dst * np.sqrt(hac_fut)
+                Q_fut = k_dst * np.sqrt(hac_eff_fut)
                 dst_fut = alpha * dst_fut + (1 - alpha) * (-Q_fut)
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
     
