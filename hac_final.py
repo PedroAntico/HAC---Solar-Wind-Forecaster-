@@ -390,9 +390,9 @@ class ProductionHACModel:
         # ============================================================
         # EVOLUÇÃO TEMPORAL DO Dst (Burton exato, tau dinâmico, injeção suave)
         # ============================================================
-        tau_rec_base = 12.0      # horas
-        k_dst = 10.0              # recalibrado para evitar saturação
-        HAC_Q_SCALE = 15.00
+        tau_rec_base = 10.0      # horas
+        k_dst = 2.5              # recalibrado para evitar saturação
+        HAC_Q_SCALE = 80.00
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
@@ -408,7 +408,7 @@ class ProductionHACModel:
             # Limiar dinâmico (ligeiramente mais alto)
             # Injeção sublinear com escala corrigida
             hac_val = max(0.0, hac_eff[i])
-            hac_thr = 40.0 + 0.1 * self.config.HAC_REF
+            hac_thr = 45.0 + 0.1 * self.config.HAC_REF
             hac_eff_val = max(0.0, hac_val - hac_thr)
             
             # ESCALA CORRIGIDA: normaliza o HAC antes da raiz
