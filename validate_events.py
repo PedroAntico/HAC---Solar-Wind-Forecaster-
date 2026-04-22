@@ -187,7 +187,66 @@ def global_calibration(df_aligned):
         }, f, indent=4)
 
     return core.config
+    
+def auto_calibrate_parameters(df_train):
+    """
+    Calibra automaticamente k_dst, HAC_Q_SCALE e hac_thr
+    usando regressão linear entre √(HAC_eff / scale) e -dDst/dt.
+    """
+    import numpy as np
+    from scipy.optimize import minimize
 
+    print("\n🔧 AUTO-CALIBRAÇÃO DE PARÂMETROS (HAC → Dst)\n")
+
+    dst = df_train['dst'].values
+    hac = df_train['HAC_total'].values
+
+    # Derivada do Dst (nT/h) – assumindo dados horários
+    dt_hours = 1.0
+    dDst_dt = np.gradient(dst, dt_hours)
+
+    # Remover NaNs
+    mask = np.isfinite(dst) & np.isfinite(hac) & np.isfinite(dDst_dt)
+    dst = dst[mask]
+    hac = hac[mask]
+    dDst_dt = dDst_dt[mask]
+
+    # Função objetivo para otimização
+    def objective(params):
+        k, scale, thr = params
+        if k <= 0 or scale <= 0 or thr < 0:
+            return 1e9
+        hac_eff = np.maximum(0, hac - thr)
+        X = np.sqrt(hac_eff / scale)
+        valid = X > 0
+        if np.sum(valid) < 100:
+            return 1e9
+        Y = -dDst_dt[valid]
+        Xv = X[valid]
+        # Regressão linear forçando o coeficiente k
+        Q_pred = k * Xv
+        mse = np.mean((Q_pred - Y)**2)
+        return mse
+
+    # Otimização com limites razoáveis
+    from scipy.optimize import differential_evolution
+    bounds = [(1.0, 20.0), (10.0, 200.0), (10.0, 80.0)]
+    result = differential_evolution(objective, bounds, maxiter=50, disp=False)
+
+    k_dst, HAC_Q_SCALE, hac_thr = result.x
+    best_score = result.fun
+
+    print(f"✅ k_dst ótimo:        {k_dst:.3f}")
+    print(f"✅ HAC_Q_SCALE ótimo:  {HAC_Q_SCALE:.1f}")
+    print(f"✅ hac_thr ótimo:      {hac_thr:.1f}")
+    print(f"📉 Erro quadrático médio: {best_score:.3f}")
+
+    return {
+        'k_dst': k_dst,
+        'HAC_Q_SCALE': HAC_Q_SCALE,
+        'hac_thr': hac_thr
+    }
+    
 # =========================
 # VALIDAÇÃO DE UM EVENTO
 # =========================
