@@ -388,37 +388,33 @@ class ProductionHACModel:
             hac_eff[i] = alpha_hac * hac_eff[i-1] + (1 - alpha_hac) * hac_total[i]
     
         # ============================================================
-        # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com injeção sublinear)
+        # EVOLUÇÃO TEMPORAL DO Dst (equação de Burton com tau dinâmico)
         # ============================================================
-        tau_dst_base = 12.0   # horas
-        k_dst = 30.0          # fator de escala (nT/h por sqrt(HAC))
+        tau_rec_base = 10.0      # horas (tempo de recuperação para Dst ~ 0)
+        k_dst = 30.0             # fator de escala (mantido)
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
         
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
-            if regime_i == 'CME':
-                tau_dst = 3.0
-            elif regime_i == 'HSS':
-                tau_dst = 5.0
-            else:
-                tau_dst = tau_dst_base
-        
-            alpha = np.exp(-dt_hours / tau_dst)
-        
+            
+            # Tau dinâmico: tempestades mais intensas recuperam mais lentamente
+            tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
+            alpha = np.exp(-dt_hours / tau_dynamic)
+            
             # Injeção sublinear usando HAC efetivo (com memória)
             hac_val = max(0.0, hac_eff[i])
             hac_thr = 35.0
             hac_eff_val = max(0.0, hac_val - hac_thr)
             Q_injection = k_dst * np.sqrt(hac_eff_val)
-        
+            
             # Pequeno boost apenas para Bz extremamente negativo
             if Bz[i] < -15:
                 Q_injection *= 1.2
-        
-            dst_raw = alpha * dst_physical[i-1] + (1 - alpha) * (-Q_injection)
+            
+            # Equação de Burton com tau dinâmico
+            dst_raw = alpha * dst_physical[i-1] - Q_injection * dt_hours
             dst_physical[i] = dst_raw
         
         dst_physical = np.clip(dst_physical, -500, 50)
