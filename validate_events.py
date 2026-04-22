@@ -330,6 +330,10 @@ def main():
     df_aligned = align_omni_to_dst(omni, dst)
     print(f"   ✅ Dataset alinhado: {len(df_aligned)} pontos")
 
+    # Divisão treino/teste
+    df_train = df_aligned[df_aligned['time_tag'] <= TRAIN_END_DATE].copy()
+    df_test  = df_aligned[df_aligned['time_tag'] > TRAIN_END_DATE].copy()
+    print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
     # ========== AUTO-CALIBRAÇÃO NO CONJUNTO DE TREINO ==========
     print("\n⚙️ Preparando conjunto de treino para auto-calibração...")
@@ -338,24 +342,28 @@ def main():
     model_temp = ProductionHACModel()
     hac_train = model_temp.compute_hac_system(df_train)
     df_train['HAC_total'] = hac_train
-    
+
     # Auto-calibração dos parâmetros HAC → Dst
     params = auto_calibrate_parameters(df_train)
-    
+
     # Atualizar configuração física com os parâmetros calibrados
     physics_config = HACPhysicsConfig()
     physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
     physics_config.K_DST = params['k_dst']
     physics_config.HAC_THR = params['hac_thr']
-    print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
-    # Calibração
-    config = global_calibration(df_train)
+    print(f"\n🔧 Parâmetros auto-calibrados aplicados:")
+    print(f"   • HAC_Q_SCALE: {physics_config.HAC_Q_SCALE:.1f}")
+    print(f"   • K_DST: {physics_config.K_DST:.3f}")
+    print(f"   • HAC_THR: {physics_config.HAC_THR:.1f}")
 
-    # Validação
+    # Calibração global do core (HAC_REF, Q_FACTOR) – mantida para compatibilidade
+    config_core = global_calibration(df_train)
+
+    # Validação nos eventos de teste
     results = []
     for name, (start, end) in EVENTS.items():
-        m = validate_event(config, df_aligned, name, start, end)
+        m = validate_event(config_core, df_aligned, name, start, end, physics_config)
         if m:
             results.append(m)
 
@@ -363,9 +371,12 @@ def main():
         print("\n" + "=" * 70)
         print("📈 MÉTRICAS MÉDIAS")
         print("=" * 70)
-        print(f"   • Correlação: {np.mean([m['correlation'] for m in results]):.3f}")
-        print(f"   • MAE: {np.mean([m['MAE'] for m in results]):.1f} nT")
-        print(f"   • Erro mín Dst: {np.mean([m['min_Dst_error_nT'] for m in results]):.1f} nT")
+        avg_corr = np.mean([m['correlation'] for m in results])
+        avg_mae = np.mean([m['MAE'] for m in results])
+        avg_min_err = np.mean([m['min_Dst_error_nT'] for m in results])
+        print(f"   • Correlação: {avg_corr:.3f}")
+        print(f"   • MAE: {avg_mae:.1f} nT")
+        print(f"   • Erro mín Dst: {avg_min_err:.1f} nT")
 
     print("\n✅ Validação concluída.")
 
