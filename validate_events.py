@@ -290,6 +290,12 @@ def validate_event(config_core, df_aligned, name, start, end):
         dst_pred=dst_pred
     )
 
+    results = []
+    for name, (start, end) in EVENTS.items():
+        m = validate_event(config_core, df_aligned, name, start, end, physics_config)
+        if m:
+            results.append(m)
+    
     print(f"   • Dst pred mín: {dst_pred.min():.1f} nT")
     print(f"   • Correlação: {metrics['correlation']:.3f}")
     print(f"   • MAE: {metrics['MAE']:.1f} nT")
@@ -325,21 +331,26 @@ def main():
     print(f"   ✅ Dataset alinhado: {len(df_aligned)} pontos")
 
     # Divisão treino/teste
-    df_train = df_aligned[df_aligned['time_tag'] <= TRAIN_END_DATE].copy()
+    #df_train = df_aligned[df_aligned['time_tag'] <= TRAIN_END_DATE].copy()
     df_test  = df_aligned[df_aligned['time_tag'] > TRAIN_END_DATE].copy()
     print(f"\n📊 Treino: {len(df_train)} | Teste: {len(df_test)}")
 
-    # Calcular HAC no treino (necessário para a auto-calibração)
+    # ========== AUTO-CALIBRAÇÃO NO CONJUNTO DE TREINO ==========
     print("\n⚙️ Preparando conjunto de treino para auto-calibração...")
-    df_train_aligned = align_omni_to_dst(omni, dst, start=TRAIN_START, end=TRAIN_END_DATE)
-    # Calcular campos físicos e HAC no treino
-    df_train_aligned = PhysicalFieldsCalculator.compute_all_fields(df_train_aligned)
+    # Calcular campos físicos no treino
+    df_train = PhysicalFieldsCalculator.compute_all_fields(df_train)
     model_temp = ProductionHACModel()
-    hac_train = model_temp.compute_hac_system(df_train_aligned)
-    df_train_aligned['HAC_total'] = hac_train
+    hac_train = model_temp.compute_hac_system(df_train)
+    df_train['HAC_total'] = hac_train
     
-    # Auto-calibração
-    params = auto_calibrate_parameters(df_train_aligned)
+    # Auto-calibração dos parâmetros HAC → Dst
+    params = auto_calibrate_parameters(df_train)
+    
+    # Atualizar configuração física com os parâmetros calibrados
+    physics_config = HACPhysicsConfig()
+    physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
+    physics_config.K_DST = params['k_dst']
+    physics_config.HAC_THR = params['hac_thr']
 
 
     # Calibração
