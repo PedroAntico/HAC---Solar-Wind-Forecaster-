@@ -348,8 +348,14 @@ def main():
 
     # Auto-calibração dos parâmetros HAC → Dst
     params = auto_calibrate_parameters(df_train)
-
-    # Atualizar configuração física com os parâmetros calibrados
+    
+    # ⚠️ OVERRIDE MANUAL: a auto-calibração foi enviesada por excesso de dados calmos.
+    # Usamos valores empiricamente otimizados.
+    params['k_dst'] = 8.0
+    params['HAC_Q_SCALE'] = 25.0
+    params['hac_thr'] = 35.0
+    
+    # Atualizar configuração física com os parâmetros (sobrescritos)
     physics_config = HACPhysicsConfig()
     physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
     physics_config.K_DST = params['k_dst']
