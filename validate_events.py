@@ -251,10 +251,6 @@ def auto_calibrate_parameters(df_train):
 # VALIDAÇÃO DE UM EVENTO
 # =========================
 def validate_event(config_core, df_aligned, name, start, end, physics_config):
-    """
-    Valida um único evento usando o modelo de produção com os parâmetros
-    auto‑calibrados fornecidos em physics_config.
-    """
     print(f"\n🌌 {name}")
 
     mask = (df_aligned['time_tag'] >= start) & (df_aligned['time_tag'] <= end)
@@ -267,27 +263,32 @@ def validate_event(config_core, df_aligned, name, start, end, physics_config):
     print(f"   • Pontos: {len(event)}")
     print(f"   • Dst obs mín: {event['dst'].min():.1f} nT")
 
-    # Calcular campos físicos (inclui coupling e bz_eff)
+    # Calcular campos físicos (coupling etc.)
     event = PhysicalFieldsCalculator.compute_all_fields(event)
 
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
     print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
 
-    # Aplicar os parâmetros auto‑calibrados à configuração física
-    # (HAC_REF e outros podem vir do core, se necessário)
+    # Aplicar HAC_REF do core (se necessário)
     physics_config.HAC_REF = config_core.HAC_REF
 
-    # Instanciar o modelo de produção com a configuração completa
+    # Instanciar modelo de produção com a configuração ajustada
     model = ProductionHACModel(config=physics_config)
 
-    # Executar o pipeline completo
+    # GARANTIR que os parâmetros estão realmente no config usado internamente
+    model.config.HAC_Q_SCALE = physics_config.HAC_Q_SCALE
+    model.config.K_DST = physics_config.K_DST
+    model.config.HAC_THR = physics_config.HAC_THR
+    # Se houver um core separado, atualize também
+    if hasattr(model, 'core'):
+        model.core.config.HAC_Q_SCALE = physics_config.HAC_Q_SCALE
+        model.core.config.K_DST = physics_config.K_DST
+        model.core.config.HAC_THR = physics_config.HAC_THR
+
     hac = model.compute_hac_system(event)
     _, dst_pred, _ = model.predict_storm_indicators(hac)
-
-    # Clipping de segurança (valores fisicamente impossíveis)
     dst_pred = np.clip(dst_pred, -500, 50)
 
-    # Métricas de avaliação
     metrics = evaluate_event(
         time=event['time_tag'].values,
         dst_obs=event['dst'].values,
@@ -299,15 +300,10 @@ def validate_event(config_core, df_aligned, name, start, end, physics_config):
     print(f"   • MAE: {metrics['MAE']:.1f} nT")
     print(f"   • Erro mín Dst: {metrics['min_Dst_error_nT']:.1f} nT")
 
-    # Gerar gráfico comparativo
+    # Plot
     plt.figure(figsize=(12, 5))
-    plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst Kyoto', linewidth=2)
-    plt.plot(event['time_tag'], dst_pred, 'r--', label='HAC++ previsto', linewidth=2)
-    plt.axhline(y=-50, color='gray', linestyle=':', alpha=0.5)
-    plt.axhline(y=-100, color='orange', linestyle=':', alpha=0.5)
-    plt.axhline(y=-200, color='red', linestyle=':', alpha=0.5)
-    plt.xlabel('Tempo (UTC)')
-    plt.ylabel('Dst [nT]')
+    plt.plot(event['time_tag'], event['dst'], 'b-', label='Dst Kyoto')
+    plt.plot(event['time_tag'], dst_pred, 'r--', label='HAC++')
     plt.title(f'{name} - Corr={metrics["correlation"]:.2f}, MAE={metrics["MAE"]:.0f} nT')
     plt.legend()
     plt.grid(alpha=0.3)
@@ -350,12 +346,13 @@ def main():
     params = auto_calibrate_parameters(df_train)
     
     # ⚠️ OVERRIDE MANUAL: a auto-calibração foi enviesada por excesso de dados calmos.
-    # Usamos valores empiricamente otimizados.
-    params['k_dst'] = 8.0
-    params['HAC_Q_SCALE'] = 25.0
-    params['hac_thr'] = 35.0
+    # Parâmetros manuais otimizados (equilibram Halloween e evitam overshoot extremo)
+    params = {
+        'k_dst': 6.0,
+        'HAC_Q_SCALE': 25.0,
+        'hac_thr': 45.0
+    }
     
-    # Atualizar configuração física com os parâmetros (sobrescritos)
     physics_config = HACPhysicsConfig()
     physics_config.HAC_Q_SCALE = params['HAC_Q_SCALE']
     physics_config.K_DST = params['k_dst']
