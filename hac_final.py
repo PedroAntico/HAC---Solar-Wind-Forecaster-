@@ -428,13 +428,13 @@ class ProductionHACModel:
             dst_fut = dst_physical[-1]
             hac_fut = max(0.0, hac_eff[-1])
             hac_eff_fut = max(0.0, hac_fut - 35.0)
-            tau = tau_dst_base
-            alpha = np.exp(-dt_median / tau)
             for _ in range(steps):
+                tau_dyn = tau_rec_base * (1.0 + abs(dst_fut) / 100.0)
+                alpha = np.exp(-dt_median / tau_dyn)
                 Q_fut = k_dst * np.sqrt(hac_eff_fut)
-                dst_fut = alpha * dst_fut + (1 - alpha) * (-Q_fut)
+                dst_fut = alpha * dst_fut - Q_fut * dt_median
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
-    
+            
         self.results.update({
             'time': times, 'HAC_total': hac_total, 'dHAC_dt': dHAC_dt,
             'Bz': Bz, 'Vsw': Vsw, 'coupling_signal': coupling,
