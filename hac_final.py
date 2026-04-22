@@ -47,7 +47,6 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    HAC_Q_SCALE = 60.0
     
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -393,6 +392,7 @@ class ProductionHACModel:
         # ============================================================
         tau_rec_base = 12.0      # horas
         k_dst = 2.0              # recalibrado para evitar saturação
+        HAC_Q_SCALE = 60.00
         
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
