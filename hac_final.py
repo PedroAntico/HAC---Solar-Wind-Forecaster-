@@ -400,43 +400,45 @@ class ProductionHACModel:
 	        hac_eff[i] = alpha_hac * hac_eff[i-1] + (1 - alpha_hac) * hac_total[i]
 	
 	    # ========================================================
-		# Dst (Burton com injeção não‑linear controlada por HAC)
-		# ========================================================
-		tau_rec_base = 10.0          # horas
-		k_dst = getattr(self.config, 'K_DST', 6.0)
-		HAC_Q_SCALE = getattr(self.config, 'HAC_Q_SCALE', 80.0)
-		hac_thr = getattr(self.config, 'HAC_THR', 15.0)
-		
-		dst_physical = np.zeros(n)
-		dst_physical[0] = -20.0
-		
-		for i in range(1, n):
-			dt_hours = dt[i] / 3600.0
-		
-		    # Recuperação dinâmica (tempestades fortes demoram mais para se recuperar)
-		    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-		
-		    # HAC efetivo com memória (já calculado)
-		    hac_val = max(0.0, hac_eff[i])
-		
-		    # Limiar suave (sigmoide) para evitar injeção em quietude
-		    hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
-		
-		    # Escala o HAC para uma faixa de trabalho (~0 a 5)
-		    hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 5.0)
-		
-		    # Injeção sublinear (expoente 0.7 para suavizar, mas sem achatar extremos)
-		    Q_injection = k_dst * (hac_scaled ** 0.7)
-		
-		    # Deixa o decaimento fazer o resto
-		    alpha = np.exp(-dt_hours / tau_dynamic)
-		    dst_physical[i] = (dst_physical[i-1] * alpha
-		        - Q_injection * tau_dynamic * (1.0 - alpha))
-		
-		    # Limite físico
-		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-		
-		print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
+	    # Dst (Burton com injeção não‑linear controlada por HAC)
+	    # ========================================================
+	    tau_rec_base = 10.0          # horas
+	    k_dst = getattr(self.config, 'K_DST', 6.0)
+	    HAC_Q_SCALE = getattr(self.config, 'HAC_Q_SCALE', 80.0)
+	    hac_thr = getattr(self.config, 'HAC_THR', 15.0)
+	
+	    dst_physical = np.zeros(n)
+	    dst_physical[0] = -20.0
+	
+	    for i in range(1, n):
+	        dt_hours = dt[i] / 3600.0
+	
+	        # Recuperação dinâmica (tempestades fortes demoram mais para se recuperar)
+	        tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
+	
+	        # HAC efetivo com memória (já calculado)
+	        hac_val = max(0.0, hac_eff[i])
+	
+	        # Limiar suave (sigmoide) para evitar injeção em quietude
+	        hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
+	
+	        # Escala o HAC para uma faixa de trabalho (~0 a 5)
+	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 5.0)
+	
+	        # Injeção sublinear (expoente 0.7 para suavizar, mas sem achatar extremos)
+	        Q_injection = k_dst * (hac_scaled ** 0.7)
+	
+	        # Deixa o decaimento fazer o resto
+	        alpha = np.exp(-dt_hours / tau_dynamic)
+	        dst_physical[i] = (
+	            dst_physical[i-1] * alpha
+	            - Q_injection * tau_dynamic * (1.0 - alpha)
+	        )
+	
+	        # Limite físico
+	        dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+	
+	    print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 	
 	    # ========================================================
 	    # Forecast
@@ -453,7 +455,6 @@ class ProductionHACModel:
 	        for _ in range(steps):
 	            tau_dyn = tau_rec_base * (1.0 + abs(dst_fut) / 100.0)
 	            alpha = np.exp(-dt_median / tau_dyn)
-	            # No forecast, usa-se o mesmo esquema de injeção (médio, apenas para referência)
 	            Q_fut = k_dst * np.sqrt(np.clip(hac_eff_fut / HAC_Q_SCALE, 0.0, 10.0))
 	            dst_fut = dst_fut * alpha - Q_fut * tau_dyn * (1.0 - alpha)
 	
