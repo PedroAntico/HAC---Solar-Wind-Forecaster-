@@ -414,7 +414,9 @@ class ProductionHACModel:
     
             # Normalização crítica (escala física)
             hac_scaled = hac_eff_val / HAC_Q_SCALE
-            hac_scaled = np.clip(hac_scaled, 0.0, 6.0)   # evita √ de valores extremos
+            hac_scaled = np.clip(hac_scaled, 0.0, 10.0)   # evita √ de valores extremos
+            if hac_scaled > 4:
+                Q_injection *= 1.3
             Q_raw = k_dst * np.sqrt(hac_scaled)
     
             # Suavização temporal da injeção
