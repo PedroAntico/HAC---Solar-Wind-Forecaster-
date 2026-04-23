@@ -479,7 +479,7 @@ class ProductionHACModel:
 		
 		    # Limite físico
 		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-		
+
 		print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
         # ========================================================
