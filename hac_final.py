@@ -431,20 +431,23 @@ class ProductionHACModel:
 		    elif hac_scaled < 6:
 		        Q_raw = k_dst * (hac_scaled ** 0.85)
 		    else:
-		        Q_raw = k_dst * (hac_scaled ** 1.3)
+		        Q_raw = k_dst * (hac_scaled ** 1.5)
 		
 		    # Diferenciação de regime físico
-		    if Bz[i] < -10:
-		        regime_factor = 1.8
-		    elif Bz[i] < -5:
-		        regime_factor = 1.3
-		    else:
-		        regime_factor = 0.9
+		    if Bz[i] < -15 and Vsw[i] > 600:
+			    regime_factor = 2.2
+			elif Bz[i] < -10:
+			    regime_factor = 1.6
+			elif Bz[i] < -5:
+			    regime_factor = 1.2
+			else:
+			    regime_factor = 0.8
 		
 		    Q_raw *= regime_factor
 		
 		    # Limitador físico (ESSENCIAL)
-		    Q_raw = np.clip(Q_raw, 0.0, 25.0)
+		    Q_limit = 20 + 5 * np.sqrt(hac_scaled)
+			Q_raw = np.clip(Q_raw, 0.0, Q_limit)
 		
 		    # Feedback controlado
 		    feedback = 1.0 + min(0.5, abs(dst_physical[i-1]) / 300.0)
