@@ -313,7 +313,7 @@ class ProductionHACModel:
                     print(f"     🚨 ALERTA em {alert['time']}: HAC={hac_total[i]:.1f}, dH/dt={dHAC_dt[i]:.1f} nT/h")
         return flags
 
-    def compute_hac_system(self, df):
+    def compute_hac_system(self, df, calibration_mode=False):
         print("\n⚡ Calculando sistema HAC+...")
         times = pd.to_datetime(df['time_tag']).values
         coupling = df['coupling_signal'].fillna(0).values
@@ -429,8 +429,10 @@ class ProductionHACModel:
         
             # Forcing contínuo (EVENTOS EXTREMOS)
             forcing = 0.0
-            if hac_scaled > 5 and Bz[i] < -12:
-                forcing = min(3.0, 1.5 * np.sqrt(hac_scaled)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
+
+            if not calibration_mode:
+                if hac_scaled > 5 and Bz[i] < -12:
+                    forcing = min(3.0, 1.5 * np.sqrt(hac_scaled)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
         
             # Decaimento
             alpha = np.exp(-dt_hours / tau_dynamic)
