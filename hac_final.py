@@ -660,7 +660,7 @@ class ProductionHACModel:
         report += f"  • Θ: {self.config.THETA_CRITICAL} nT/h\n  • H_G3: {self.config.HG3_THRESHOLD}\n"
         report += "="*70
         return report
-
+		
 # ============================================================
 # MAIN (EXEMPLO DE USO)
 # ============================================================
