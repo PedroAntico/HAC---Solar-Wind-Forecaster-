@@ -438,16 +438,17 @@ class ProductionHACModel:
 	
 	        # Diferenciação de regime físico
 	        if Bz[i] < -10:
-	            regime_factor = 2.5
+	            regime_factor = 1.8
 	        elif Bz[i] < -5:
 	            regime_factor = 1.3
 	        else:
 	            regime_factor = 0.9
 	
 	        Q_raw *= regime_factor
-	
+			Q_raw = np.clip(Q_raw, 0.0, 25.0)
+			
 	        # Feedback controlado
-	        feedback = 1.0 + min(1.0, abs(dst_physical[i-1]) / 200.0)
+	        feedback = 1.0 + min(0.5, abs(dst_physical[i-1]) / 300.0)
 	        Q_raw *= feedback
 	
 	        # Suavização temporal
@@ -460,7 +461,7 @@ class ProductionHACModel:
 	
 	        # Forcing controlado
 	        forcing = 0.0
-	        if hac_scaled > 6 and Bz[i] < -10:
+	        if hac_scaled > 8 and Bz[i] < -12:
 	            forcing = min(4.0, 1.8 * (hac_scaled ** 0.7)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
 	
 	        # Decaimento exponencial (Burton-like)
@@ -470,9 +471,12 @@ class ProductionHACModel:
 	        dst_physical[i] = (
 	            dst_physical[i-1] * alpha
 	            - Q_injection * tau_dynamic * (1.0 - alpha)
-	            - forcing * dt_hours
-	        )
-	
+	            - forcing * dt_hours)
+			
+			# freio físico (saturação do ring current)
+			if dst_physical[i] < -300:
+			    dst_physical[i] *= 0.98
+				
 	        # Limite físico
 	        dst_physical[i] = np.clip(dst_physical[i], -500, 50)
 	
