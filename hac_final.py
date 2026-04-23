@@ -418,12 +418,12 @@ class ProductionHACModel:
             Q_raw = k_dst * np.sqrt(hac_scaled)
     
             # Suavização temporal da injeção
-            Q_injection = 0.5 * Q_prev + 0.5 * Q_raw
+            Q_injection = 0.3 * Q_prev + 0.7 * Q_raw
             Q_prev = Q_injection
     
             # Pequeno boost para Bz extremamente negativo
-            if Bz[i] < 0:
-                Q_injection *= (1.0 + abs(Bz[i]) / 20.0)
+            if Bz[i] < -10:
+                Q_injection *= (1.0 + abs(Bz[i]) / 10.0)
     
             alpha = np.exp(-dt_hours / tau_dynamic)
             dst_raw = (dst_physical[i-1] * alpha
