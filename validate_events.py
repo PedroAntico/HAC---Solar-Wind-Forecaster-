@@ -355,7 +355,7 @@ def main():
     
     # FATORES DE CORREÇÃO EMPÍRICOS (compensam a dinâmica discreta de Burton)
     CORR_SCALE = 0.3      # reduz HAC_Q_SCALE → aumenta sensibilidade
-    CORR_K = 6.0          # aumenta k_dst → compensa atenuação
+    CORR_K = 12.0          # aumenta k_dst → compensa atenuação
     CORR_THR = 10.0       # eleva threshold → evita injeção em calmaria
     
     physics_config = HACPhysicsConfig()
