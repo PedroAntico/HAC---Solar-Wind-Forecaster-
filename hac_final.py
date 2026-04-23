@@ -404,41 +404,43 @@ class ProductionHACModel:
     
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-    
-            # Tau dinâmico: tempestades intensas recuperam mais lentamente
+        
+            # Tau dinâmico
             tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-    
-            # Injeção sublinear com escala corrigida
+        
+            # HAC efetivo
             hac_val = max(0.0, hac_eff[i])
             hac_eff_val = max(0.0, hac_val - hac_thr)
-    
-            # Normalização crítica (escala física)
+        
+            # Escala física
             hac_scaled = hac_eff_val / HAC_Q_SCALE
-            hac_scaled = np.clip(hac_scaled, 0.0, 10.0)   # evita √ de valores extremos
-            # Forcing contínuo para eventos extremos (CME-like)
+            hac_scaled = np.clip(hac_scaled, 0.0, 10.0)
+        
+            # Injeção principal
+            Q_raw = k_dst * np.sqrt(hac_scaled)
+        
+            # Suavização
+            Q_injection = 0.3 * Q_prev + 0.7 * Q_raw
+            Q_prev = Q_injection
+        
+            # Boost físico (cuidado: isso aqui é forte)
+            if Bz[i] < -10:
+                Q_injection *= (1.0 + abs(Bz[i]) / 20.0)
+        
+            # Forcing contínuo (EVENTOS EXTREMOS)
             forcing = 0.0
             if hac_scaled > 4 and Bz[i] < -10:
                 forcing = 2.0 * np.sqrt(hac_scaled)
-            
-            dst_raw = (dst_physical[i-1] * alpha
-                       - Q_injection * tau_dynamic * (1.0 - alpha)
-                       - forcing * dt_hours)
-            Q_raw = k_dst * np.sqrt(hac_scaled)
-    
-            # Suavização temporal da injeção
-            Q_injection = 0.3 * Q_prev + 0.7 * Q_raw
-            Q_prev = Q_injection
-    
-            # Pequeno boost para Bz extremamente negativo
-            if Bz[i] < -10:
-                Q_injection *= (1.0 + abs(Bz[i]) / 10.0)
-    
+        
+            # Decaimento
             alpha = np.exp(-dt_hours / tau_dynamic)
-            dst_raw = (dst_physical[i-1] * alpha
-                       - Q_injection * tau_dynamic * (1.0 - alpha))
-            dst_physical[i] = dst_raw
-    
-        dst_physical = np.clip(dst_physical, -500, 50)
+        
+            # Equação final (COM forcing)
+            dst_physical[i] = (
+                dst_physical[i-1] * alpha
+                - Q_injection * tau_dynamic * (1.0 - alpha)
+                - forcing * dt_hours
+            )
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
         # ============================================================
