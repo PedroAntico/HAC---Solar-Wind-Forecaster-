@@ -413,75 +413,75 @@ class ProductionHACModel:
 	    Q_prev = 0.0
 	
 	    for i in range(1, n):
-		    dt_hours = dt[i] / 3600.0
-		
-		    # Recuperação dinâmica (tempestades fortes recuperam mais devagar)
-		    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-		
-		    # HAC efetivo (transição simples e física)
-		    hac_val = max(0.0, hac_eff[i])
-		    hac_eff_val = max(0.0, hac_val - hac_thr)
-		
-		    # Escala física (limitada)
-		    hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
-		
-		    # Injeção por regime (TRÊS REGIMES)
-		    if hac_scaled < 2:
-		        Q_raw = k_dst * hac_scaled
-		    elif hac_scaled < 6:
-		        Q_raw = k_dst * (hac_scaled ** 0.85)
-		    else:
-		        Q_raw = k_dst * (hac_scaled ** 1.5)
-		
-		    # Diferenciação de regime físico
-		    if Bz[i] < -15 and Vsw[i] > 600:
-			    regime_factor = 2.2
-			elif Bz[i] < -10:
-			    regime_factor = 1.6
-			elif Bz[i] < -5:
-			    regime_factor = 1.2
-			else:
-			    regime_factor = 0.8
-		
-		    Q_raw *= regime_factor
-		
-		    # Limitador físico (ESSENCIAL)
-		    Q_limit = 20 + 5 * np.sqrt(hac_scaled)
-			Q_raw = np.clip(Q_raw, 0.0, Q_limit)
-		
-		    # Feedback controlado
-		    feedback = 1.0 + min(0.5, abs(dst_physical[i-1]) / 300.0)
-		    Q_raw *= feedback
-		
-		    # Suavização temporal
-		    Q_injection = 0.4 * Q_prev + 0.6 * Q_raw
-		    Q_prev = Q_injection
-		
-		    # Boost físico (Bz muito negativo)
-		    if Bz[i] < -10:
-		        Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
-		
-		    # Forcing controlado
-		    forcing = 0.0
-		    if hac_scaled > 8 and Bz[i] < -12:
-		        forcing = min(4.0, 1.8 * (hac_scaled ** 0.7)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
-		
-		    # Decaimento exponencial (Burton-like)
-		    alpha = np.exp(-dt_hours / tau_dynamic)
-		
-		    # Equação final do Dst
-		    dst_physical[i] = (
-		        dst_physical[i-1] * alpha
-		        - Q_injection * tau_dynamic * (1.0 - alpha)
-		        - forcing * dt_hours
-		    )
-		
-		    # Freio físico (saturação do ring current)
-		    if dst_physical[i] < -300:
-		        dst_physical[i] *= 0.98
-		
-		    # Limite físico
-		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+	    dt_hours = dt[i] / 3600.0
+	
+	    # Recuperação dinâmica
+	    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
+	
+	    # HAC efetivo
+	    hac_val = max(0.0, hac_eff[i])
+	    hac_eff_val = max(0.0, hac_val - hac_thr)
+	
+	    # Escala física
+	    hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
+	
+	    # Injeção por regime
+	    if hac_scaled < 2:
+	        Q_raw = k_dst * hac_scaled
+	    elif hac_scaled < 6:
+	        Q_raw = k_dst * (hac_scaled ** 0.85)
+	    else:
+	        Q_raw = k_dst * (hac_scaled ** 1.5)
+	
+	    # Regime físico
+	    if Bz[i] < -15 and Vsw[i] > 600:
+	        regime_factor = 2.2
+	    elif Bz[i] < -10:
+	        regime_factor = 1.6
+	    elif Bz[i] < -5:
+	        regime_factor = 1.2
+	    else:
+	        regime_factor = 0.8
+	
+	    Q_raw *= regime_factor
+	
+	    # Limitador físico
+	    Q_limit = 20 + 5 * np.sqrt(hac_scaled)
+	    Q_raw = np.clip(Q_raw, 0.0, Q_limit)
+	
+	    # Feedback
+	    feedback = 1.0 + min(0.5, abs(dst_physical[i-1]) / 300.0)
+	    Q_raw *= feedback
+	
+	    # Suavização
+	    Q_injection = 0.4 * Q_prev + 0.6 * Q_raw
+	    Q_prev = Q_injection
+	
+	    # Boost Bz
+	    if Bz[i] < -10:
+	        Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
+	
+	    # Forcing
+	    forcing = 0.0
+	    if hac_scaled > 8 and Bz[i] < -12:
+	        forcing = min(4.0, 1.8 * (hac_scaled ** 0.7)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
+	
+	    # Decaimento
+	    alpha = np.exp(-dt_hours / tau_dynamic)
+	
+	    # Equação Dst
+	    dst_physical[i] = (
+	        dst_physical[i-1] * alpha
+	        - Q_injection * tau_dynamic * (1.0 - alpha)
+	        - forcing * dt_hours
+	    )
+	
+	    # Saturação física
+	    if dst_physical[i] < -300:
+	        dst_physical[i] *= 0.98
+	
+	    # Limite final
+	    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
 	    print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 	
 	    # ========================================================
