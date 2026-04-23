@@ -426,41 +426,50 @@ class ProductionHACModel:
     
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-    
+        
+            # Tau dinâmico (recuperação mais lenta em tempestades profundas)
             tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-    
+        
+            # HAC efetivo (com transição suave tipo sigmoide)
             hac_val = max(0.0, hac_eff[i])
-            hac_eff_val = hac_val * (1.0 / (1.0 + np.exp(-(hac_val - hac_thr)/10.0)))
-    
+            hac_eff_val = hac_val * (1.0 / (1.0 + np.exp(-(hac_val - hac_thr) / 10.0)))
+        
+            # Escala não-linear (compressão + leve expansão)
             hac_scaled = np.clip((hac_eff_val / HAC_Q_SCALE) ** 1.2, 0.0, 25.0)
+        
+            # Injeção base (DEVE vir antes do feedback)
+            Q_raw = k_dst * np.sqrt(hac_scaled ** 0.7)
+        
+            # Feedback não-linear acoplado ao Dst (agora sim faz sentido físico)
             feedback = 1.0 + min(1.5, abs(dst_physical[i-1]) / 200.0)
             Q_raw *= feedback
-            Q_raw = k_dst * np.sqrt(hac_scaled**0.7)
-    
-            # suavização
+        
+            # Suavização temporal (evita explosão numérica)
             Q_injection = 0.75 * Q_prev + 0.25 * Q_raw
             Q_prev = Q_injection
-    
-            # boost físico leve
+        
+            # Boost físico leve para Bz muito negativo
             if Bz[i] < -10:
                 Q_injection *= (1.0 + abs(Bz[i]) / 20.0)
-    
-            # forcing controlado
+        
+            # Forcing adicional (eventos extremos, controlado)
             forcing = 0.0
             if hac_scaled > 5 and Bz[i] < -8:
                 forcing = min(5.0, 2.0 * (hac_scaled ** 0.6)) * np.exp(-abs(dst_physical[i-1]) / 250.0)
-    
+        
+            # Decaimento exponencial (Burton-like)
             alpha = np.exp(-dt_hours / tau_dynamic)
-    
+        
+            # Equação final do Dst
             dst_physical[i] = (
                 dst_physical[i-1] * alpha
                 - Q_injection * tau_dynamic * (1.0 - alpha)
                 - forcing * dt_hours
             )
-    
-            # proteção numérica
+        
+            # Proteção numérica
             dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-    
+        
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
         # ========================================================
