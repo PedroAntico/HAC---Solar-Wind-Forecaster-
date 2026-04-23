@@ -47,9 +47,9 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    HAC_Q_SCALE = 20.0
+    HAC_Q_SCALE = 50.0
     K_DST = 8.0
-    HAC_THR = 40.0
+    HAC_THR = 10.0
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
     DENSITY_MIN, DENSITY_MAX = 0.1, 100
@@ -432,7 +432,7 @@ class ProductionHACModel:
             hac_val = max(0.0, hac_eff[i])
             hac_eff_val = max(0.0, hac_val - hac_thr)
     
-            hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 20.0)
+            hac_scaled = np.clip((hac_eff_val / HAC_Q_SCALE) ** 1.2, 0.0, 25.0)
     
             Q_raw = k_dst * np.sqrt(hac_scaled**0.7)
     
