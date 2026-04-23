@@ -413,71 +413,72 @@ class ProductionHACModel:
 	    Q_prev = 0.0
 	
 	    for i in range(1, n):
-	        dt_hours = dt[i] / 3600.0
-	
-	        # Recuperação dinâmica (tempestades fortes recuperam mais devagar)
-	        tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-	
-	        # HAC efetivo (transição suave)
-	        hac_val = max(0.0, hac_eff[i])
-	        hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
-	
-	        # Escala física (limitada)
-	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
-	
-	        if hac_scaled < 2:
-			    # regime fraco (linear)
-			    Q_raw = k_dst * hac_scaled * 0.5
-			
-			elif hac_scaled < 6:
-			    # regime médio (sublinear)
-			    Q_raw = k_dst * (hac_scaled ** 0.85)
-			
-			else:
-			    # regime extremo (superlinear - ESSENCIAL)
-			    Q_raw = k_dst * (hac_scaled ** 1.3)
-	
-	        # 🔥 Diferenciação de regime físico (COMBO)
-	        if Bz[i] < -12 and Vsw[i] > 500:
-	            regime_factor = 2.5   # CME forte (antes 1.6)
-	        elif Bz[i] < -8:
-	            regime_factor = 1.2   # tempestade moderada
-	        else:
-	            regime_factor = 0.6   # HSS / fraco
-	
-	        Q_raw *= regime_factor
-	
-	        # Feedback controlado (agora permite até o dobro da injeção)
-	        feedback = 1.0 + min(1.0, abs(dst_physical[i-1]) / 200.0)
-	        Q_raw *= feedback
-	
-	        # Suavização temporal (estabilidade)
-	        Q_injection = 0.7 * Q_prev + 0.3 * Q_raw
-	        Q_prev = Q_injection
-	
-	        # Boost físico progressivo (Bz muito negativo)
-	        if Bz[i] < -10:
-	            Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
-	
-	        # Forcing controlado (eventos intensos) – teto 4.0 e expoente 0.7
-	        forcing = 0.0
-	        if hac_scaled > 6 and Bz[i] < -10:
-	            forcing = min(4.0, 1.8 * (hac_scaled ** 0.7)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
-	
-	        # Decaimento exponencial (Burton-like)
-	        alpha = np.exp(-dt_hours / tau_dynamic)
-	
-	        # Equação final do Dst
-	        dst_physical[i] = (
-	            dst_physical[i-1] * alpha
-	            - Q_injection * tau_dynamic * (1.0 - alpha)
-	            - forcing * dt_hours
-	        )
-	
-	        # Limite físico
-	        dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-	
-	    print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
+		    dt_hours = dt[i] / 3600.0
+		
+		    # Recuperação dinâmica (tempestades fortes recuperam mais devagar)
+		    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
+		
+		    # HAC efetivo (transição suave)
+		    hac_val = max(0.0, hac_eff[i])
+		    hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
+		
+		    # Escala física (limitada)
+		    hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
+		
+		    # Injeção por regime (CORRETO)
+		    if hac_scaled < 2:
+		        # regime fraco (linear)
+		        Q_raw = k_dst * hac_scaled * 0.5
+		
+		    elif hac_scaled < 6:
+		        # regime médio (sublinear)
+		        Q_raw = k_dst * (hac_scaled ** 0.85)
+		
+		    else:
+		        # regime extremo (superlinear)
+		        Q_raw = k_dst * (hac_scaled ** 1.3)
+		
+		    # Diferenciação de regime físico
+		    if Bz[i] < -12 and Vsw[i] > 500:
+		        regime_factor = 2.5
+		    elif Bz[i] < -8:
+		        regime_factor = 1.2
+		    else:
+		        regime_factor = 0.6
+		
+		    Q_raw *= regime_factor
+		
+		    # Feedback controlado
+		    feedback = 1.0 + min(1.0, abs(dst_physical[i-1]) / 200.0)
+		    Q_raw *= feedback
+		
+		    # Suavização temporal
+		    Q_injection = 0.7 * Q_prev + 0.3 * Q_raw
+		    Q_prev = Q_injection
+		
+		    # Boost físico (Bz muito negativo)
+		    if Bz[i] < -10:
+		        Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
+		
+		    # Forcing controlado
+		    forcing = 0.0
+		    if hac_scaled > 6 and Bz[i] < -10:
+		        forcing = min(4.0, 1.8 * (hac_scaled ** 0.7)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
+		
+		    # Decaimento exponencial (Burton-like)
+		    alpha = np.exp(-dt_hours / tau_dynamic)
+		
+		    # Equação final do Dst
+		    dst_physical[i] = (
+		        dst_physical[i-1] * alpha
+		        - Q_injection * tau_dynamic * (1.0 - alpha)
+		        - forcing * dt_hours
+		    )
+		
+		    # Limite físico
+		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+		
+		print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 	
 	    # ========================================================
 	    # Forecast
