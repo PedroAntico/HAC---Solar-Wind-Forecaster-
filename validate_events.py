@@ -347,7 +347,7 @@ def main():
     # Calcular campos físicos no treino
     df_train = PhysicalFieldsCalculator.compute_all_fields(df_train)
     model_temp = ProductionHACModel()
-    hac_train = model_temp.compute_hac_system(df_train)
+    hac_train = model_temp.compute_hac_system(df_train, calibration_mode=True)
     df_train['HAC_total'] = hac_train
 
     # Auto-calibração (retorna parâmetros brutos)
