@@ -432,9 +432,9 @@ class ProductionHACModel:
             hac_val = max(0.0, hac_eff[i])
             hac_eff_val = max(0.0, hac_val - hac_thr)
     
-            hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 10.0)
+            hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 20.0)
     
-            Q_raw = k_dst * np.sqrt(hac_scaled)
+            Q_raw = k_dst * np.sqrt(hac_scaled**0.7)
     
             # suavização
             Q_injection = 0.3 * Q_prev + 0.7 * Q_raw
@@ -442,12 +442,12 @@ class ProductionHACModel:
     
             # boost físico leve
             if Bz[i] < -10:
-                Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
+                Q_injection *= (1.0 + abs(Bz[i]) / 20.0)
     
             # forcing controlado
             forcing = 0.0
             if hac_scaled > 5 and Bz[i] < -12:
-                forcing = min(3.0, 1.5 * np.sqrt(hac_scaled)) * np.exp(-abs(dst_physical[i-1]) / 300.0)
+                forcing = min(5.0, 2.0 * (hac_scaled ** 0.6)) * np.exp(-abs(dst_physical[i-1]) / 250.0)
     
             alpha = np.exp(-dt_hours / tau_dynamic)
     
