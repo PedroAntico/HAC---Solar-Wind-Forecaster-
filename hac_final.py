@@ -420,7 +420,7 @@ class ProductionHACModel:
 	
 	        # HAC efetivo (transição suave)
 	        hac_val = max(0.0, hac_eff[i])
-	        hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
+	        hac_eff_val = max(0.0, hac_val - hac_thr)
 	
 	        # Escala física (limitada)
 	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
@@ -428,7 +428,7 @@ class ProductionHACModel:
 	        # Injeção por regime (TRÊS REGIMES)
 	        if hac_scaled < 2:
 	            # regime fraco (linear)
-	            Q_raw = k_dst * hac_scaled * 0.5
+	            Q_raw = k_dst * hac_scaled
 	        elif hac_scaled < 6:
 	            # regime médio (sublinear)
 	            Q_raw = k_dst * (hac_scaled ** 0.85)
@@ -437,12 +437,12 @@ class ProductionHACModel:
 	            Q_raw = k_dst * (hac_scaled ** 1.3)
 	
 	        # Diferenciação de regime físico
-	        if Bz[i] < -12 and Vsw[i] > 500:
+	        if Bz[i] < -10:
 	            regime_factor = 2.5
-	        elif Bz[i] < -8:
-	            regime_factor = 1.2
+	        elif Bz[i] < -5:
+	            regime_factor = 1.3
 	        else:
-	            regime_factor = 0.6
+	            regime_factor = 0.9
 	
 	        Q_raw *= regime_factor
 	
@@ -451,7 +451,7 @@ class ProductionHACModel:
 	        Q_raw *= feedback
 	
 	        # Suavização temporal
-	        Q_injection = 0.7 * Q_prev + 0.3 * Q_raw
+	        Q_injection = 0.4 * Q_prev + 0.6 * Q_raw
 	        Q_prev = Q_injection
 	
 	        # Boost físico (Bz muito negativo)
