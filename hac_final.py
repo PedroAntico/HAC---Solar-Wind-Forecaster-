@@ -411,7 +411,7 @@ class ProductionHACModel:
 		dst_physical[0] = -20.0
 		
 		for i in range(1, n):
-		    dt_hours = dt[i] / 3600.0
+			dt_hours = dt[i] / 3600.0
 		
 		    # Recuperação dinâmica (tempestades fortes demoram mais para se recuperar)
 		    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
@@ -430,10 +430,8 @@ class ProductionHACModel:
 		
 		    # Deixa o decaimento fazer o resto
 		    alpha = np.exp(-dt_hours / tau_dynamic)
-		    dst_physical[i] = (
-		        dst_physical[i-1] * alpha
-		        - Q_injection * tau_dynamic * (1.0 - alpha)
-		    )
+		    dst_physical[i] = (dst_physical[i-1] * alpha
+		        - Q_injection * tau_dynamic * (1.0 - alpha))
 		
 		    # Limite físico
 		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
