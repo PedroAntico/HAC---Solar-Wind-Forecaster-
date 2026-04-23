@@ -425,8 +425,8 @@ class ProductionHACModel:
         Q_prev = 0.0
     
        	for i in range(1, n):
-		   	dt_hours = dt[i] / 3600.0
-	
+		    dt_hours = dt[i] / 3600.0
+		
 		    # Recuperação dinâmica (tempestades fortes recuperam mais devagar)
 		    tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
 		
