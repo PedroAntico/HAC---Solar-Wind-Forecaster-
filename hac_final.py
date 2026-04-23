@@ -389,29 +389,6 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
     
         # ========================================================
-        # MODO CALIBRAÇÃO → NÃO CALCULA Dst
-        # ========================================================
-        if calibration_mode:
-            self.results.update({
-                'time': times,
-                'HAC_total': hac_total,
-                'dHAC_dt': dHAC_dt
-            })
-            return hac_total
-    
-        # ========================================================
-        # HAC efetivo (memória)
-        # ========================================================
-        tau_hac = 2.0
-        hac_eff = np.zeros(n)
-        hac_eff[0] = hac_total[0]
-    
-        for i in range(1, n):
-            dt_hours = dt[i] / 3600.0
-            alpha_hac = np.exp(-dt_hours / tau_hac)
-            hac_eff[i] = alpha_hac * hac_eff[i-1] + (1 - alpha_hac) * hac_total[i]
-    
-        # ========================================================
 		# Dst (Burton físico + forcing controlado)
 		# ========================================================
 		tau_rec_base = 10.0
@@ -479,7 +456,7 @@ class ProductionHACModel:
 		
 		    # Limite físico
 		    dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-
+		
 		print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
     
         # ========================================================
