@@ -437,7 +437,7 @@ class ProductionHACModel:
             Q_raw = k_dst * np.sqrt(hac_scaled**0.7)
     
             # suavização
-            Q_injection = 0.3 * Q_prev + 0.7 * Q_raw
+            Q_injection = 0.6 * Q_prev + 0.4 * Q_raw
             Q_prev = Q_injection
     
             # boost físico leve
