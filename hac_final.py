@@ -425,7 +425,7 @@ class ProductionHACModel:
         
             # Boost físico (cuidado: isso aqui é forte)
             if Bz[i] < -10:
-                Q_injection *= (1.0 + abs(Bz[i]) / 20.0)
+                Q_injection *= (1.0 + abs(Bz[i]) / 30.0)
         
             # Forcing contínuo (EVENTOS EXTREMOS)
             forcing = 0.0
