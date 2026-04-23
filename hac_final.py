@@ -425,12 +425,21 @@ class ProductionHACModel:
 	        # Escala física (limitada)
 	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 15.0)
 	
-	        # Injeção base (expoente 0.85 → mais agressivo que sqrt, sem perder estabilidade)
-	        Q_raw = k_dst * (hac_scaled ** 0.85)
+	        if hac_scaled < 2:
+			    # regime fraco (linear)
+			    Q_raw = k_dst * hac_scaled * 0.5
+			
+			elif hac_scaled < 6:
+			    # regime médio (sublinear)
+			    Q_raw = k_dst * (hac_scaled ** 0.85)
+			
+			else:
+			    # regime extremo (superlinear - ESSENCIAL)
+			    Q_raw = k_dst * (hac_scaled ** 1.3)
 	
 	        # 🔥 Diferenciação de regime físico (COMBO)
-	        if Bz[i] < -15 and Vsw[i] > 600:
-	            regime_factor = 2.2   # CME forte (antes 1.6)
+	        if Bz[i] < -12 and Vsw[i] > 500:
+	            regime_factor = 2.5   # CME forte (antes 1.6)
 	        elif Bz[i] < -8:
 	            regime_factor = 1.2   # tempestade moderada
 	        else:
