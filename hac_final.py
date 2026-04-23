@@ -429,8 +429,8 @@ class ProductionHACModel:
         
             # Forcing contínuo (EVENTOS EXTREMOS)
             forcing = 0.0
-            if hac_scaled > 4 and Bz[i] < -10:
-                forcing = 2.0 * np.sqrt(hac_scaled)
+            if hac_scaled > 5 and Bz[i] < -12:
+                forcing = min(3.0, 1.5 * np.sqrt(hac_scaled))
         
             # Decaimento
             alpha = np.exp(-dt_hours / tau_dynamic)
