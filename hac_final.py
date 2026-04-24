@@ -47,8 +47,8 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    HAC_Q_SCALE = 50.0
-    K_DST = 10.0
+    HAC_Q_SCALE = 120.0
+    K_DST = 1.50
     HAC_THR = 10.0
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -423,17 +423,14 @@ class ProductionHACModel:
 	        hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
 	
 	        # Escala o HAC para uma faixa de trabalho (~0 a 5)
-	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 5.0)
+	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 3.0)
 	
 	        # Injeção sublinear (expoente 0.7 para suavizar, mas sem achatar extremos)
 	        Q_injection = k_dst * (hac_scaled ** 0.7)
 	
 	        # Deixa o decaimento fazer o resto
 	        alpha = np.exp(-dt_hours / tau_dynamic)
-	        dst_physical[i] = (
-	            dst_physical[i-1] * alpha
-	            - Q_injection * tau_dynamic * (1.0 - alpha)
-	        )
+	        dst_physical[i] = dst_physical[i-1] + (Q_injection - dst_physical[i-1] / tau_dynamic) * dt_hours
 	
 	        # Limite físico
 	        dst_physical[i] = np.clip(dst_physical[i], -500, 50)
