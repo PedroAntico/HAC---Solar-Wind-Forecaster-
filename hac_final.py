@@ -47,8 +47,8 @@ class HACPhysicsConfig:
     # Escalas operacionais
     HAC_SCALE_MAX = 800.0
     HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    HAC_Q_SCALE = 120.0
-    K_DST = 1.50
+    HAC_Q_SCALE = 60.0
+    K_DST = 2.50
     HAC_THR = 10.0
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
