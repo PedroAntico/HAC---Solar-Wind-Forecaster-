@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão reestruturada e calibrada (maio/2026):
-- Dst físico Burton clássico (VBs) com Q_SCALE = -4.5 (literatura).
-- Termo de compressão Burton‑like (-0.3 * sqrt(Pdyn)).
-- TAU_BZ_MEMORY dinâmico por regime (CME=0.5h, HSS=2.5h, Quiet=1.0h).
-- HAC como índice operacional auxiliar, limiares calibráveis.
-- Forecast com persistência do driver VBs (média 2h).
-- Kp estimado a partir de Dst e dH/dt (provisório).
-- Boosts arbitrários removidos (opcionais via flags).
-- Pressão dinâmica corrigida (fórmula padrão).
+Versão calibrada e corrigida (maio/2026):
+- Erro de Pandas corrigido (conversão explícita para arrays).
+- Normalização do HAC removida temporariamente (thresholds baixos).
+- Q_SCALE = -2.2 (alinhado com literatura).
+- TAU_BZ dinâmico mantido.
+- Dst Burton clássico com compressão Burton‑like.
+- Forecast com persistência de VBs.
+- Kp estimado a partir de Dst e dH/dt.
 """
 
 import json
@@ -52,7 +51,7 @@ class HACPhysicsConfig:
     # Parâmetros do modelo de Dst (Burton calibrado)
     # ----------------------------------------------------------
     VBs_THRESHOLD = 0.5             # mV/m (limiar de ativação)
-    Q_SCALE = -4.5                  # nT/h por mV/m (literatura: -1.5 a -2)
+    Q_SCALE = -2.2                  # nT/h por mV/m (ajustado)
     TAU_DST = 10.0                  # horas (decaimento base)
 
     # ----------------------------------------------------------
@@ -71,14 +70,14 @@ class HACPhysicsConfig:
     # Escalas operacionais do HAC
     # ----------------------------------------------------------
     HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 150.0         # fator fixo de normalização
+    HAC_NORM_FACTOR = 150.0         # fator fixo de normalização (não aplicado agora)
 
-    # Limiares do HAC (provisórios, calibráveis)
-    HAC_G1 = 50
-    HAC_G2 = 120
-    HAC_G3 = 250
-    HAC_G4 = 450
-    HAC_G5 = 650
+    # Limiares do HAC (PROVISÓRIOS – calibrar com dados)
+    HAC_G1 = 2
+    HAC_G2 = 4
+    HAC_G3 = 6
+    HAC_G4 = 8
+    HAC_G5 = 10
 
     # ----------------------------------------------------------
     # Limites físicos
@@ -286,10 +285,10 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização com escala FIXA (sem percentil dinâmico)."""
-        norm = (values / self.config.HAC_NORM_FACTOR) * 150.0
-        norm = np.nan_to_num(norm, nan=0.0, posinf=800, neginf=0.0)
-        norm = np.clip(norm, 0, self.config.HAC_SCALE_MAX)
+        """Normalização removida temporariamente – usaremos valores brutos."""
+        # Como os reservatórios estão mais suaves, não normalizamos agora.
+        # Apenas garantimos que o HAC seja não-negativo e limitado.
+        norm = np.clip(values, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(norm):.1f}, méd: {np.mean(norm):.1f}")
         return norm
 
@@ -338,14 +337,6 @@ class ProductionHACModel:
                     self.escalation_triggers.append(alert)
         return flags
 
-    def calibrate_hac_thresholds(self, df_historical):
-        """Ajusta limiares do HAC com base em eventos históricos."""
-        for level, dst_thresh in [('G1', -50), ('G2', -100), ('G3', -150), ('G4', -200), ('G5', -300)]:
-            events = df_historical[df_historical['Dst_obs'] <= dst_thresh]
-            if len(events) > 0:
-                setattr(self.config, f'HAC_{level}', np.percentile(events['HAC_total'], 50))
-        print("Limiares do HAC recalibrados.")
-
     def compute_hac_system(self, df, calibration_mode=False):
         print("\n⚡ Calculando sistema HAC+...")
 
@@ -353,8 +344,11 @@ class ProductionHACModel:
         coupling = df['coupling_signal'].fillna(0).values
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
-        vbs = df.get('VBs', np.zeros_like(Bz))
-        pdyn = df.get('Pdyn', np.full_like(Bz, 3.0))
+
+        # CONVERSÃO EXPLÍCITA PARA ARRAYS (evita KeyError com Series)
+        vbs = df.get('VBs', pd.Series(np.zeros_like(Bz))).values
+        pdyn = df.get('Pdyn', pd.Series(np.full_like(Bz, 3.0))).values
+
         density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
 
         dt = self._safe_deltat(times)
@@ -418,7 +412,10 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-        hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
+        # HAC total (sem normalização – valores brutos para calibração)
+        hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
+        print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
+
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
 
@@ -441,7 +438,7 @@ class ProductionHACModel:
             # Termo de injeção Q (nT/h)
             Q_injection = q_scale * vbs_eff
 
-            # Compressão Burton-like (substitui termo logarítmico)
+            # Compressão Burton-like
             q_comp = -0.3 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
@@ -460,11 +457,9 @@ class ProductionHACModel:
         # ========================================================
         forecast = {}
         dt_median = np.median(dt) / 3600.0
-        # Persistência: média das últimas 2 horas de VBs
         window_persist = min(120, n)
         vbs_persist = np.mean(vbs[-window_persist:]) if window_persist > 0 else vbs[-1]
-        # Pressão dinâmica persistente (último valor)
-        pdyn_persist = pdyn[-1]
+        pdyn_persist = pdyn[-1]   # agora pdyn é array, funciona
 
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
@@ -543,7 +538,6 @@ class ProductionHACModel:
         elif dhdt > 120 and bz < -8 and v > 600 and sev < 4:
             final, sev_f = "G4 (Strong Nowcast)", 4
 
-        # Fator de confiança simples (número de critérios atendidos)
         confidence = min(1.0, score / 20.0)
 
         return final, {'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
@@ -575,7 +569,7 @@ class ProductionHACModel:
         Bz = self.results.get('Bz', np.zeros_like(hac_values))
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
-        # Estimativa de Kp melhorada (baseada em Dst e dH/dt)
+        # Estimativa de Kp melhorada
         kp_from_dst = np.clip(0.3 * np.sqrt(abs(dst_min)) + 0.5 * np.sqrt(max(0, np.abs(dHAC_dt[-1]))), 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
@@ -622,14 +616,15 @@ class ProductionHACModel:
             for h, val in forecast.items():
                 print(f"       {h}: {val:.1f} nT")
 
+        # Probabilidades com thresholds provisórios
         last_hac = hac_values[-1]
         probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
         if last_hac >= self.config.HAC_G1:
-            if last_hac < self.config.HAC_G2: probs['G1'] = min(1.0, (last_hac - 50) / 70)
-            elif last_hac < self.config.HAC_G3: probs['G2'] = min(1.0, (last_hac - 120) / 130)
-            elif last_hac < self.config.HAC_G4: probs['G3'] = min(1.0, (last_hac - 250) / 200)
-            elif last_hac < self.config.HAC_G5: probs['G4'] = min(1.0, (last_hac - 450) / 200)
-            else: probs['G5'] = min(1.0, (last_hac - 650) / 150)
+            if last_hac < self.config.HAC_G2: probs['G1'] = min(1.0, (last_hac - self.config.HAC_G1) / 2)
+            elif last_hac < self.config.HAC_G3: probs['G2'] = min(1.0, (last_hac - self.config.HAC_G2) / 2)
+            elif last_hac < self.config.HAC_G4: probs['G3'] = min(1.0, (last_hac - self.config.HAC_G3) / 2)
+            elif last_hac < self.config.HAC_G5: probs['G4'] = min(1.0, (last_hac - self.config.HAC_G4) / 2)
+            else: probs['G5'] = min(1.0, (last_hac - self.config.HAC_G5) / 2)
         print("   • Probabilidades (baseadas no HAC):")
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
