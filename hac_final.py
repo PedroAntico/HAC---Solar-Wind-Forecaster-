@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão calibrada e corrigida (maio/2026):
-- Erro de Pandas corrigido (conversão explícita para arrays).
-- Normalização do HAC removida temporariamente (thresholds baixos).
-- Q_SCALE = -2.2 (alinhado com literatura).
-- TAU_BZ dinâmico mantido.
-- Dst Burton clássico com compressão Burton‑like.
-- Forecast com persistência de VBs.
+Versão com correções físicas e estruturais (maio/2026):
+- Burton clássico com Bz real (sem memória) – responde a choques de CME.
+- HAC/Nowcast continuam usando bz_eff (com persistência).
+- TAU_BZ_CME = 0.1 h (preserva picos impulsivos).
+- Q_SCALE = -2.2 (próximo à literatura), compressão Burton‑like.
+- HAC sem normalização forçada, thresholds provisórios baixos.
+- Forecast com persistência do driver VBs real.
 - Kp estimado a partir de Dst e dH/dt.
 """
 
@@ -21,80 +21,66 @@ from scipy.signal import savgol_filter
 # CONFIGURAÇÃO FÍSICA (CALIBRADA)
 # ============================================================
 class HACPhysicsConfig:
-    # ----------------------------------------------------------
     # Tempos característicos (horas)
-    # ----------------------------------------------------------
     TAU_RING_CURRENT_QUIET = 10.0
     TAU_RING_CURRENT_HSS = 6.0
     TAU_RING_CURRENT_CME = 3.0
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
 
-    # Persistência do Bz (dinâmica, mas defaults)
+    # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.5
+    TAU_BZ_CME = 0.1            # resposta quase instantânea a choques
 
-    # ----------------------------------------------------------
-    # Escalas físicas FIXAS (não dependem do dataset)
-    # ----------------------------------------------------------
-    E_FIELD_REF = 5.0               # mV/m (valor típico de acoplamento)
-    NEWELL_REF = 1e4                # escala de referência para Newell
-    PRESSURE_REF = 3.0              # nPa (pressão dinâmica típica)
+    # Escalas físicas fixas
+    E_FIELD_REF = 5.0           # mV/m
+    NEWELL_REF = 1e4
+    PRESSURE_REF = 3.0          # nPa
 
     # Saturações
-    E_FIELD_SATURATION = 35.0       # mV/m
+    E_FIELD_SATURATION = 35.0   # mV/m
     KP_SATURATION = 9.0
-    RING_CURRENT_MAX = 800.0        # nT
+    RING_CURRENT_MAX = 800.0    # nT
 
-    # ----------------------------------------------------------
-    # Parâmetros do modelo de Dst (Burton calibrado)
-    # ----------------------------------------------------------
-    VBs_THRESHOLD = 0.5             # mV/m (limiar de ativação)
-    Q_SCALE = -2.2                  # nT/h por mV/m (ajustado)
-    TAU_DST = 10.0                  # horas (decaimento base)
+    # Parâmetros do modelo Burton (calibrados)
+    VBs_THRESHOLD = 0.5         # mV/m
+    Q_SCALE = -2.2              # nT/h por mV/m
+    TAU_DST = 10.0              # horas
 
-    # ----------------------------------------------------------
     # Partição de energia (reservatórios HAC)
-    # ----------------------------------------------------------
     ALPHA_RING = 0.4
     ALPHA_SUBSTORM = 0.3
     ALPHA_IONOSPHERE = 0.3
 
-    # Acoplamento não-linear (mantido para HAC)
+    # Acoplamento não‑linear (para HAC)
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 2.0        # mV/m
+    COUPLING_THRESHOLD = 2.0    # mV/m
     NEWELL_SCALE = 5e-4
 
-    # ----------------------------------------------------------
-    # Escalas operacionais do HAC
-    # ----------------------------------------------------------
-    HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 150.0         # fator fixo de normalização (não aplicado agora)
+    # Escalas operacionais do HAC (provisórias)
+    HAC_SCALE_MAX = 200.0       # ajustado para valores brutos
+    HAC_NORM_FACTOR = 150.0     # não aplicado agora
 
-    # Limiares do HAC (PROVISÓRIOS – calibrar com dados)
+    # Limiares do HAC (provisórios – calibrar com dados)
     HAC_G1 = 2
     HAC_G2 = 4
     HAC_G3 = 6
     HAC_G4 = 8
     HAC_G5 = 10
 
-    # ----------------------------------------------------------
     # Limites físicos
-    # ----------------------------------------------------------
     VSW_MIN, VSW_MAX = 200, 1500
     DENSITY_MIN, DENSITY_MAX = 0.1, 100
     BZ_MIN, BZ_MAX = -100, 100
 
-    # ----------------------------------------------------------
     # Nowcast + Inércia
-    # ----------------------------------------------------------
-    THETA_CRITICAL = 50.0           # nT/h
+    THETA_CRITICAL = 50.0       # nT/h
     HG3_THRESHOLD = 150.0
     VSW_CRITICAL = 700.0
     BZ_CRITICAL = -8.0
 
-    # Flags para boosts (desabilitados por padrão)
+    # Flags para boosts (desabilitados)
     USE_BZ_BOOST = False
     USE_REGIME_BOOST = False
 
@@ -177,7 +163,7 @@ class RobustOMNIProcessor:
 
 
 # ============================================================
-# 2. CÁLCULO DE CAMPOS FÍSICOS (COM TAU_BZ DINÂMICO)
+# 2. CÁLCULO DE CAMPOS FÍSICOS
 # ============================================================
 class PhysicalFieldsCalculator:
     @staticmethod
@@ -189,7 +175,7 @@ class PhysicalFieldsCalculator:
         density = df['density'].fillna(5).values
 
         # ------------------------------------------------------------
-        # Bz efetivo com TAU_BZ DINÂMICO por regime
+        # Bz efetivo com TAU_BZ DINÂMICO (para HAC/Nowcast)
         # ------------------------------------------------------------
         time_sec = pd.to_datetime(df['time_tag']).values.astype('datetime64[s]')
         dt_sec = np.diff(time_sec).astype(float)
@@ -200,7 +186,6 @@ class PhysicalFieldsCalculator:
         bz_eff = np.zeros_like(bz)
         bz_eff[0] = bz_neg[0]
 
-        # Precisamos do regime para cada instante
         regimes = np.array([_detect_regime_scalar(v[i], density[i], bz[i]) for i in range(len(bz))])
 
         for i in range(1, len(bz)):
@@ -214,20 +199,27 @@ class PhysicalFieldsCalculator:
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
 
-        bz_eff = np.clip(bz_eff, -50.0, 0.0)
+        # Correção: apenas garante que bz_eff não seja positivo
+        bz_eff = np.minimum(bz_eff, 0.0)
 
         # ------------------------------------------------------------
-        # Driver primário do Dst: VBs (V * Bz_sul)
+        # Driver Burton: VBs com Bz REAL (sem memória)
         # ------------------------------------------------------------
-        bz_south = np.maximum(0, -bz_eff)
-        vbs = v * bz_south * 1e-3                       # mV/m
-        vbs = np.clip(vbs, 0, config.E_FIELD_SATURATION)
-        df['VBs'] = vbs
+        bz_south_real = np.maximum(0, -bz)
+        vbs_real = v * bz_south_real * 1e-3
+        vbs_real = np.clip(vbs_real, 0, config.E_FIELD_SATURATION)
+        df['VBs_real'] = vbs_real
+
+        # VBs efetivo (com bz_eff) para HAC/Nowcast
+        bz_south_eff = np.maximum(0, -bz_eff)
+        vbs_eff = v * bz_south_eff * 1e-3
+        vbs_eff = np.clip(vbs_eff, 0, config.E_FIELD_SATURATION)
+        df['VBs_eff'] = vbs_eff
 
         # ------------------------------------------------------------
         # Pressão dinâmica CORRIGIDA (nPa)
         # ------------------------------------------------------------
-        pdyn = 1.6726e-6 * density * (v ** 2)          # nPa
+        pdyn = 1.6726e-6 * density * (v ** 2)
         df['Pdyn'] = pdyn
 
         # ------------------------------------------------------------
@@ -239,14 +231,12 @@ class PhysicalFieldsCalculator:
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
         coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
 
-        # Acoplamento não-linear via campo elétrico
         e_field = (-bz_eff) * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
         thr = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
         coupling_nl = np.where(e_sat <= thr, e_sat, thr * ((e_sat / thr) ** beta))
 
-        # Combinado para HAC
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
         coupling_signal = np.clip(coupling_signal, 0, 20)
@@ -257,14 +247,14 @@ class PhysicalFieldsCalculator:
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
         print(f"   • Bz eff min: {bz_eff.min():.1f} nT")
         print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
-        print(f"   • VBs max: {vbs.max():.2f} mV/m")
+        print(f"   • VBs real max: {vbs_real.max():.2f} mV/m")
         print(f"   • Pdyn max: {pdyn.max():.1f} nPa")
 
         return df
 
 
 # ============================================================
-# 3. MODELO HAC+ (Dst BURTON CLÁSSICO + HAC AUXILIAR)
+# 3. MODELO HAC+
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None):
@@ -285,9 +275,7 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização removida temporariamente – usaremos valores brutos."""
-        # Como os reservatórios estão mais suaves, não normalizamos agora.
-        # Apenas garantimos que o HAC seja não-negativo e limitado.
+        """Normalização removida – usamos valores brutos."""
         norm = np.clip(values, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(norm):.1f}, méd: {np.mean(norm):.1f}")
         return norm
@@ -345,8 +333,9 @@ class ProductionHACModel:
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
 
-        # CONVERSÃO EXPLÍCITA PARA ARRAYS (evita KeyError com Series)
-        vbs = df.get('VBs', pd.Series(np.zeros_like(Bz))).values
+        # Driver Burton (Bz REAL) – array NumPy
+        vbs_real = df.get('VBs_real', pd.Series(np.zeros_like(Bz))).values
+        # Pressão dinâmica – array NumPy
         pdyn = df.get('Pdyn', pd.Series(np.full_like(Bz, 3.0))).values
 
         density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
@@ -355,7 +344,7 @@ class ProductionHACModel:
         n = len(times)
 
         # ========================================================
-        # Reservatórios HAC (mantidos como indicador auxiliar)
+        # Reservatórios HAC (indicador auxiliar)
         # ========================================================
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
@@ -372,7 +361,6 @@ class ProductionHACModel:
                 baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
 
-            # Boosts opcionais (desabilitados por padrão)
             if self.config.USE_BZ_BOOST and Bz[i] < -5:
                 injection *= (1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0))
 
@@ -412,7 +400,7 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-        # HAC total (sem normalização – valores brutos para calibração)
+        # HAC total (sem normalização, valores brutos)
         hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
 
@@ -420,7 +408,7 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
 
         # ========================================================
-        # Dst FÍSICO (Burton clássico dirigido por VBs)
+        # Dst Burton (VBs REAL, sem memória)
         # ========================================================
         tau_dst_base = self.config.TAU_DST
         q_scale = self.config.Q_SCALE
@@ -432,17 +420,13 @@ class ProductionHACModel:
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
 
-            # Driver de injeção: VBs acima do limiar
-            vbs_eff = max(0.0, vbs[i] - vbs_thr)
+            vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
+            Q_injection = q_scale * vbs_eff_val
 
-            # Termo de injeção Q (nT/h)
-            Q_injection = q_scale * vbs_eff
-
-            # Compressão Burton-like
+            # Compressão Burton‑like
             q_comp = -0.3 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
-            # Decaimento dinâmico (tempestades fortes recuperam mais devagar)
             tau_dynamic = tau_dst_base * (1.0 + abs(dst_physical[i-1]) / 150.0)
             alpha = np.exp(-dt_hours / tau_dynamic)
 
@@ -453,13 +437,13 @@ class ProductionHACModel:
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
         # ========================================================
-        # Forecast com persistência do driver (VBs)
+        # Forecast com persistência do driver (VBs REAL)
         # ========================================================
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         window_persist = min(120, n)
-        vbs_persist = np.mean(vbs[-window_persist:]) if window_persist > 0 else vbs[-1]
-        pdyn_persist = pdyn[-1]   # agora pdyn é array, funciona
+        vbs_persist = np.mean(vbs_real[-window_persist:]) if window_persist > 0 else vbs_real[-1]
+        pdyn_persist = pdyn[-1]
 
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
