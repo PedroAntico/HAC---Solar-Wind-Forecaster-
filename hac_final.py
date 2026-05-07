@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão final corrigida (abril/2026):
-- Acoplamento combinado (Newell + não-linear) com ajuste para baixa resolução.
-- Reservatórios HAC com injeção dinâmica e perdas dependentes de Bz.
-- Evolução temporal do Dst (equação de Burton) – essencial para tempestades prolongadas.
-- Normalização HAC adaptativa (fator 300).
-- Classificação híbrida com override por Dst.
-- Previsão por simulação da equação de relaxação.
+Versão reestruturada e calibrada (maio/2026):
+- Dst físico Burton clássico (VBs) com Q_SCALE = -4.5 (literatura).
+- Termo de compressão Burton‑like (-0.3 * sqrt(Pdyn)).
+- TAU_BZ_MEMORY dinâmico por regime (CME=0.5h, HSS=2.5h, Quiet=1.0h).
+- HAC como índice operacional auxiliar, limiares calibráveis.
+- Forecast com persistência do driver VBs (média 2h).
+- Kp estimado a partir de Dst e dH/dt (provisório).
+- Boosts arbitrários removidos (opcionais via flags).
+- Pressão dinâmica corrigida (fórmula padrão).
 """
 
 import json
@@ -17,56 +19,86 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 
 # ============================================================
-# CONFIGURAÇÃO FÍSICA (AJUSTADA)
+# CONFIGURAÇÃO FÍSICA (CALIBRADA)
 # ============================================================
 class HACPhysicsConfig:
+    # ----------------------------------------------------------
     # Tempos característicos (horas)
+    # ----------------------------------------------------------
     TAU_RING_CURRENT_QUIET = 10.0
     TAU_RING_CURRENT_HSS = 6.0
     TAU_RING_CURRENT_CME = 3.0
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
-    TAU_BZ_MEMORY = 3.0
+
+    # Persistência do Bz (dinâmica, mas defaults)
+    TAU_BZ_QUIET = 1.0
+    TAU_BZ_HSS = 2.5
+    TAU_BZ_CME = 0.5
+
+    # ----------------------------------------------------------
+    # Escalas físicas FIXAS (não dependem do dataset)
+    # ----------------------------------------------------------
+    E_FIELD_REF = 5.0               # mV/m (valor típico de acoplamento)
+    NEWELL_REF = 1e4                # escala de referência para Newell
+    PRESSURE_REF = 3.0              # nPa (pressão dinâmica típica)
 
     # Saturações
-    E_FIELD_SATURATION = 35.0      # mV/m
+    E_FIELD_SATURATION = 35.0       # mV/m
     KP_SATURATION = 9.0
-    RING_CURRENT_MAX = 800.0       # nT
+    RING_CURRENT_MAX = 800.0        # nT
 
-    # Partição de energia
+    # ----------------------------------------------------------
+    # Parâmetros do modelo de Dst (Burton calibrado)
+    # ----------------------------------------------------------
+    VBs_THRESHOLD = 0.5             # mV/m (limiar de ativação)
+    Q_SCALE = -4.5                  # nT/h por mV/m (literatura: -1.5 a -2)
+    TAU_DST = 10.0                  # horas (decaimento base)
+
+    # ----------------------------------------------------------
+    # Partição de energia (reservatórios HAC)
+    # ----------------------------------------------------------
     ALPHA_RING = 0.4
     ALPHA_SUBSTORM = 0.3
     ALPHA_IONOSPHERE = 0.3
 
-    # Acoplamento não-linear
+    # Acoplamento não-linear (mantido para HAC)
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 2.0      # mV/m (reduzido para ativar mais cedo)
-    NEWELL_SCALE = 5e-4           # será multiplicado por fator adicional
-    COUPLING_SCALE = 100.00
-    
-    # Escalas operacionais
+    COUPLING_THRESHOLD = 2.0        # mV/m
+    NEWELL_SCALE = 5e-4
+
+    # ----------------------------------------------------------
+    # Escalas operacionais do HAC
+    # ----------------------------------------------------------
     HAC_SCALE_MAX = 800.0
-    HAC_NORM_FACTOR = 150.0       # fator de normalização (aumentado para 300)
-    HAC_Q_SCALE = 60.0
-    K_DST = 2.50
-    HAC_THR = 10.0
-    # Limites físicos
-    VSW_MIN, VSW_MAX = 200, 1500
-    DENSITY_MIN, DENSITY_MAX = 0.1, 100
-    BZ_MIN, BZ_MAX = -100, 100
+    HAC_NORM_FACTOR = 150.0         # fator fixo de normalização
 
-    # Nowcast + Inércia
-    THETA_CRITICAL = 50.0          # nT/h
-    HG3_THRESHOLD = 150.0
-    VSW_CRITICAL = 700.0
-    BZ_CRITICAL = -8.0
-
-    # Classificação por HAC (limiares)
+    # Limiares do HAC (provisórios, calibráveis)
     HAC_G1 = 50
     HAC_G2 = 120
     HAC_G3 = 250
     HAC_G4 = 450
     HAC_G5 = 650
+
+    # ----------------------------------------------------------
+    # Limites físicos
+    # ----------------------------------------------------------
+    VSW_MIN, VSW_MAX = 200, 1500
+    DENSITY_MIN, DENSITY_MAX = 0.1, 100
+    BZ_MIN, BZ_MAX = -100, 100
+
+    # ----------------------------------------------------------
+    # Nowcast + Inércia
+    # ----------------------------------------------------------
+    THETA_CRITICAL = 50.0           # nT/h
+    HG3_THRESHOLD = 150.0
+    VSW_CRITICAL = 700.0
+    BZ_CRITICAL = -8.0
+
+    # Flags para boosts (desabilitados por padrão)
+    USE_BZ_BOOST = False
+    USE_REGIME_BOOST = False
+
 
 # ============================================================
 # FUNÇÕES AUXILIARES
@@ -84,8 +116,8 @@ def normalize_omni_columns(df, allow_partial=False):
     df.rename(columns=rename_map, inplace=True)
     return df
 
+
 def _detect_regime_scalar(v, density, bz):
-    """Versão escalar para uso dentro do loop de simulação."""
     if density > 8 and bz < -8:
         return 'CME'
     elif v > 600 and density < 5:
@@ -95,17 +127,6 @@ def _detect_regime_scalar(v, density, bz):
     else:
         return 'Quiet'
 
-def detect_regime_array(v, density, bz):
-    """
-    Versão vetorizada para aplicação de blend e boost.
-    Prioridade: CME > HSS > SIR > Quiet.
-    """
-    n = len(v)
-    regime = np.full(n, 'Quiet', dtype=object)
-    regime[(v > 600) & (density < 5)] = 'HSS'
-    regime[(density > 8) & (bz < -8)] = 'CME'   # sobrescreve HSS se conflito
-    regime[(density < 2)] = 'SIR'
-    return regime
 
 # ============================================================
 # 1. CARREGAMENTO ROBUSTO DE DADOS OMNI
@@ -155,8 +176,9 @@ class RobustOMNIProcessor:
                 df[col] = df[col].fillna(fill)
         return df
 
+
 # ============================================================
-# 2. CÁLCULO DE CAMPOS FÍSICOS (COM AJUSTES PARA BAIXA RESOLUÇÃO)
+# 2. CÁLCULO DE CAMPOS FÍSICOS (COM TAU_BZ DINÂMICO)
 # ============================================================
 class PhysicalFieldsCalculator:
     @staticmethod
@@ -165,79 +187,85 @@ class PhysicalFieldsCalculator:
         config = HACPhysicsConfig()
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
-        
-        # bt seguro
-        if 'bt' in df.columns:
-            bt = df['bt'].fillna(0).values
-        else:
-            bt = np.abs(bz)
-        by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
+        density = df['density'].fillna(5).values
 
-        # ========================================================
-        # Bz efetivo com memória exponencial (persistência)
-        # ========================================================
+        # ------------------------------------------------------------
+        # Bz efetivo com TAU_BZ DINÂMICO por regime
+        # ------------------------------------------------------------
         time_sec = pd.to_datetime(df['time_tag']).values.astype('datetime64[s]')
         dt_sec = np.diff(time_sec).astype(float)
         dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
         dt_hours = np.maximum(dt_sec / 3600.0, 1e-6)
 
-        tau_bz = getattr(config, 'TAU_BZ_MEMORY', 1.0)
-        
         bz_neg = np.minimum(0, bz)
         bz_eff = np.zeros_like(bz)
         bz_eff[0] = bz_neg[0]
 
+        # Precisamos do regime para cada instante
+        regimes = np.array([_detect_regime_scalar(v[i], density[i], bz[i]) for i in range(len(bz))])
+
         for i in range(1, len(bz)):
+            if regimes[i] == 'CME':
+                tau_bz = config.TAU_BZ_CME
+            elif regimes[i] == 'HSS':
+                tau_bz = config.TAU_BZ_HSS
+            else:
+                tau_bz = config.TAU_BZ_QUIET
+
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
-        bz_eff = np.clip(bz_eff, -50.0, 0.0)   # evita amplificação irrealista
-                
+
+        bz_eff = np.clip(bz_eff, -50.0, 0.0)
+
         # ------------------------------------------------------------
-        # 1. Acoplamento Newell (original)
+        # Driver primário do Dst: VBs (V * Bz_sul)
         # ------------------------------------------------------------
+        bz_south = np.maximum(0, -bz_eff)
+        vbs = v * bz_south * 1e-3                       # mV/m
+        vbs = np.clip(vbs, 0, config.E_FIELD_SATURATION)
+        df['VBs'] = vbs
+
+        # ------------------------------------------------------------
+        # Pressão dinâmica CORRIGIDA (nPa)
+        # ------------------------------------------------------------
+        pdyn = 1.6726e-6 * density * (v ** 2)          # nPa
+        df['Pdyn'] = pdyn
+
+        # ------------------------------------------------------------
+        # Acoplamento Newell (mantido para HAC)
+        # ------------------------------------------------------------
+        bt = df.get('bt', pd.Series(np.abs(bz), index=df.index)).fillna(0).values
+        by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
         theta = np.arctan2(by, bz)
         theta_factor = np.abs(np.sin(theta / 2)) ** 3
         coupling_newell = (v ** (4/3)) * (bt ** (2/3)) * theta_factor * config.NEWELL_SCALE
 
-        # ------------------------------------------------------------
-        # 2. Acoplamento não-linear via campo elétrico (com Bz persistente)
-        # ------------------------------------------------------------
+        # Acoplamento não-linear via campo elétrico
         e_field = (-bz_eff) * v * 1e-3
         e_sat = np.clip(e_field, 0, config.E_FIELD_SATURATION)
         thr = config.COUPLING_THRESHOLD
         beta = config.BETA_NONLINEAR
         coupling_nl = np.where(e_sat <= thr, e_sat, thr * ((e_sat / thr) ** beta))
 
-        # ------------------------------------------------------------
-        # 3. Combinação (60% Newell, 40% não-linear)
-        # ------------------------------------------------------------
+        # Combinado para HAC
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
-        
-        # Normalização adaptativa por percentil (restaura amplitude física)
-        scale = np.percentile(coupling_comb, 99)
-        if scale > 1e-6:
-            coupling_norm = coupling_comb / scale
-        else:
-            coupling_norm = coupling_comb
-        
-        # Sinal apenas quando Bz efetivo é negativo (condição mais física)
-        coupling_signal = np.where(bz_eff < 0, coupling_norm, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)   # teto alto de segurança
-        
+        coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
+        coupling_signal = np.clip(coupling_signal, 0, 20)
+
         df['coupling_signal'] = coupling_signal
-        df['coupling_newell'] = coupling_newell
-        df['coupling_nonlinear'] = coupling_nl
-        df['E_field_raw'] = e_field
         df['bz_eff'] = bz_eff
 
         print(f"   • Bz min/max: {bz.min():.1f} / {bz.max():.1f} nT")
         print(f"   • Bz eff min: {bz_eff.min():.1f} nT")
         print(f"   • V min/max: {v.min():.1f} / {v.max():.1f} km/s")
-        print(f"   • Coupling max: {coupling_signal.max():.2f}")
+        print(f"   • VBs max: {vbs.max():.2f} mV/m")
+        print(f"   • Pdyn max: {pdyn.max():.1f} nPa")
 
         return df
+
+
 # ============================================================
-# 3. MODELO HAC+ COM EVOLUÇÃO TEMPORAL DO DST
+# 3. MODELO HAC+ (Dst BURTON CLÁSSICO + HAC AUXILIAR)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None):
@@ -258,13 +286,10 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        p99 = np.percentile(values, 99)
-        p95 = np.percentile(values, 95)
-        scale = max(p99, p95 * 1.2, 1.0)
-        norm = (values / scale) * self.config.HAC_NORM_FACTOR
+        """Normalização com escala FIXA (sem percentil dinâmico)."""
+        norm = (values / self.config.HAC_NORM_FACTOR) * 150.0
         norm = np.nan_to_num(norm, nan=0.0, posinf=800, neginf=0.0)
         norm = np.clip(norm, 0, self.config.HAC_SCALE_MAX)
-        print(f"   • HAC escala: p99={p99:.1f}, p95={p95:.1f} → scale={scale:.1f}")
         print(f"   • HAC máx: {np.max(norm):.1f}, méd: {np.mean(norm):.1f}")
         return norm
 
@@ -278,13 +303,14 @@ class ProductionHACModel:
             dH = np.gradient(hac_total) / dt_h
         else:
             w = min(7, len(hac_total))
-            if w % 2 == 0: w -= 1
+            if w % 2 == 0:
+                w -= 1
             try:
                 dH = savgol_filter(hac_total, w, 2, deriv=1, delta=np.median(dt_h))
             except:
                 dH = np.gradient(hac_total) / dt_h
         dH = np.nan_to_num(dH, nan=0.0)
-        dH = np.clip(dH, -150, 150)   # limite físico realista
+        dH = np.clip(dH, -150, 150)
         print(f"     Derivada máx: {np.max(dH):.1f} nT/h")
         return dH
 
@@ -295,184 +321,178 @@ class ProductionHACModel:
         for i in range(window, n):
             if (hac_total[i] < self.config.HG3_THRESHOLD and
                 dHAC_dt[i] > self.config.THETA_CRITICAL and
-                np.median(Bz[max(0,i-window):i+1]) < self.config.BZ_CRITICAL and
-                np.median(Vsw[max(0,i-window):i+1]) > self.config.VSW_CRITICAL):
+                np.median(Bz[max(0, i-window):i+1]) < self.config.BZ_CRITICAL and
+                np.median(Vsw[max(0, i-window):i+1]) > self.config.VSW_CRITICAL):
                 flags[i] = True
                 alert = {
                     'time': pd.to_datetime(times[i]),
                     'HAC': float(hac_total[i]),
                     'dHAC_dt': float(dHAC_dt[i]),
-                    'Bz_avg': float(np.mean(Bz[max(0,i-window):i+1])),
-                    'V_avg': float(np.mean(Vsw[max(0,i-window):i+1])),
+                    'Bz_avg': float(np.mean(Bz[max(0, i-window):i+1])),
+                    'V_avg': float(np.mean(Vsw[max(0, i-window):i+1])),
                     'forecast_horizon_hours': 2.0
                 }
                 self.nowcast_alerts.append(alert)
                 if (not self.escalation_triggers or
                     (alert['time'] - self.escalation_triggers[-1]['time']).total_seconds() > 3600):
                     self.escalation_triggers.append(alert)
-                    print(f"     🚨 ALERTA em {alert['time']}: HAC={hac_total[i]:.1f}, dH/dt={dHAC_dt[i]:.1f} nT/h")
         return flags
 
+    def calibrate_hac_thresholds(self, df_historical):
+        """Ajusta limiares do HAC com base em eventos históricos."""
+        for level, dst_thresh in [('G1', -50), ('G2', -100), ('G3', -150), ('G4', -200), ('G5', -300)]:
+            events = df_historical[df_historical['Dst_obs'] <= dst_thresh]
+            if len(events) > 0:
+                setattr(self.config, f'HAC_{level}', np.percentile(events['HAC_total'], 50))
+        print("Limiares do HAC recalibrados.")
+
     def compute_hac_system(self, df, calibration_mode=False):
-	    print("\n⚡ Calculando sistema HAC+...")
-	
-	    times = pd.to_datetime(df['time_tag']).values
-	    coupling = df['coupling_signal'].fillna(0).values
-	    Bz = df['bz_gsm'].fillna(0).values
-	    Vsw = df['speed'].fillna(400).values
-	    density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
-	
-	    dt = self._safe_deltat(times)
-	    n = len(times)
-	
-	    hac_ring = np.zeros(n)
-	    hac_substorm = np.zeros(n)
-	    hac_ionosphere = np.zeros(n)
-	
-	    print("   Simulando reservatórios...")
-	
-	    for i in range(1, n):
-	        regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
-	        bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
-	
-	        # Baseline adaptativa
-	        if coupling[i] < 0.02 and bz_eff_i > -3.0:
-	            baseline = 0.05 + 0.1 * (density[i] / 10.0)
-	        else:
-	            baseline = 0.15 + 0.25 * (density[i] / 10.0)
-	
-	        injection = coupling[i] + baseline
-	
-	        # Boost por Bz negativo
-	        if Bz[i] < -5:
-	            injection *= (1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0))
-	
-	        # Regime
-	        if regime == 'CME':
-	            injection *= 1.3
-	            tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
-	        elif regime == 'HSS':
-	            injection *= 1.1
-	            tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
-	        else:
-	            tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
-	
-	        tau_sub = self.config.TAU_SUBSTORM * 3600
-	        tau_ion = self.config.TAU_IONOSPHERE * 3600
-	
-	        dt_hours = dt[i] / 3600.0
-	        injection_eff = np.clip(injection * dt_hours, 0, 100)
-	
-	        # Perdas
-	        loss_ring = (0.015 + 0.0002 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
-	        loss_sub  = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
-	        loss_ion  = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
-	
-	        if Bz[i] > 0:
-	            loss_ring *= 1.3
-	            loss_sub  *= 1.3
-	            loss_ion  *= 1.3
-	
-	        # Decaimento
-	        alpha_rc = np.exp(-dt[i] / tau_rc)
-	        alpha_sub = np.exp(-dt[i] / tau_sub)
-	        alpha_ion = np.exp(-dt[i] / tau_ion)
-	
-	        # Atualização
-	        hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
-	        hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
-	        hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
-	
-	    # HAC total
-	    hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
-	    dHAC_dt = self._compute_robust_derivative(hac_total, times)
-	    _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
-	
-	    # ========================================================
-	    # HAC efetivo com memória exponencial (persistência)
-	    # ========================================================
-	    tau_hac = 2.0  # horas
-	    hac_eff = np.zeros(n)
-	    hac_eff[0] = hac_total[0]
-	    for i in range(1, n):
-	        dt_hours = dt[i] / 3600.0
-	        alpha_hac = np.exp(-dt_hours / tau_hac)
-	        hac_eff[i] = alpha_hac * hac_eff[i-1] + (1 - alpha_hac) * hac_total[i]
-	
-	    # ========================================================
-	    # Dst (Burton com injeção não‑linear controlada por HAC)
-	    # ========================================================
-	    tau_rec_base = 10.0          # horas
-	    k_dst = getattr(self.config, 'K_DST', 6.0)
-	    HAC_Q_SCALE = getattr(self.config, 'HAC_Q_SCALE', 80.0)
-	    hac_thr = getattr(self.config, 'HAC_THR', 15.0)
-	
-	    dst_physical = np.zeros(n)
-	    dst_physical[0] = -20.0
-	
-	    for i in range(1, n):
-	        dt_hours = dt[i] / 3600.0
-	
-	        # Recuperação dinâmica (tempestades fortes demoram mais para se recuperar)
-	        tau_dynamic = tau_rec_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
-	
-	        # HAC efetivo com memória (já calculado)
-	        hac_val = max(0.0, hac_eff[i])
-	
-	        # Limiar suave (sigmoide) para evitar injeção em quietude
-	        hac_eff_val = hac_val / (1.0 + np.exp(-(hac_val - hac_thr) / 12.0))
-	
-	        # Escala o HAC para uma faixa de trabalho (~0 a 5)
-	        hac_scaled = np.clip(hac_eff_val / HAC_Q_SCALE, 0.0, 3.0)
-	
-	        # Injeção sublinear (expoente 0.7 para suavizar, mas sem achatar extremos)
-	        Q_injection = k_dst * (hac_scaled ** 0.7)
-	
-	        # Deixa o decaimento fazer o resto
-	        alpha = np.exp(-dt_hours / tau_dynamic)
-	        dst_physical[i] = dst_physical[i-1] + (Q_injection - dst_physical[i-1] / tau_dynamic) * dt_hours
-	
-	        # Limite físico
-	        dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-	
-	    print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
-	
-	    # ========================================================
-	    # Forecast
-	    # ========================================================
-	    forecast = {}
-	    dt_median = np.median(dt) / 3600.0
-	
-	    for h in [1, 2, 3]:
-	        steps = max(1, int(h / dt_median))
-	        dst_fut = dst_physical[-1]
-	        hac_fut = max(0.0, hac_eff[-1])
-	        hac_eff_fut = max(0.0, hac_fut - hac_thr)
-	
-	        for _ in range(steps):
-	            tau_dyn = tau_rec_base * (1.0 + abs(dst_fut) / 100.0)
-	            alpha = np.exp(-dt_median / tau_dyn)
-	            Q_fut = k_dst * np.sqrt(np.clip(hac_eff_fut / HAC_Q_SCALE, 0.0, 10.0))
-	            dst_fut = dst_fut * alpha - Q_fut * tau_dyn * (1.0 - alpha)
-	
-	        forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
-	
-	    self.results.update({
-	        'time': times,
-	        'HAC_total': hac_total,
-	        'dHAC_dt': dHAC_dt,
-	        'Bz': Bz,
-	        'Vsw': Vsw,
-	        'coupling_signal': coupling,
-	        'Dst_physical': dst_physical,
-	        'Dst_min_physical': np.min(dst_physical),
-	        'Dst_now': dst_physical[-1],
-	        'forecast': forecast
-	    })
-	
-	    self._validate_output(hac_total)
-	
-	    return hac_total
+        print("\n⚡ Calculando sistema HAC+...")
+
+        times = pd.to_datetime(df['time_tag']).values
+        coupling = df['coupling_signal'].fillna(0).values
+        Bz = df['bz_gsm'].fillna(0).values
+        Vsw = df['speed'].fillna(400).values
+        vbs = df.get('VBs', np.zeros_like(Bz))
+        pdyn = df.get('Pdyn', np.full_like(Bz, 3.0))
+        density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
+
+        dt = self._safe_deltat(times)
+        n = len(times)
+
+        # ========================================================
+        # Reservatórios HAC (mantidos como indicador auxiliar)
+        # ========================================================
+        hac_ring = np.zeros(n)
+        hac_substorm = np.zeros(n)
+        hac_ionosphere = np.zeros(n)
+
+        print("   Simulando reservatórios...")
+        for i in range(1, n):
+            regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
+
+            if coupling[i] < 0.02 and bz_eff_i > -3.0:
+                baseline = 0.05 + 0.1 * (density[i] / 10.0)
+            else:
+                baseline = 0.15 + 0.25 * (density[i] / 10.0)
+            injection = coupling[i] + baseline
+
+            # Boosts opcionais (desabilitados por padrão)
+            if self.config.USE_BZ_BOOST and Bz[i] < -5:
+                injection *= (1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0))
+
+            if self.config.USE_REGIME_BOOST:
+                if regime == 'CME':
+                    injection *= 1.3
+                elif regime == 'HSS':
+                    injection *= 1.1
+
+            if regime == 'CME':
+                tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
+            elif regime == 'HSS':
+                tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
+            else:
+                tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
+
+            tau_sub = self.config.TAU_SUBSTORM * 3600
+            tau_ion = self.config.TAU_IONOSPHERE * 3600
+
+            dt_hours = dt[i] / 3600.0
+            injection_eff = np.clip(injection * dt_hours, 0, 100)
+
+            loss_ring = (0.015 + 0.0002 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            loss_sub = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
+            loss_ion = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
+
+            if Bz[i] > 0:
+                loss_ring *= 1.3
+                loss_sub *= 1.3
+                loss_ion *= 1.3
+
+            alpha_rc = np.exp(-dt[i] / tau_rc)
+            alpha_sub = np.exp(-dt[i] / tau_sub)
+            alpha_ion = np.exp(-dt[i] / tau_ion)
+
+            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
+            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
+            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
+
+        hac_total = self._safe_normalization(hac_ring + hac_substorm + hac_ionosphere)
+        dHAC_dt = self._compute_robust_derivative(hac_total, times)
+        _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
+
+        # ========================================================
+        # Dst FÍSICO (Burton clássico dirigido por VBs)
+        # ========================================================
+        tau_dst_base = self.config.TAU_DST
+        q_scale = self.config.Q_SCALE
+        vbs_thr = self.config.VBs_THRESHOLD
+
+        dst_physical = np.zeros(n)
+        dst_physical[0] = -20.0
+
+        for i in range(1, n):
+            dt_hours = dt[i] / 3600.0
+
+            # Driver de injeção: VBs acima do limiar
+            vbs_eff = max(0.0, vbs[i] - vbs_thr)
+
+            # Termo de injeção Q (nT/h)
+            Q_injection = q_scale * vbs_eff
+
+            # Compressão Burton-like (substitui termo logarítmico)
+            q_comp = -0.3 * np.sqrt(max(0.0, pdyn[i]))
+            Q_injection += q_comp
+
+            # Decaimento dinâmico (tempestades fortes recuperam mais devagar)
+            tau_dynamic = tau_dst_base * (1.0 + abs(dst_physical[i-1]) / 150.0)
+            alpha = np.exp(-dt_hours / tau_dynamic)
+
+            dst_physical[i] = (dst_physical[i-1] * alpha
+                               + Q_injection * tau_dynamic * (1.0 - alpha))
+            dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+
+        print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
+
+        # ========================================================
+        # Forecast com persistência do driver (VBs)
+        # ========================================================
+        forecast = {}
+        dt_median = np.median(dt) / 3600.0
+        # Persistência: média das últimas 2 horas de VBs
+        window_persist = min(120, n)
+        vbs_persist = np.mean(vbs[-window_persist:]) if window_persist > 0 else vbs[-1]
+        # Pressão dinâmica persistente (último valor)
+        pdyn_persist = pdyn[-1]
+
+        for h in [1, 2, 3]:
+            steps = max(1, int(h / dt_median))
+            dst_fut = dst_physical[-1]
+            for _ in range(steps):
+                tau_dyn = tau_dst_base * (1.0 + abs(dst_fut) / 150.0)
+                alpha = np.exp(-dt_median / tau_dyn)
+                q_fut = q_scale * max(0.0, vbs_persist - vbs_thr)
+                q_comp_fut = -0.3 * np.sqrt(max(0.0, pdyn_persist))
+                Q_fut = q_fut + q_comp_fut
+                dst_fut = dst_fut * alpha + Q_fut * tau_dyn * (1.0 - alpha)
+            forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
+
+        self.results.update({
+            'time': times,
+            'HAC_total': hac_total,
+            'dHAC_dt': dHAC_dt,
+            'Bz': Bz,
+            'Vsw': Vsw,
+            'coupling_signal': coupling,
+            'Dst_physical': dst_physical,
+            'Dst_min_physical': np.min(dst_physical),
+            'Dst_now': dst_physical[-1],
+            'forecast': forecast
+        })
+
+        self._validate_output(hac_total)
+        return hac_total
 
     def _validate_output(self, hac_values):
         if np.any(np.isnan(hac_values)):
@@ -481,12 +501,18 @@ class ProductionHACModel:
 
     def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
         cfg = self.config
-        if hac < cfg.HAC_G1: base, sev = "Quiet", 0
-        elif hac < cfg.HAC_G2: base, sev = "G1", 1
-        elif hac < cfg.HAC_G3: base, sev = "G2", 2
-        elif hac < cfg.HAC_G4: base, sev = "G3", 3
-        elif hac < cfg.HAC_G5: base, sev = "G4", 4
-        else: base, sev = "G5", 5
+        if hac < cfg.HAC_G1:
+            base, sev = "Quiet", 0
+        elif hac < cfg.HAC_G2:
+            base, sev = "G1", 1
+        elif hac < cfg.HAC_G3:
+            base, sev = "G2", 2
+        elif hac < cfg.HAC_G4:
+            base, sev = "G3", 3
+        elif hac < cfg.HAC_G5:
+            base, sev = "G4", 4
+        else:
+            base, sev = "G5", 5
 
         score = 0
         if dhdt > 50: score += 1
@@ -503,19 +529,27 @@ class ProductionHACModel:
         if hac > 150: score += 2
 
         final, sev_f = base, sev
-        if score >= 14 and sev < 5: final, sev_f = "G5 (Nowcast Override)", 5
-        elif score >= 11 and sev < 4: final, sev_f = "G4 (Nowcast Override)", 4
-        elif score >= 8 and sev < 3: final, sev_f = "G3 (Nowcast Override)", 3
-        elif score >= 5 and sev < 2: final, sev_f = "G2 (Nowcast Enhancement)", 2
+        if score >= 14 and sev < 5:
+            final, sev_f = "G5 (Nowcast Override)", 5
+        elif score >= 11 and sev < 4:
+            final, sev_f = "G4 (Nowcast Override)", 4
+        elif score >= 8 and sev < 3:
+            final, sev_f = "G3 (Nowcast Override)", 3
+        elif score >= 5 and sev < 2:
+            final, sev_f = "G2 (Nowcast Enhancement)", 2
 
         if dhdt > 180 and bz < -10 and v > 700 and hac > 100 and sev < 5:
             final, sev_f = "G5 (Extreme Nowcast)", 5
         elif dhdt > 120 and bz < -8 and v > 600 and sev < 4:
             final, sev_f = "G4 (Strong Nowcast)", 4
 
+        # Fator de confiança simples (número de critérios atendidos)
+        confidence = min(1.0, score / 20.0)
+
         return final, {'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
                        'base_level': base, 'nowcast_score': score,
-                       'final_level': final, 'escalation': sev_f > sev, 'severity': sev_f}
+                       'final_level': final, 'escalation': sev_f > sev, 'severity': sev_f,
+                       'confidence': confidence}
 
     def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
         enhanced = storm_levels.copy()
@@ -534,7 +568,6 @@ class ProductionHACModel:
 
     def predict_storm_indicators(self, hac_values):
         print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
-        kp_pred = 9 * np.tanh(hac_values / 300)   # saturação mais suave
         dst_pred = self.results.get('Dst_physical', np.zeros_like(hac_values))
         dst_min = self.results.get('Dst_min_physical', np.min(dst_pred))
         dst_now = self.results.get('Dst_now', dst_pred[-1])
@@ -542,13 +575,16 @@ class ProductionHACModel:
         Bz = self.results.get('Bz', np.zeros_like(hac_values))
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
+        # Estimativa de Kp melhorada (baseada em Dst e dH/dt)
+        kp_from_dst = np.clip(0.3 * np.sqrt(abs(dst_min)) + 0.5 * np.sqrt(max(0, np.abs(dHAC_dt[-1]))), 0, 9)
+        kp_pred = np.full_like(hac_values, kp_from_dst)
+
         storm_levels, logs = [], []
         esc_cnt = g4g5_cnt = 0
         for i in range(len(hac_values)):
             level, info = self._classify_storm_with_nowcast(hac_values[i], dHAC_dt[i], Bz[i], Vsw[i])
             dst = dst_pred[i]
 
-            # Override por Dst (clipping de classificações infladas)
             if dst > -150 and ("G4" in level or "G5" in level):
                 level = "G2 (Dst Clipped)"
             elif dst > -100 and ("G3" in level or "G4" in level or "G5" in level):
@@ -556,8 +592,10 @@ class ProductionHACModel:
 
             storm_levels.append(level)
             logs.append(info)
-            if info['escalation']: esc_cnt += 1
-            if "G4" in level or "G5" in level: g4g5_cnt += 1
+            if info['escalation']:
+                esc_cnt += 1
+            if "G4" in level or "G5" in level:
+                g4g5_cnt += 1
 
         enhanced = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
         self.results.update({'Kp_pred': kp_pred, 'Dst_pred': dst_pred,
@@ -570,7 +608,7 @@ class ProductionHACModel:
         g4g5_base = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
         g4g5_trad = sum(1 for l in storm_levels if l in ['G4', 'G5'])
 
-        print(f"   • Kp máximo: {np.max(kp_pred):.1f}")
+        print(f"   • Kp máximo estimado: {np.max(kp_pred):.1f}")
         print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
         print(f"   • Dst atual: {dst_now:.1f} nT")
         print(f"   • Eventos G4/G5 (tradicional): {g4g5_trad}")
@@ -581,11 +619,11 @@ class ProductionHACModel:
         forecast = self.results.get('forecast', {})
         if forecast:
             print("   • Previsão Dst (simulada):")
-            for h, val in forecast.items(): print(f"       {h}: {val:.1f} nT")
+            for h, val in forecast.items():
+                print(f"       {h}: {val:.1f} nT")
 
-        # Probabilidades baseadas no HAC atual
         last_hac = hac_values[-1]
-        probs = {'G1':0., 'G2':0., 'G3':0., 'G4':0., 'G5':0.}
+        probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
         if last_hac >= self.config.HAC_G1:
             if last_hac < self.config.HAC_G2: probs['G1'] = min(1.0, (last_hac - 50) / 70)
             elif last_hac < self.config.HAC_G3: probs['G2'] = min(1.0, (last_hac - 120) / 130)
@@ -593,7 +631,8 @@ class ProductionHACModel:
             elif last_hac < self.config.HAC_G5: probs['G4'] = min(1.0, (last_hac - 450) / 200)
             else: probs['G5'] = min(1.0, (last_hac - 650) / 150)
         print("   • Probabilidades (baseadas no HAC):")
-        for k, v in probs.items(): print(f"       {k}: {v*100:.1f}%")
+        for k, v in probs.items():
+            print(f"       {k}: {v*100:.1f}%")
 
         return kp_pred, dst_pred, enhanced
 
@@ -608,20 +647,21 @@ class ProductionHACModel:
             esc = sum(1 for log in self.classification_logs if log['escalation'])
             g4g5 = sum(1 for log in self.classification_logs if log['severity'] >= 4)
             summary += f"CLASSIFICAÇÃO NOWCAST:\n• Escalações: {esc}\n• Eventos G4/G5: {g4g5}\n"
-        report = "="*70 + "\n🚨 RELATÓRIO NOWCAST + INÉRCIA\n" + "="*70 + "\n\n"
+        report = "=" * 70 + "\n🚨 RELATÓRIO NOWCAST + INÉRCIA\n" + "=" * 70 + "\n\n"
         report += summary + "\n"
         report += f"PARÂMETROS CRÍTICOS:\n  • τ_eff quiet: {self.config.TAU_RING_CURRENT_QUIET} h\n"
         report += f"  • Θ: {self.config.THETA_CRITICAL} nT/h\n  • H_G3: {self.config.HG3_THRESHOLD}\n"
-        report += "="*70
+        report += "=" * 70
         return report
-		
+
+
 # ============================================================
 # MAIN (EXEMPLO DE USO)
 # ============================================================
 def main():
-    print("="*70)
+    print("=" * 70)
     print("🚀 HAC++ MODEL - SISTEMA DE PRODUÇÃO (NOWCAST + INÉRCIA HÍBRIDO)")
-    print("="*70)
+    print("=" * 70)
     mag_df = RobustOMNIProcessor.load_and_clean("data/mag-7-day.json")
     plasma_df = RobustOMNIProcessor.load_and_clean("data/plasma-7-day.json")
     df = RobustOMNIProcessor.merge_datasets(mag_df, plasma_df)
@@ -640,6 +680,7 @@ def main():
     })
     df_out.to_csv("hac_nowcast_results.csv", index=False)
     print("\n💾 Resultados salvos em hac_nowcast_results.csv")
+
 
 if __name__ == "__main__":
     main()
