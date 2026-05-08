@@ -390,7 +390,7 @@ class ProductionHACModel:
             dt_hours = dt[i] / 3600.0
             injection_eff = np.clip(injection * dt_hours, 0, 100)
 
-            loss_ring = (0.015 + 0.0002 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            loss_ring = (0.015 + 0.00008 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             loss_sub = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
@@ -441,7 +441,7 @@ class ProductionHACModel:
 
             storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
 
-            tau_dynamic = tau_dst_base * (1.0+ abs(dst_physical[i-1]) / 180.0 + 0.8 * storm_memory)
+            tau_dynamic = tau_dst_base * ( 1.0 + 0.35 * np.tanh(abs(dst_physical[i-1]) / 120.0))
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -575,7 +575,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.055 * abs(dst_min)**0.82 + 0.8, 0, 9)
+        kp_from_dst = np.clip( 0.075 * abs(dst_min)**0.8 + 0.7, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
