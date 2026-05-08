@@ -4,11 +4,11 @@ validate_events.py - Validação HAC++ com alinhamento causal e calibração rob
                     (otimizado para dados OMNI de 1 minuto)
 
 Alterações para alta resolução:
-- Lag de propagação fixo (20 min) para preservar extremos (Halloween).
+- Lag de propagação fixo (20 min) para preservar extremos.
 - Interpolação estendida (linear + preenchimento) para lidar com NaNs.
 - Derivada do Dst calculada com dt real (não assume 1 hora).
-- Parâmetros de janela de persistência distintos (forecast 2h, HAC 12h).
-- Calibração automática com pesos por intensidade.
+- Reamostragem opcional para 5 min para acelerar processamento.
+- Diagnóstico de extremos após alinhamento.
 """
 
 import pandas as pd
@@ -36,7 +36,7 @@ EVENTS = {
 
 TRAIN_END_DATE = "2014-12-31"
 
-OMNI_FILE = "omni_1min_2000_2020.csv"
+OMNI_FILE = "omni_1min_2000_2020.csv"   # arquivo de alta resolução
 DST_FILE = "data/dst_kyoto_2000_2020.csv"
 CALIBRATION_FILE = "hac_calibration.json"
 
@@ -44,6 +44,7 @@ CALIBRATION_FILE = "hac_calibration.json"
 LAG_MINUTES = 20                        # lag fixo de propagação
 WINDOW_FORECAST_MIN = 120               # 2h para persistência do forecast
 WINDOW_HAC_MEMORY = 720                 # 12h para memória longa do HAC
+RESAMPLE_MINUTES = 5                    # reamostragem para acelerar (None para desabilitar)
 
 # =========================
 # CARREGAMENTO DOS DADOS (COM INTERPOLAÇÃO ROBUSTA)
@@ -74,10 +75,10 @@ def load_dst_kyoto(filepath):
     print(f"   ✅ {len(df)} pontos, Dst: {df['dst'].min():.1f} a {df['dst'].max():.1f} nT")
     return df[['time_tag', 'dst']]
 
-def load_omni_clean(filepath):
+def load_omni_clean(filepath, resample_minutes=None):
     """
-    Carrega OMNI, remove flags inválidas, interpola gaps longos
-    e converte unidades. Otimizado para resolução de 1 minuto.
+    Carrega OMNI, remove flags inválidas, interpola gaps longos,
+    converte unidades e opcionalmente reamostra para acelerar.
     """
     print(f"\n📥 Carregando OMNI: {filepath}")
     df = pd.read_csv(filepath)
@@ -100,10 +101,10 @@ def load_omni_clean(filepath):
             df[col] = pd.to_numeric(df[col], errors='coerce')
             df[col] = df[col].replace(invalid_flags, np.nan)
 
-    # Filtrar valores fisicamente absurdos
+    # Filtrar valores fisicamente absurdos (menos restritivo para capturar extremos)
     df = df[
-        (df['speed'] > 100) & (df['speed'] < 2000) &
-        (df['density'] > 0.1) & (df['density'] < 200) &
+        (df['speed'] > 100) & (df['speed'] < 3000) &
+        (df['density'] > 0.1) & (df['density'] < 300) &
         (df['bz_gsm'] > -100) & (df['bz_gsm'] < 100)
     ].copy()
 
@@ -115,6 +116,14 @@ def load_omni_clean(filepath):
             .ffill()
             .bfill()
         )
+
+    # Reamostragem opcional para reduzir tempo de processamento
+    if resample_minutes is not None:
+        print(f"   ⏱️ Reamostrando para {resample_minutes} minutos...")
+        df = df.set_index('time_tag')
+        df = df.resample(f'{resample_minutes}min').mean()
+        df = df.interpolate(method='linear').reset_index()
+        print(f"   ✅ Após reamostragem: {len(df)} pontos")
 
     print(f"   ✅ {len(df)} pontos limpos (com interpolação)")
     return df
@@ -130,8 +139,11 @@ def align_omni_to_dst_fixed(omni_df, dst_df, lag_minutes=LAG_MINUTES):
     dst_sorted = dst_df.sort_values('time_tag').copy()
     omni_sorted = omni_df.sort_values('time_tag').copy()
 
+    # Renomear coluna de tempo do OMNI para evitar conflito no merge
+    omni_sorted = omni_sorted.rename(columns={'time_tag': 'time_tag_omni'})
+
     # Desloca o tempo do OMNI pelo lag de propagação
-    omni_sorted['time_shifted'] = omni_sorted['time_tag'] + pd.Timedelta(minutes=lag_minutes)
+    omni_sorted['time_shifted'] = omni_sorted['time_tag_omni'] + pd.Timedelta(minutes=lag_minutes)
 
     # Merge asof: para cada Dst, pega o OMNI mais recente antes do tempo deslocado
     aligned = pd.merge_asof(
@@ -142,9 +154,9 @@ def align_omni_to_dst_fixed(omni_df, dst_df, lag_minutes=LAG_MINUTES):
         direction='backward'
     )
 
-    # Remove a coluna auxiliar e mantém apenas as necessárias
-    aligned = aligned.drop(columns=['time_shifted'])
-    aligned = aligned.dropna(subset=['speed', 'bz_gsm'])  # essenciais para o modelo
+    # Limpeza das colunas
+    aligned = aligned.drop(columns=['time_shifted', 'time_tag_omni'])
+    aligned = aligned.dropna(subset=['speed', 'bz_gsm'])
 
     print(f"   ✅ Alinhamento com lag fixo de {lag_minutes} min: {len(aligned)} pontos")
     return aligned.reset_index(drop=True)
@@ -204,7 +216,6 @@ def auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20):
     Calibra automaticamente k_dst, HAC_Q_SCALE e hac_thr usando regressão
     ponderada pela intensidade do Dst. Usa dt REAL dos timestamps.
     """
-    import numpy as np
     from scipy.optimize import differential_evolution
 
     print("\n🔧 AUTO-CALIBRAÇÃO DE PARÂMETROS (HAC → Dst)\n")
@@ -234,7 +245,6 @@ def auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20):
     dst = dst[mask]
     hac = hac[mask]
     dDst_dt = dDst_dt[mask]
-    dt_hours = dt_hours[mask]
 
     # Pesos proporcionais à intensidade do Dst
     weights = np.clip(np.abs(dst) / 50.0, 1.0, 10.0)
@@ -255,8 +265,8 @@ def auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20):
         mse = np.average((Q_pred - Y)**2, weights=w)
         return mse
 
-    bounds = [(0.5, 15.0), (10.0, 300.0), (5.0, 80.0)]
-    result = differential_evolution(objective, bounds, maxiter=80, disp=False, seed=42)
+    bounds = [(0.5, 20.0), (10.0, 500.0), (5.0, 80.0)]
+    result = differential_evolution(objective, bounds, maxiter=100, disp=False, seed=42)
 
     k_dst, HAC_Q_SCALE, hac_thr = result.x
     best_score = result.fun
@@ -287,17 +297,23 @@ def validate_event(config_core, df_aligned, name, start, end, physics_config):
 
     print(f"   • Pontos: {len(event)}")
     print(f"   • Dst obs mín: {event['dst'].min():.1f} nT")
+    print(f"   • Bz min: {event['bz_gsm'].min():.1f} nT")
+    print(f"   • V max: {event['speed'].max():.1f} km/s")
+
+    # Diagnóstico de extremos
+    print("   🔍 Extremos do evento:")
+    print(event.nsmallest(5, 'bz_gsm')[['time_tag', 'bz_gsm', 'speed', 'dst']])
 
     # Calcular campos físicos
     event = PhysicalFieldsCalculator.compute_all_fields(event)
 
     print(f"   • Coupling max: {event['coupling_signal'].max():.2f}")
-    print(f"   • Coupling mean: {event['coupling_signal'].mean():.2f}")
+    print(f"   • VBs real max: {event['VBs_real'].max():.2f} mV/m")
 
     # Aplicar HAC_REF do core
     physics_config.HAC_REF = config_core.HAC_REF
 
-    # Instanciar modelo de produção com a configuração ajustada
+    # Instanciar modelo de produção
     model = ProductionHACModel(config=physics_config)
 
     # Garantir que os parâmetros estão no config interno
@@ -345,13 +361,17 @@ def main():
     print("🚀 HAC++ VALIDAÇÃO COM ALINHAMENTO FIXO E INTERPOLAÇÃO ROBUSTA")
     print("=" * 70)
 
-    omni = load_omni_clean(OMNI_FILE)
+    omni = load_omni_clean(OMNI_FILE, resample_minutes=RESAMPLE_MINUTES)
     dst = load_dst_kyoto(DST_FILE)
 
-    # Alinhar OMNI ao Dst com lag fixo (preserva extremos)
+    # Alinhar OMNI ao Dst com lag fixo
     print("\n🔗 Alinhando OMNI → Dst (lag fixo de 20 min)...")
     df_aligned = align_omni_to_dst_fixed(omni, dst)
     print(f"   ✅ Dataset alinhado: {len(df_aligned)} pontos")
+
+    # Diagnóstico geral
+    print("\n🔍 Estatísticas gerais após alinhamento:")
+    print(df_aligned[['bz_gsm', 'speed', 'dst']].describe())
 
     # Divisão treino/teste
     df_train = df_aligned[df_aligned['time_tag'] <= TRAIN_END_DATE].copy()
@@ -360,19 +380,17 @@ def main():
 
     # ========== AUTO-CALIBRAÇÃO NO CONJUNTO DE TREINO ==========
     print("\n⚙️ Preparando conjunto de treino para auto-calibração...")
-    # Calcular campos físicos no treino
     df_train = PhysicalFieldsCalculator.compute_all_fields(df_train)
     model_temp = ProductionHACModel()
     hac_train = model_temp.compute_hac_system(df_train, calibration_mode=True)
     df_train['HAC_total'] = hac_train
 
-    # Auto-calibração (retorna parâmetros brutos)
     params_raw = auto_calibrate_parameters(df_train, filter_quiet=True, dst_threshold=-20)
 
-    # FATORES DE CORREÇÃO EMPÍRICOS (compensam a dinâmica discreta de Burton)
-    CORR_SCALE = 0.3      # reduz HAC_Q_SCALE → aumenta sensibilidade
-    CORR_K = 12.0          # aumenta k_dst → compensa atenuação
-    CORR_THR = 10.0       # eleva threshold → evita injeção em calmaria
+    # Fatores de correção empíricos
+    CORR_SCALE = 0.3
+    CORR_K = 12.0
+    CORR_THR = 10.0
 
     physics_config = HACPhysicsConfig()
     physics_config.HAC_Q_SCALE = params_raw['HAC_Q_SCALE'] * CORR_SCALE
@@ -389,10 +407,9 @@ def main():
     print(f"   • K_DST: {physics_config.K_DST:.3f}")
     print(f"   • HAC_THR: {physics_config.HAC_THR:.1f}")
 
-    # Calibração global do core (HAC_REF, Q_FACTOR)
     config_core = global_calibration(df_train)
 
-    # Validação nos eventos de teste
+    # Validação
     results = []
     for name, (start, end) in EVENTS.items():
         m = validate_event(config_core, df_aligned, name, start, end, physics_config)
