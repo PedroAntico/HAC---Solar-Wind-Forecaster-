@@ -472,10 +472,10 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             for step in range(steps):
-                tau_dyn = tau_dst_base * (1.0 + 0.75 * abs(dst_fut)/140.0)
+                tau_dyn = tau_dst_base * (1.0 + 0.28 * abs(dst_fut)/140.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
-                decay = np.exp(-time_elapsed / 1.3)
+                decay = np.exp(-time_elapsed / 2.4)
                 recent_trend = np.median(np.diff(vbs_real[-12:]))
                 vbs_future = max( 0, vbs_persist * decay + recent_trend * 0.25)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
