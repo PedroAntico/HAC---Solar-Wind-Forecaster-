@@ -391,8 +391,8 @@ class ProductionHACModel:
             injection_eff = np.clip(injection * dt_hours, 0, 100)
 
             loss_ring = (0.015 + 0.00008 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
-            loss_sub = (0.015 + 0.0002 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
-            loss_ion = (0.015 + 0.0002 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
+            loss_sub = (0.015 + 0.00008 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
+            loss_ion = (0.015 + 0.00008 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
             if Bz[i] > 0:
                 loss_ring *= 1.3
@@ -465,11 +465,12 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             for step in range(steps):
-                tau_dyn = tau_dst_base * (1.0 + 0.5 * abs(dst_fut)/150.0)
+                tau_dyn = tau_dst_base * (1.0 + 0.35 * abs(dst_fut)/120.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
                 decay = np.exp(-time_elapsed / 2.5)
-                vbs_future = vbs_persist * decay
+                recent_trend = np.mean(np.diff(vbs_real[-12:]))
+                vbs_future = max( 0, vbs_persist * decay + recent_trend * 0.5)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
@@ -622,13 +623,13 @@ class ProductionHACModel:
                 print(f"       {h}: {val:.1f} nT")
 
         # Probabilidades com thresholds provisórios
-        last_hac = hac_values[-1]
+        recent_hac = np.percentile(hac_values[-36:], 95)
         probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
-        if last_hac >= self.config.HAC_G1:
-            if last_hac < self.config.HAC_G2: probs['G1'] = 1.0
-            elif last_hac < self.config.HAC_G3: probs['G2'] = 1.0
-            elif last_hac < self.config.HAC_G4: probs['G3'] = 1.0
-            elif last_hac < self.config.HAC_G5: probs['G4'] = 1.0
+        if recent_hac >= self.config.HAC_G1:
+            if recent_hac < self.config.HAC_G2: probs['G1'] = 1.0
+            elif recent_hac < self.config.HAC_G3: probs['G2'] = 1.0
+            elif recent_hac < self.config.HAC_G4: probs['G3'] = 1.0
+            elif recent_hac < self.config.HAC_G5: probs['G4'] = 1.0
             else: probs['G5'] = 1.0
         print("   • Probabilidades (baseadas no HAC):")
         for k, v in probs.items():
