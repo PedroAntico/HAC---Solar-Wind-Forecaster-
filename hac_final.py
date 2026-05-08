@@ -441,7 +441,14 @@ class ProductionHACModel:
 
             storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
 
-            tau_dynamic = tau_dst_base * ( 1.0 + 1.1 * np.tanh(abs(dst_physical[i-1]) / 100.0))
+            if Q_injection < -8:
+                tau_dynamic = 18.0   # main phase
+            elif dst_physical[i-1] < -150:
+                tau_dynamic = 30.0   # recovery profundo
+            elif dst_physical[i-1] < -80:
+                tau_dynamic = 22.0
+            else:
+                tau_dynamic = 12.0
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -576,7 +583,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.055 * abs(dst_min)**0.78 + 0.6, 0, 9)
+        kp_from_dst = np.clip( 0.062 * abs(dst_min)**0.79 + 0.65, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
