@@ -48,7 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.8              # nT/h por mV/m
     TAU_DST = 12.0              # horas
-    VBS_SAT = 20.0              # mV/m – saturação não‑linear do acoplamento
+    VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -583,7 +583,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.062 * abs(dst_min)**0.79 + 0.65, 0, 9)
+        kp_from_dst = np.clip( 0.072 * abs(dst_min)**0.8 + 0.7, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
