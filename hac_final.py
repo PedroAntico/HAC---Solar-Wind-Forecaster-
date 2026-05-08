@@ -68,8 +68,8 @@ class HACPhysicsConfig:
     HAC_G1 = 20
     HAC_G2 = 40
     HAC_G3 = 60
-    HAC_G4 = 110
-    HAC_G5 = 145
+    HAC_G4 = 85
+    HAC_G5 = 105
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = 35 * np.tanh(coupling_signal / 20)
+        coupling_signal = 32 * np.tanh(coupling_signal / 18)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
@@ -436,12 +436,12 @@ class ProductionHACModel:
             Q_injection = q_scale * vbs_nl
 
             # Compressão Burton‑like
-            q_comp = -0.45 * np.sqrt(max(0.0, pdyn[i]))
+            q_comp = -0.28 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
             storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
 
-            tau_dynamic = tau_dst_base * (1.0+ abs(dst_physical[i-1]) / 120.0 + 2.0 * storm_memory)
+            tau_dynamic = tau_dst_base * (1.0+ abs(dst_physical[i-1]) / 180.0 + 0.8 * storm_memory)
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -571,7 +571,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.045 * abs(dst_min)**0.78 + 1.2, 0, 9)
+        kp_from_dst = np.clip( 0.055 * abs(dst_min)**0.8 + 1.0, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
