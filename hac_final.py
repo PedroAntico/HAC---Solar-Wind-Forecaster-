@@ -32,7 +32,7 @@ class HACPhysicsConfig:
     # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.05            # resposta quase instantânea a choques
+    TAU_BZ_CME = 0.2            # resposta quase instantânea a choques
 
     # Escalas físicas fixas
     E_FIELD_REF = 5.0           # mV/m
@@ -48,7 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
     TAU_DST = 12.0              # horas
-    VBS_SAT = 25.0              # mV/m – saturação não‑linear do acoplamento
+    VBS_SAT = 14.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -436,7 +436,7 @@ class ProductionHACModel:
             Q_injection = q_scale * vbs_nl
 
             # Compressão Burton‑like
-            q_comp = -0.8 * np.sqrt(max(0.0, pdyn[i]))
+            q_comp = -0.45 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
             tau_dynamic = tau_dst_base * (1.0 + abs(dst_physical[i-1]) / 150.0)
@@ -463,7 +463,9 @@ class ProductionHACModel:
             for _ in range(steps):
                 tau_dyn = tau_dst_base * (1.0 + 0.5 * abs(dst_fut)/150.0)
                 alpha = np.exp(-dt_median / tau_dyn)
-                vbs_future_eff = max(0.0, vbs_persist - vbs_thr)
+                decay = np.exp(-h / 2.0)
+                vbs_future = vbs_persist * decay
+                vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
                 q_comp_fut = -0.3 * np.sqrt(max(0.0, pdyn_persist))
@@ -618,11 +620,11 @@ class ProductionHACModel:
         last_hac = hac_values[-1]
         probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
         if last_hac >= self.config.HAC_G1:
-            if last_hac < self.config.HAC_G2: probs['G1'] = min(1.0, (last_hac - self.config.HAC_G1) / 2)
-            elif last_hac < self.config.HAC_G3: probs['G2'] = min(1.0, (last_hac - self.config.HAC_G2) / 2)
-            elif last_hac < self.config.HAC_G4: probs['G3'] = min(1.0, (last_hac - self.config.HAC_G3) / 2)
-            elif last_hac < self.config.HAC_G5: probs['G4'] = min(1.0, (last_hac - self.config.HAC_G4) / 2)
-            else: probs['G5'] = min(1.0, (last_hac - self.config.HAC_G5) / 2)
+            if last_hac < self.config.HAC_G2: probs['G1'] = 1.0
+            elif last_hac < self.config.HAC_G3: probs['G2'] = 1.0
+            elif last_hac < self.config.HAC_G4: probs['G3'] = 1.0
+            elif last_hac < self.config.HAC_G5: probs['G4'] = 1.0
+            else: probs['G5'] = 1.0
         print("   • Probabilidades (baseadas no HAC):")
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
