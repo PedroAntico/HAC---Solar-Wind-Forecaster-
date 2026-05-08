@@ -48,7 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
     TAU_DST = 10.0              # horas
-    VBS_SAT = 12.0              # mV/m – saturação não‑linear do acoplamento
+    VBS_SAT = 25.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
