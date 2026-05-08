@@ -47,7 +47,7 @@ class HACPhysicsConfig:
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
-    TAU_DST = 10.0              # horas
+    TAU_DST = 20.0              # horas
     VBS_SAT = 25.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
@@ -65,11 +65,11 @@ class HACPhysicsConfig:
     HAC_NORM_FACTOR = 150.0     # não aplicado agora
 
     # Limiares do HAC (provisórios – calibrar com dados)
-    HAC_G1 = 15
-    HAC_G2 = 30
-    HAC_G3 = 50
-    HAC_G4 = 80
-    HAC_G5 = 120
+    HAC_G1 = 20
+    HAC_G2 = 40
+    HAC_G3 = 60
+    HAC_G4 = 90
+    HAC_G5 = 110
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = np.tanh(coupling_signal / 15) * 30
+        coupling_signal = 40 * np.tanh(coupling_signal / 20)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
