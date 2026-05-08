@@ -46,7 +46,7 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
-    Q_SCALE = -2.2              # nT/h por mV/m
+    Q_SCALE = -2.8              # nT/h por mV/m
     TAU_DST = 12.0              # horas
     VBS_SAT = 20.0              # mV/m – saturação não‑linear do acoplamento
 
@@ -474,7 +474,7 @@ class ProductionHACModel:
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
-                q_comp_fut = -0.3 * np.sqrt(max(0.0, pdyn_persist))
+                q_comp_fut = -0.12 * np.sqrt(max(0.0, pdyn_persist))
                 Q_fut = q_fut + q_comp_fut
                 dst_fut = dst_fut * alpha + Q_fut * tau_dyn * (1.0 - alpha)
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
@@ -625,12 +625,19 @@ class ProductionHACModel:
         # Probabilidades com thresholds provisórios
         recent_hac = np.max(hac_values[-48:])
         probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
-        if recent_hac >= self.config.HAC_G1:
-            if recent_hac < self.config.HAC_G2: probs['G1'] = 1.0
-            if recent_hac < self.config.HAC_G3: probs['G2'] = 1.0
-            if recent_hac < self.config.HAC_G4: probs['G3'] = 1.0
-            if recent_hac < self.config.HAC_G5: probs['G4'] = 1.0
-            else: probs['G5'] = 1.0
+        storm_score = max(recent_hac, 0.32 * abs(dst_min))
+        if storm_score < self.config.HAC_G1:
+            pass
+        elif storm_score < self.config.HAC_G2:
+            probs['G1'] = 1.0
+        elif storm_score < self.config.HAC_G3:
+            probs['G2'] = 1.0
+        elif storm_score < self.config.HAC_G4:
+            probs['G3'] = 1.0
+        elif storm_score < self.config.HAC_G5:
+            probs['G4'] = 1.0
+        else:
+            probs['G5'] = 1.0
         print("   • Probabilidades (baseadas no HAC):")
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
