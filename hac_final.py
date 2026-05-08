@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 20)
+        coupling_signal = np.clip(coupling_signal, 0, 50)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
@@ -463,7 +463,9 @@ class ProductionHACModel:
             for _ in range(steps):
                 tau_dyn = tau_dst_base * (1.0 + abs(dst_fut) / 150.0)
                 alpha = np.exp(-dt_median / tau_dyn)
-                q_fut = q_scale * max(0.0, vbs_persist - vbs_thr)
+                vbs_future_eff = max(0.0, vbs_persist - vbs_thr)
+                vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
+                q_fut = q_scale * vbs_future_nl
                 q_comp_fut = -0.3 * np.sqrt(max(0.0, pdyn_persist))
                 Q_fut = q_fut + q_comp_fut
                 dst_fut = dst_fut * alpha + Q_fut * tau_dyn * (1.0 - alpha)
