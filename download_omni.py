@@ -1,90 +1,132 @@
 #!/usr/bin/env python3
 """
-Download automático do dataset OMNI (5 min)
-Pronto para HAC v6
+download_omni_1min.py
+
+Baixa dados históricos OMNI 1-minuto diretamente da NASA CDAWeb
+e salva em CSV consolidado.
+
+Campos baixados:
+- Tempo
+- Bz GSM
+- By GSM
+- Bt
+- Velocidade solar
+- Densidade
+- Temperatura
+
+Requer:
+pip install cdasws pandas tqdm
 """
 
-import os
-import requests
+from cdasws import CdasWs
 import pandas as pd
+import numpy as np
+from tqdm import tqdm
 from datetime import datetime
 
-OUTPUT_PATH = "data/omni_prepared.csv"
+# ============================================================
+# CONFIG
+# ============================================================
 
-def download_omni():
-    print("=" * 60)
-    print("🌌 BAIXANDO DADOS OMNI (NASA)")
-    print("=" * 60)
+START_DATE = "2000-01-01T00:00:00Z"
+END_DATE   = "2020-12-31T23:59:59Z"
 
-    os.makedirs("data", exist_ok=True)
+OUTPUT_FILE = "omni_1min_2000_2020.csv"
 
-    # Fonte OMNI (NOAA/NASA JSON)
-    url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-5-minute.json"
+# Dataset OMNI 1-min
+DATASET = "OMNI_HRO_1MIN"
 
-    print(f"📡 Baixando: {url}")
-    response = requests.get(url, timeout=30)
+# ============================================================
+# VARIÁVEIS
+# ============================================================
 
-    if response.status_code != 200:
-        raise Exception(f"Erro download: HTTP {response.status_code}")
+VARIABLES = [
+    "BX_GSE",
+    "BY_GSM",
+    "BZ_GSM",
+    "F",            # |B|
+    "flow_speed",
+    "proton_density",
+    "T"             # temperatura
+]
 
-    data = response.json()
+# ============================================================
+# DOWNLOAD
+# ============================================================
 
-    # Primeira linha = header
-    header = data[0]
-    rows = data[1:]
+cdas = CdasWs()
 
-    df = pd.DataFrame(rows, columns=header)
+print("=" * 70)
+print("🚀 BAIXANDO OMNI 1-MIN HISTÓRICO")
+print("=" * 70)
 
-    print("🔧 Limpando dados...")
+print(f"\n📥 Dataset: {DATASET}")
+print(f"📅 Período: {START_DATE} → {END_DATE}")
 
-    # Converter tipos
-    df["time_tag"] = pd.to_datetime(df["time_tag"])
-    df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
-    df["density"] = pd.to_numeric(df["density"], errors="coerce")
+status, data = cdas.get_data(
+    DATASET,
+    VARIABLES,
+    START_DATE,
+    END_DATE
+)
 
-    # Alguns datasets usam bz ou bz_gsm
-    if "bz_gsm" in df.columns:
-        df["bz_gsm"] = pd.to_numeric(df["bz_gsm"], errors="coerce")
-    elif "bz" in df.columns:
-        df["bz_gsm"] = pd.to_numeric(df["bz"], errors="coerce")
-    else:
-        print("⚠️ Bz não encontrado, preenchendo com 0")
-        df["bz_gsm"] = 0
+if not status:
+    raise RuntimeError("Falha ao baixar dados da CDAWeb.")
 
-    # Selecionar colunas essenciais
-    df = df[["time_tag", "speed", "density", "bz_gsm"]]
+print("\n✅ Download concluído")
 
-    # Renomear para padrão HAC
-    df.rename(columns={
-        "time_tag": "datetime"
-    }, inplace=True)
+# ============================================================
+# CONVERSÃO
+# ============================================================
 
-    # Remover NaNs
-    before = len(df)
-    df = df.dropna()
-    after = len(df)
+print("\n⚙️ Convertendo para DataFrame...")
 
-    print(f"🧹 Removidos {before - after} valores inválidos")
+df = pd.DataFrame({
+    "time_tag": pd.to_datetime(data["Epoch"]),
+    "bx_gse": np.array(data["BX_GSE"]),
+    "by_gsm": np.array(data["BY_GSM"]),
+    "bz_gsm": np.array(data["BZ_GSM"]),
+    "bt": np.array(data["F"]),
+    "speed": np.array(data["flow_speed"]),
+    "density": np.array(data["proton_density"]),
+    "temperature": np.array(data["T"])
+})
 
-    # Ordenar
-    df = df.sort_values("datetime")
+# ============================================================
+# LIMPEZA
+# ============================================================
 
-    # Salvar
-    df.to_csv(OUTPUT_PATH, index=False)
+print("🧹 Limpando valores inválidos...")
 
-    print(f"\n✅ Dataset salvo em: {OUTPUT_PATH}")
-    print(f"📊 Linhas: {len(df)}")
-    print(f"🕒 Período: {df['datetime'].min()} → {df['datetime'].max()}")
+invalid_threshold = 99999
 
-    return df
+for col in [
+    "bx_gse",
+    "by_gsm",
+    "bz_gsm",
+    "bt",
+    "speed",
+    "density",
+    "temperature"
+]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.loc[np.abs(df[col]) > invalid_threshold, col] = np.nan
 
+# Remove duplicados
+df = df.drop_duplicates(subset="time_tag")
 
-if __name__ == "__main__":
-    try:
-        df = download_omni()
+# Ordena
+df = df.sort_values("time_tag").reset_index(drop=True)
 
-        print("\n🚀 PRÓXIMO PASSO:")
-        print("python hac_v6_features.py")
+print(f"✅ Pontos válidos: {len(df)}")
 
-    except Exception as e:
-        print(f"\n❌ ERRO: {e}")
+# ============================================================
+# SAVE
+# ============================================================
+
+print(f"\n💾 Salvando: {OUTPUT_FILE}")
+
+df.to_csv(OUTPUT_FILE, index=False)
+
+print("\n✅ Finalizado")
+print("=" * 70)
