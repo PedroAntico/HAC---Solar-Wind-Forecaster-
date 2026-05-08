@@ -32,7 +32,7 @@ class HACPhysicsConfig:
     # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.1            # resposta quase instantânea a choques
+    TAU_BZ_CME = 0.05            # resposta quase instantânea a choques
 
     # Escalas físicas fixas
     E_FIELD_REF = 5.0           # mV/m
@@ -47,7 +47,7 @@ class HACPhysicsConfig:
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
-    TAU_DST = 20.0              # horas
+    TAU_DST = 12.0              # horas
     VBS_SAT = 25.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = 40 * np.tanh(coupling_signal / 20)
+        coupling_signal = 35 * np.tanh(coupling_signal / 18)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
@@ -461,7 +461,7 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             for _ in range(steps):
-                tau_dyn = tau_dst_base * (1.0 + abs(dst_fut) / 150.0)
+                tau_dyn = tau_dst_base * (1.0 + 0.5 * abs(dst_fut)/150.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 vbs_future_eff = max(0.0, vbs_persist - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
