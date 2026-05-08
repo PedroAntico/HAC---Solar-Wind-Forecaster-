@@ -48,7 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
     TAU_DST = 12.0              # horas
-    VBS_SAT = 14.0              # mV/m – saturação não‑linear do acoplamento
+    VBS_SAT = 22.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -68,8 +68,8 @@ class HACPhysicsConfig:
     HAC_G1 = 20
     HAC_G2 = 40
     HAC_G3 = 60
-    HAC_G4 = 90
-    HAC_G5 = 110
+    HAC_G4 = 110
+    HAC_G5 = 145
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = 28 * np.tanh(coupling_signal / 16)
+        coupling_signal = 35 * np.tanh(coupling_signal / 20)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
@@ -439,7 +439,9 @@ class ProductionHACModel:
             q_comp = -0.45 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
-            tau_dynamic = tau_dst_base * (1.0 + abs(dst_physical[i-1]) / 100.0)
+            storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
+
+            tau_dynamic = tau_dst_base * (1.0+ abs(dst_physical[i-1]) / 120.0 + 2.0 * storm_memory)
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -463,8 +465,7 @@ class ProductionHACModel:
             for _ in range(steps):
                 tau_dyn = tau_dst_base * (1.0 + 0.5 * abs(dst_fut)/150.0)
                 alpha = np.exp(-dt_median / tau_dyn)
-                decay = np.exp(-h / 2.0)
-                vbs_future = vbs_persist * decay
+                vbs_future = vbs_persist
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
@@ -526,9 +527,9 @@ class ProductionHACModel:
         final, sev_f = base, sev
         if score >= 14 and sev < 5:
             final, sev_f = "G5 (Nowcast Override)", 5
-        elif score >= 11 and sev < 4:
+        elif score >= 13 and sev < 4:
             final, sev_f = "G4 (Nowcast Override)", 4
-        elif score >= 8 and sev < 3:
+        elif score >= 10 and sev < 3:
             final, sev_f = "G3 (Nowcast Override)", 3
         elif score >= 5 and sev < 2:
             final, sev_f = "G2 (Nowcast Enhancement)", 2
@@ -570,7 +571,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip(0.3 * np.sqrt(abs(dst_min)) + 0.5 * np.sqrt(max(0, np.abs(dHAC_dt[-1]))), 0, 9)
+        kp_from_dst = np.clip( 0.045 * abs(dst_min)**0.78 + 1.2, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
