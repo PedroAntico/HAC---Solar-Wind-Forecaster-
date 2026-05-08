@@ -65,11 +65,11 @@ class HACPhysicsConfig:
     HAC_NORM_FACTOR = 150.0     # não aplicado agora
 
     # Limiares do HAC (provisórios – calibrar com dados)
-    HAC_G1 = 2
-    HAC_G2 = 4
-    HAC_G3 = 6
-    HAC_G4 = 8
-    HAC_G5 = 10
+    HAC_G1 = 15
+    HAC_G2 = 30
+    HAC_G3 = 50
+    HAC_G4 = 80
+    HAC_G5 = 120
 
     # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
@@ -240,7 +240,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = np.clip(coupling_signal, 0, 50)
+        coupling_signal = np.tanh(coupling_signal / 15) * 30
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
@@ -436,7 +436,7 @@ class ProductionHACModel:
             Q_injection = q_scale * vbs_nl
 
             # Compressão Burton‑like
-            q_comp = -0.3 * np.sqrt(max(0.0, pdyn[i]))
+            q_comp = -0.8 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
 
             tau_dynamic = tau_dst_base * (1.0 + abs(dst_physical[i-1]) / 150.0)
