@@ -48,7 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
     TAU_DST = 12.0              # horas
-    VBS_SAT = 22.0              # mV/m – saturação não‑linear do acoplamento
+    VBS_SAT = 20.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -456,16 +456,20 @@ class ProductionHACModel:
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         window_persist = min(120, n)
-        vbs_persist = np.mean(vbs_real[-window_persist:]) if window_persist > 0 else vbs_real[-1]
+        weights = np.exp(-np.linspace(0, 3, window_persist))
+        weights /= weights.sum()
+        vbs_persist = np.sum(vbs_real[-window_persist:] * weights)
         pdyn_persist = pdyn[-1]
 
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
-            for _ in range(steps):
+            for step in range(steps):
                 tau_dyn = tau_dst_base * (1.0 + 0.5 * abs(dst_fut)/150.0)
                 alpha = np.exp(-dt_median / tau_dyn)
-                vbs_future = vbs_persist
+                time_elapsed = step * dt_median
+                decay = np.exp(-time_elapsed / 2.5)
+                vbs_future = vbs_persist * decay
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
@@ -571,7 +575,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.055 * abs(dst_min)**0.8 + 1.0, 0, 9)
+        kp_from_dst = np.clip( 0.055 * abs(dst_min)**0.82 + 0.8, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
