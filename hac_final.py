@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com correções físicas e estruturais (maio/2026):
-- Burton clássico com Bz real (sem memória) – responde a choques de CME.
-- HAC/Nowcast continuam usando bz_eff (com persistência).
-- TAU_BZ_CME = 0.1 h (preserva picos impulsivos).
-- Q_SCALE = -2.2 (próximo à literatura), compressão Burton‑like.
-- HAC sem normalização forçada, thresholds provisórios baixos.
+Versão com saturação não‑linear do acoplamento e derivada adaptativa (maio/2026)
+
+Correções aplicadas:
+- Saturação não‑linear da injeção Q (VBs limitado por vbs_sat).
+- Derivada adaptativa: usa gradiente simples para tempestades fortes (HAC>40).
+- Burton clássico com Bz real (sem memória) – preserva choques.
+- Pressão dinâmica corrigida (1.6726e-6 * n * v²), compressão Burton‑like.
+- HAC como indicador auxiliar (sem normalização destrutiva).
 - Forecast com persistência do driver VBs real.
-- Kp estimado a partir de Dst e dH/dt.
 """
 
 import json
@@ -47,6 +48,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5         # mV/m
     Q_SCALE = -2.2              # nT/h por mV/m
     TAU_DST = 10.0              # horas
+    VBS_SAT = 12.0              # mV/m – saturação não‑linear do acoplamento
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -199,8 +201,7 @@ class PhysicalFieldsCalculator:
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
 
-        # Correção: apenas garante que bz_eff não seja positivo
-        bz_eff = np.minimum(bz_eff, 0.0)
+        bz_eff = np.minimum(bz_eff, 0.0)   # garante não positivo
 
         # ------------------------------------------------------------
         # Driver Burton: VBs com Bz REAL (sem memória)
@@ -286,16 +287,22 @@ class ProductionHACModel:
         dt = np.insert(dt, 0, np.median(dt))
         dt[dt <= 0] = 1.0
         dt_h = np.maximum(dt / 3600.0, 1e-3)
-        if len(hac_total) < 7:
+
+        # Adaptativo: para tempestades fortes, usa gradiente simples (preserva picos)
+        if np.max(hac_total) > 40:
             dH = np.gradient(hac_total) / dt_h
         else:
-            w = min(7, len(hac_total))
-            if w % 2 == 0:
-                w -= 1
-            try:
-                dH = savgol_filter(hac_total, w, 2, deriv=1, delta=np.median(dt_h))
-            except:
+            if len(hac_total) < 7:
                 dH = np.gradient(hac_total) / dt_h
+            else:
+                w = min(7, len(hac_total))
+                if w % 2 == 0:
+                    w -= 1
+                try:
+                    dH = savgol_filter(hac_total, w, 2, deriv=1, delta=np.median(dt_h))
+                except:
+                    dH = np.gradient(hac_total) / dt_h
+
         dH = np.nan_to_num(dH, nan=0.0)
         dH = np.clip(dH, -150, 150)
         print(f"     Derivada máx: {np.max(dH):.1f} nT/h")
@@ -400,7 +407,7 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-        # HAC total (sem normalização, valores brutos)
+        # HAC total (bruto, sem normalização)
         hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
 
@@ -408,11 +415,12 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
 
         # ========================================================
-        # Dst Burton (VBs REAL, sem memória)
+        # Dst Burton (VBs REAL, com saturação não‑linear)
         # ========================================================
         tau_dst_base = self.config.TAU_DST
         q_scale = self.config.Q_SCALE
         vbs_thr = self.config.VBs_THRESHOLD
+        vbs_sat = self.config.VBS_SAT
 
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
@@ -420,8 +428,12 @@ class ProductionHACModel:
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
 
+            # VBs efetivo acima do limiar
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
-            Q_injection = q_scale * vbs_eff_val
+
+            # SATURAÇÃO NÃO‑LINEAR (evita injeção descontrolada)
+            vbs_nl = vbs_eff_val / (1.0 + vbs_eff_val / vbs_sat)
+            Q_injection = q_scale * vbs_nl
 
             # Compressão Burton‑like
             q_comp = -0.3 * np.sqrt(max(0.0, pdyn[i]))
