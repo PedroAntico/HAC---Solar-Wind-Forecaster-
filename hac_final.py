@@ -438,17 +438,17 @@ class ProductionHACModel:
             # Compressão Burton‑like
             q_comp = -0.40 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
-
             storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
-
-            if Q_injection < -8:
-                tau_dynamic = 18.0   # main phase
-            elif dst_physical[i-1] < -150:
-                tau_dynamic = 30.0   # recovery profundo
-            elif dst_physical[i-1] < -80:
-                tau_dynamic = 22.0
+            if Q_injection < -10:
+                tau_dynamic = 14.0   # main phase intensa
+            elif dst_physical[i-1] < -200:
+                tau_dynamic = 18.0   # recovery profundo
+            elif dst_physical[i-1] < -100:
+                tau_dynamic = 14.0
+            elif dst_physical[i-1] < -50:
+                tau_dynamic = 10.0
             else:
-                tau_dynamic = 12.0
+                tau_dynamic = 7.0
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
