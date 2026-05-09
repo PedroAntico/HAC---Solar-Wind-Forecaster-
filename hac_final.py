@@ -54,7 +54,7 @@ class HACPhysicsConfig:
     # Memória de reconexão (NOVO)
     TAU_RECONNECTION = 18.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
-    RECONNECTION_K = 20.0       # constante de saturação racional
+    RECONNECTION_K = 35.0       # constante de saturação racional
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -397,6 +397,8 @@ class ProductionHACModel:
             injection_eff = np.clip(injection * dt_hours, 0, 100)
 
             loss_ring = (0.015 + 0.00008 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            if regime == 'CME' and Bz[i] < -15:
+                loss_ring *= 0.85
             loss_sub = (0.015 + 0.00008 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.00008 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
