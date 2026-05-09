@@ -403,9 +403,9 @@ class ProductionHACModel:
             elif regime == 'HSS':
                 base_loss *= 0.88
             
-            loss_ring = ( base_loss + 0.00005 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
-            loss_sub = (0.015 + 0.00008 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
-            loss_ion = (0.015 + 0.00008 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
+            loss_ring = ( base_loss + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            loss_sub = (0.015 + 0.00003 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
+            loss_ion = (0.015 + 0.00003 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
             if Bz[i] > 0:
                 loss_ring *= 1.3
