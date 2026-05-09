@@ -450,11 +450,11 @@ class ProductionHACModel:
             reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + vbs_nl * dt_hours
             reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
 
-            # Fator de memória mais gradual (expoente 0.55)
-            memory_factor = np.minimum(reconnection_memory[i], 120.0) ** 0.55
+            # Fator de memória mais gradual
+            memory_factor = ( reconnection_memory[i]  / (reconnection_memory[i] + 18.0))
 
             # Q instantâneo + contribuição da memória
-            Q_raw = q_scale * (0.65 * vbs_nl + 0.35 * memory_factor)
+            Q_raw = q_scale * (0.78 * vbs_nl + 0.22 * memory_factor)
 
             # Compressão Burton‑like (reduzida)
             q_comp = -0.18 * np.sqrt(max(0.0, pdyn[i]))
@@ -469,7 +469,7 @@ class ProductionHACModel:
 
             # Recuperação alongada para tempestades profundas
             if Vsw[i] > 850 and Bz[i] < -18:
-                tau_dynamic = 30.0          # eventos extremos têm recuperação lenta
+                tau_dynamic = (12 + 24 * np.tanh(abs(dst_physical[i-1]) / 140))
             elif dst_physical[i-1] < -250:
                 tau_dynamic = 36.0
             elif dst_physical[i-1] < -150:
