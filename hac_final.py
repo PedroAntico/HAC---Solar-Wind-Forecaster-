@@ -26,7 +26,7 @@ class HACPhysicsConfig:
     # Tempos característicos (horas)
     TAU_RING_CURRENT_QUIET = 10.0
     TAU_RING_CURRENT_HSS = 6.0
-    TAU_RING_CURRENT_CME = 3.0
+    TAU_RING_CURRENT_CME = 4.5
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
 
@@ -54,7 +54,7 @@ class HACPhysicsConfig:
     # Memória de reconexão (NOVO)
     TAU_RECONNECTION = 18.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
-    RECONNECTION_K = 35.0       # constante de saturação racional
+    RECONNECTION_K = 27.0       # constante de saturação racional
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -394,11 +394,16 @@ class ProductionHACModel:
             tau_ion = self.config.TAU_IONOSPHERE * 3600
 
             dt_hours = dt[i] / 3600.0
-            injection_eff = np.clip(injection * dt_hours, 0, 100)
+            injection_eff = np.clip( injection * (dt_hours ** 0.82), 0, 100)
 
-            loss_ring = (0.015 + 0.00008 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
-            if regime == 'CME' and Bz[i] < -15:
-                loss_ring *= 0.78
+            base_loss = 0.010
+
+            if regime == 'CME':
+                base_loss *= 0.72
+            elif regime == 'HSS':
+                base_loss *= 0.88
+            
+            loss_ring = ( base_loss + 0.00005 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             loss_sub = (0.015 + 0.00008 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.00008 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
