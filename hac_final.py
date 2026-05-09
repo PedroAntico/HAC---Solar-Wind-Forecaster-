@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com memória de reconexão invariante, recuperação alongada e métricas refinadas
+Versão com memória de reconexão saturada, recuperação contínua e métricas temporais
 (maio/2026)
 
 Melhorias aplicadas:
-- Memória de reconexão com decaimento exponencial (tau=18h) em vez de fator fixo.
-- Saturação da memória de reconexão (clip em 120) para evitar acúmulo espúrio.
-- memory_factor mais gradual (expoente 0.55 em vez de tanh/14).
-- Tendência recente suavizada via Savitzky‑Golay no forecast.
-- Recuperação extrema: tau_dynamic = 30h para Vsw>850 e Bz<-18.
+- Memória de reconexão invariante (tau=18h) com saturação racional (R/(R+20)).
+- Peso da memória reduzido para 22% (evita double counting).
+- Tau dinâmico contínuo: 12 + 24*tanh(|Dst|/140).
 - Compressão Burton‑like reduzida (q_comp = -0.18*sqrt(Pdyn)).
-- Métrica adicional sugerida: área integrada do erro (implementar no validate_events.py).
+- Forecast com persistência suave e decaimento lento (4.5h).
+- Métricas de fase temporal: timing do mínimo, área integrada do erro, recovery slope.
 """
 
 import json
@@ -55,6 +54,7 @@ class HACPhysicsConfig:
     # Memória de reconexão (NOVO)
     TAU_RECONNECTION = 18.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
+    RECONNECTION_K = 20.0       # constante de saturação racional
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -429,6 +429,7 @@ class ProductionHACModel:
         vbs_sat = self.config.VBS_SAT
         tau_rec = self.config.TAU_RECONNECTION
         rec_sat = self.config.RECONNECTION_SAT
+        rec_k = self.config.RECONNECTION_K
 
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
@@ -450,10 +451,10 @@ class ProductionHACModel:
             reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + vbs_nl * dt_hours
             reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
 
-            # Fator de memória mais gradual
-            memory_factor = ( reconnection_memory[i]  / (reconnection_memory[i] + 18.0))
+            # SATURAÇÃO RACIONAL (substitui R^0.55)
+            memory_factor = reconnection_memory[i] / (reconnection_memory[i] + rec_k)
 
-            # Q instantâneo + contribuição da memória
+            # Q instantâneo + contribuição da memória (peso reduzido para 22%)
             Q_raw = q_scale * (0.78 * vbs_nl + 0.22 * memory_factor)
 
             # Compressão Burton‑like (reduzida)
@@ -467,17 +468,8 @@ class ProductionHACModel:
             elif regime_i == 'HSS':
                 Q_injection *= 0.92
 
-            # Recuperação alongada para tempestades profundas
-            if Vsw[i] > 850 and Bz[i] < -18:
-                tau_dynamic = (12 + 24 * np.tanh(abs(dst_physical[i-1]) / 140))
-            elif dst_physical[i-1] < -250:
-                tau_dynamic = 36.0
-            elif dst_physical[i-1] < -150:
-                tau_dynamic = 28.0
-            elif dst_physical[i-1] < -80:
-                tau_dynamic = 18.0
-            else:
-                tau_dynamic = 12.0
+            # Tau dinâmico CONTÍNUO (substitui degraus)
+            tau_dynamic = 12.0 + 24.0 * np.tanh(abs(dst_physical[i-1]) / 140.0)
 
             alpha = np.exp(-dt_hours / tau_dynamic)
 
