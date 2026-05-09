@@ -398,7 +398,7 @@ class ProductionHACModel:
 
             loss_ring = (0.015 + 0.00008 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             if regime == 'CME' and Bz[i] < -15:
-                loss_ring *= 0.85
+                loss_ring *= 0.78
             loss_sub = (0.015 + 0.00008 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.00008 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
