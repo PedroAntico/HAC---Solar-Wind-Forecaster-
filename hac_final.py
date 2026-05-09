@@ -246,7 +246,7 @@ class PhysicalFieldsCalculator:
 
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
-        coupling_signal = 32 * np.tanh(coupling_signal / 18)
+        coupling_signal = 45 * np.tanh(coupling_signal / 24)
 
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
