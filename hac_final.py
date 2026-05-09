@@ -33,7 +33,7 @@ class HACPhysicsConfig:
     # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.2            # resposta quase instantânea a choques
+    TAU_BZ_CME = 0.5            # resposta quase instantânea a choques
 
     # Escalas físicas fixas
     E_FIELD_REF = 5.0           # mV/m
@@ -52,7 +52,7 @@ class HACPhysicsConfig:
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
     # Memória de reconexão (NOVO)
-    TAU_RECONNECTION = 18.0     # horas – decaimento da memória
+    TAU_RECONNECTION = 10.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
     RECONNECTION_K = 27.0       # constante de saturação racional
 
@@ -476,7 +476,7 @@ class ProductionHACModel:
                 Q_injection *= 0.92
 
             # Tau dinâmico CONTÍNUO (substitui degraus)
-            tau_dynamic = 12.0 + 24.0 * np.tanh(abs(dst_physical[i-1]) / 140.0)
+            tau_dynamic = 10.0 + 16.0 * np.tanh(abs(dst_physical[i-1]) / 120.0)
 
             alpha = np.exp(-dt_hours / tau_dynamic)
 
