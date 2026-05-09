@@ -352,7 +352,41 @@ def validate_event(config_core, df_aligned, name, start, end, physics_config):
     plt.close()
 
     return metrics
+  
+def integrated_area_error(time, obs, pred):
+    """Calcula a integral do erro absoluto no tempo (nT·h)."""
+    dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
+    dt = np.insert(dt, 0, np.median(dt))
+    area = np.trapz(np.abs(obs - pred), dx=dt)
+    return area
 
+def phase_metrics(time, obs, pred):
+    """Calcula métricas de fase temporal."""
+    # Timing do mínimo
+    idx_obs = np.argmin(obs)
+    idx_pred = np.argmin(pred)
+    dt_min = (time[idx_pred] - time[idx_obs]).astype('timedelta64[m]').astype(float)
+
+    # Área integrada do erro (nT·h)
+    dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
+    dt = np.insert(dt, 0, np.median(dt))
+    iae = np.trapz(np.abs(obs - pred), dx=dt)
+
+    # Recovery slope (nT/h) – entre 6h e 12h após o mínimo
+    t_min_obs = time[idx_obs]
+    mask_rec = (time >= t_min_obs + np.timedelta64(6, 'h')) & (time <= t_min_obs + np.timedelta64(12, 'h'))
+    if np.sum(mask_rec) >= 2:
+        slope_obs = np.polyfit(np.arange(np.sum(mask_rec)), obs[mask_rec], 1)[0]
+        slope_pred = np.polyfit(np.arange(np.sum(mask_rec)), pred[mask_rec], 1)[0]
+    else:
+        slope_obs = slope_pred = np.nan
+
+    return {
+        'min_timing_error_min': dt_min,
+        'integrated_area_error_nT_h': iae,
+        'obs_recovery_slope_nT_h': slope_obs,
+        'pred_recovery_slope_nT_h': slope_pred}
+  
 # =========================
 # MAIN
 # =========================
