@@ -364,10 +364,12 @@ def validate_event(config_core, df_aligned, name, start, end, physics_config):
     return metrics
   
 def integrated_area_error(time, obs, pred):
-    """Calcula a integral do erro absoluto no tempo (nT·h)."""
+    """Integral temporal do erro absoluto (nT·h)."""
+
     dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
-    dt = np.insert(dt, 0, np.median(dt))
-    area = np.trapezoid(np.abs(obs - pred), dx=dt)
+
+    area = np.sum( 0.5 * ( np.abs(obs[:-1] - pred[:-1]) + np.abs(obs[1:] - pred[1:]) ) * dt)
+
     return area
 
 def phase_metrics(time, obs, pred):
@@ -379,9 +381,8 @@ def phase_metrics(time, obs, pred):
 
     # Área integrada do erro (nT·h)
     dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
-    dt = np.insert(dt, 0, np.median(dt))
-    iae = np.trapezoid(np.abs(obs - pred), dx=dt)
-
+    iae = np.sum( 0.5 * ( np.abs(obs[:-1] - pred[:-1]) + np.abs(obs[1:] - pred[1:])) * dt)
+  
     # Recovery slope (nT/h) – entre 6h e 12h após o mínimo
     t_min_obs = time[idx_obs]
     mask_rec = (time >= t_min_obs + np.timedelta64(6, 'h')) & (time <= t_min_obs + np.timedelta64(12, 'h'))
