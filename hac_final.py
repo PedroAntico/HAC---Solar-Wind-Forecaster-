@@ -436,7 +436,7 @@ class ProductionHACModel:
             Q_injection = q_scale * vbs_nl
 
             # Compressão Burton‑like
-            q_comp = -0.22 * np.sqrt(max(0.0, pdyn[i]))
+            q_comp = -0.30 * np.sqrt(max(0.0, pdyn[i]))
             Q_injection += q_comp
             storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
             if Vsw[i] > 850 and Bz[i] < -18:
@@ -444,11 +444,11 @@ class ProductionHACModel:
             elif Vsw[i] > 700 and Bz[i] < -12:
                 tau_dynamic = 12.0   # CME moderada
             elif dst_physical[i-1] < -150:
-                tau_dynamic = 10.0
+                tau_dynamic = 18.0
             elif dst_physical[i-1] < -80:
-                tau_dynamic = 8.0
+                tau_dynamic = 14.0
             else:
-                tau_dynamic = 6.0
+                tau_dynamic = 10.0
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -481,7 +481,7 @@ class ProductionHACModel:
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
                 vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
-                q_comp_fut = -0.08 * np.sqrt(max(0.0, pdyn_persist))
+                q_comp_fut = -0.10 * np.sqrt(max(0.0, pdyn_persist))
                 Q_fut = q_fut + q_comp_fut
                 dst_fut = dst_fut * alpha + Q_fut * tau_dyn * (1.0 - alpha)
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
