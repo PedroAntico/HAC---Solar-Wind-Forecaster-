@@ -433,7 +433,7 @@ class ProductionHACModel:
 
             # SATURAÇÃO NÃO‑LINEAR (evita injeção descontrolada)
             vbs_nl = vbs_eff_val / (1.0 + vbs_eff_val / vbs_sat)
-            Q_injection = q_scale * vbs_nl
+            Q_injection = 1.05 * q_scale * vbs_nl
 
             # Compressão Burton‑like
             q_comp = -0.30 * np.sqrt(max(0.0, pdyn[i]))
@@ -475,7 +475,7 @@ class ProductionHACModel:
                 tau_dyn = tau_dst_base * (1.0 + 0.28 * abs(dst_fut)/140.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
-                decay = np.exp(-time_elapsed / 2.4)
+                decay = np.exp(-time_elapsed / 2.5)
                 recent_trend = np.median(np.diff(vbs_real[-12:]))
                 vbs_future = max( 0, vbs_persist * decay + recent_trend * 0.25)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
