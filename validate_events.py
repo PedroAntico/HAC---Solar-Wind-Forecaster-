@@ -442,7 +442,16 @@ def main():
     print(f"   • HAC_THR: {physics_config.HAC_THR:.1f}")
 
     config_core = global_calibration(df_train)
-
+    timing = phase_metrics(
+    event['time_tag'].values,
+    event['dst'].values,
+    dst_pred)
+    
+    print(f"   • Timing erro mín: {timing['min_timing_error_min']:.1f} min")
+    print(f"   • Área integrada erro: {timing['integrated_area_error_nT_h']:.1f}")
+    print(f"   • Recovery obs: {timing['obs_recovery_slope_nT_h']:.2f}")
+    print(f"   • Recovery pred: {timing['pred_recovery_slope_nT_h']:.2f}")
+    
     # Validação
     results = []
     for name, (start, end) in EVENTS.items():
