@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com saturação não‑linear do acoplamento e derivada adaptativa (maio/2026)
+Versão com memória de reconexão invariante, recuperação alongada e métricas refinadas
+(maio/2026)
 
-Correções aplicadas:
-- Saturação não‑linear da injeção Q (VBs limitado por vbs_sat).
-- Derivada adaptativa: usa gradiente simples para tempestades fortes (HAC>40).
-- Burton clássico com Bz real (sem memória) – preserva choques.
-- Pressão dinâmica corrigida (1.6726e-6 * n * v²), compressão Burton‑like.
-- HAC como indicador auxiliar (sem normalização destrutiva).
-- Forecast com persistência do driver VBs real.
+Melhorias aplicadas:
+- Memória de reconexão com decaimento exponencial (tau=18h) em vez de fator fixo.
+- Saturação da memória de reconexão (clip em 120) para evitar acúmulo espúrio.
+- memory_factor mais gradual (expoente 0.55 em vez de tanh/14).
+- Tendência recente suavizada via Savitzky‑Golay no forecast.
+- Recuperação extrema: tau_dynamic = 30h para Vsw>850 e Bz<-18.
+- Compressão Burton‑like reduzida (q_comp = -0.18*sqrt(Pdyn)).
+- Métrica adicional sugerida: área integrada do erro (implementar no validate_events.py).
 """
 
 import json
@@ -49,6 +51,10 @@ class HACPhysicsConfig:
     Q_SCALE = -2.8              # nT/h por mV/m
     TAU_DST = 12.0              # horas
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
+
+    # Memória de reconexão (NOVO)
+    TAU_RECONNECTION = 18.0     # horas – decaimento da memória
+    RECONNECTION_SAT = 120.0    # saturação da memória
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -415,15 +421,20 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
 
         # ========================================================
-        # Dst Burton (VBs REAL, com saturação não‑linear)
+        # Dst Burton (VBs REAL, com memória de reconexão e regime)
         # ========================================================
         tau_dst_base = self.config.TAU_DST
         q_scale = self.config.Q_SCALE
         vbs_thr = self.config.VBs_THRESHOLD
         vbs_sat = self.config.VBS_SAT
+        tau_rec = self.config.TAU_RECONNECTION
+        rec_sat = self.config.RECONNECTION_SAT
 
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
+
+        # Memória de reconexão (acumula VBs não‑linear ao longo do tempo)
+        reconnection_memory = np.zeros(n)
 
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
@@ -431,24 +442,43 @@ class ProductionHACModel:
             # VBs efetivo acima do limiar
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
 
-            # SATURAÇÃO NÃO‑LINEAR (evita injeção descontrolada)
+            # SATURAÇÃO NÃO‑LINEAR
             vbs_nl = vbs_eff_val / (1.0 + vbs_eff_val / vbs_sat)
-            Q_injection = 1.05 * q_scale * vbs_nl
 
-            # Compressão Burton‑like
-            q_comp = -0.30 * np.sqrt(max(0.0, pdyn[i]))
-            Q_injection += q_comp
-            storm_memory = np.clip(abs(dst_physical[i-1]) / 250.0, 0, 1)
+            # Memória de reconexão (decaimento temporal, invariante à resolução)
+            alpha_rec = np.exp(-dt_hours / tau_rec)
+            reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + vbs_nl * dt_hours
+            reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
+
+            # Fator de memória mais gradual (expoente 0.55)
+            memory_factor = np.minimum(reconnection_memory[i], 120.0) ** 0.55
+
+            # Q instantâneo + contribuição da memória
+            Q_raw = q_scale * (0.65 * vbs_nl + 0.35 * memory_factor)
+
+            # Compressão Burton‑like (reduzida)
+            q_comp = -0.18 * np.sqrt(max(0.0, pdyn[i]))
+            Q_injection = Q_raw + q_comp
+
+            # Diferenciação de regime no próprio Burton
+            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            if regime_i == 'CME':
+                Q_injection *= 1.18
+            elif regime_i == 'HSS':
+                Q_injection *= 0.92
+
+            # Recuperação alongada para tempestades profundas
             if Vsw[i] > 850 and Bz[i] < -18:
-                tau_dynamic = 15.0   # CME extrema
-            elif Vsw[i] > 700 and Bz[i] < -12:
-                tau_dynamic = 12.0   # CME moderada
+                tau_dynamic = 30.0          # eventos extremos têm recuperação lenta
+            elif dst_physical[i-1] < -250:
+                tau_dynamic = 36.0
             elif dst_physical[i-1] < -150:
-                tau_dynamic = 18.0
+                tau_dynamic = 28.0
             elif dst_physical[i-1] < -80:
-                tau_dynamic = 14.0
+                tau_dynamic = 18.0
             else:
-                tau_dynamic = 10.0
+                tau_dynamic = 12.0
+
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_physical[i] = (dst_physical[i-1] * alpha
@@ -458,7 +488,7 @@ class ProductionHACModel:
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
         # ========================================================
-        # Forecast com persistência do driver (VBs REAL)
+        # Forecast com persistência suave e decaimento lento
         # ========================================================
         forecast = {}
         dt_median = np.median(dt) / 3600.0
@@ -472,14 +502,20 @@ class ProductionHACModel:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             for step in range(steps):
-                tau_dyn = tau_dst_base * (1.0 + 0.28 * abs(dst_fut)/140.0)
+                tau_dyn = tau_dst_base * (1.0 + 0.28 * abs(dst_fut) / 140.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
-                decay = np.exp(-time_elapsed / 2.5)
-                recent_trend = np.median(np.diff(vbs_real[-12:]))
-                vbs_future = max( 0, vbs_persist * decay + recent_trend * 0.25)
+                decay = np.exp(-time_elapsed / 4.5)          # decaimento mais lento
+                # Tendência recente suavizada com Savitzky‑Golay
+                recent_window = vbs_real[-18:]
+                if len(recent_window) >= 7:
+                    smooth_recent = savgol_filter(recent_window, 7, 2)
+                    recent_trend = np.mean(np.diff(smooth_recent))
+                else:
+                    recent_trend = 0.0
+                vbs_future = max(0, vbs_persist * decay + recent_trend * 0.25)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
-                vbs_future_nl = (vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat))
+                vbs_future_nl = vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat)
                 q_fut = q_scale * vbs_future_nl
                 q_comp_fut = -0.10 * np.sqrt(max(0.0, pdyn_persist))
                 Q_fut = q_fut + q_comp_fut
