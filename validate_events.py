@@ -367,7 +367,7 @@ def integrated_area_error(time, obs, pred):
     """Calcula a integral do erro absoluto no tempo (nT·h)."""
     dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
     dt = np.insert(dt, 0, np.median(dt))
-    area = np.trapz(np.abs(obs - pred), dx=dt)
+    area = np.trapezoid(np.abs(obs - pred), dx=dt)
     return area
 
 def phase_metrics(time, obs, pred):
@@ -380,7 +380,7 @@ def phase_metrics(time, obs, pred):
     # Área integrada do erro (nT·h)
     dt = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
     dt = np.insert(dt, 0, np.median(dt))
-    iae = np.trapz(np.abs(obs - pred), dx=dt)
+    iae = np.trapezoid(np.abs(obs - pred), dx=dt)
 
     # Recovery slope (nT/h) – entre 6h e 12h após o mínimo
     t_min_obs = time[idx_obs]
