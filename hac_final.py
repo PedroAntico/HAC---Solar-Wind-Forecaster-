@@ -519,7 +519,7 @@ class ProductionHACModel:
         delay_steps = max( 1, int(1.0 / mean_dt_hours))
         vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
         
-        # ========================================================
+       # ========================================================
         # Evolução temporal do Dst
         # ========================================================
         for i in range(1, n):
@@ -529,26 +529,17 @@ class ProductionHACModel:
             # ----------------------------------------------------
             # SSC / pressão dinâmica
             # ----------------------------------------------------
-            dst_pressure[i] = np.clip(
-                7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0,
-                -20,
-                35
-            )
+            dst_pressure[i] = np.clip( 7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35 )
         
             # ----------------------------------------------------
             # Campo elétrico efetivo
             # ----------------------------------------------------
-            vbs_eff_val = max(
-                0.0,
-                vbs_real[i] - vbs_thr
-            )
+            vbs_eff_val = max( 0.0, vbs_real[i] - vbs_thr)
         
-            vbs_nl = vbs_sat * (
-                1.0 - np.exp(-vbs_eff_val / vbs_sat)
-            )
+            vbs_nl = vbs_sat * ( 1.0 - np.exp(-vbs_eff_val / vbs_sat))
         
             # ----------------------------------------------------
-            # Delay de transporte
+            # Delay de transporte solar wind → magnetosfera
             # ----------------------------------------------------
             vbs_buffer.append(vbs_nl)
             vbs_delayed = vbs_buffer[0]
@@ -557,89 +548,93 @@ class ProductionHACModel:
             # Regime físico atual
             # ----------------------------------------------------
             regime_i = _detect_regime_scalar( Vsw[i], density[i], Bz[i])
-            
+        
             # ----------------------------------------------------
-            # Build-up magnetosférico dependente do regime
+            # Build-up magnetosférico ASSIMÉTRICO
+            # subida rápida / decay lento
             # ----------------------------------------------------
             if regime_i == 'CME':
-                tau_inj = 1.0
-            
+        
+                tau_inj_rise = 0.5
+                tau_inj_decay = 2.0
+        
             elif regime_i == 'HSS':
-                tau_inj = 3.0
-            
+        
+                tau_inj_rise = 2.5
+                tau_inj_decay = 4.0
+        
             else:
-                tau_inj = 2.0
-            
-            alpha_inj = np.exp(-dt_hours / tau_inj)
-            
+        
+                tau_inj_rise = 1.5
+                tau_inj_decay = 2.5
+        
+            # Escolha dinâmica do tau
+            if vbs_delayed > injection_buffer[i-1]:
+        
+                tau_inj = tau_inj_rise
+        
+            else:
+        
+                tau_inj = tau_inj_decay
+        
+            alpha_inj = np.exp( -dt_hours / tau_inj)
             injection_buffer[i] = ( alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed)
-            
+        
+            # Saturação física do reservatório
+            injection_buffer[i] = np.clip( injection_buffer[i], 0, vbs_sat)
+        
             # ----------------------------------------------------
             # Memória de reconexão
             # ----------------------------------------------------
-            alpha_rec = np.exp(-dt_hours / tau_rec)
-            
-            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i-1] + 0.35 * injection_buffer[i] * dt_hours)
-            
+            alpha_rec = np.exp( -dt_hours / tau_rec)
+        
+            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i-1]  + 0.35 * injection_buffer[i] * dt_hours)
+        
             reconnection_memory[i] = np.clip( reconnection_memory[i], 0, rec_sat)
-            
-            memory_factor = ( reconnection_memory[i] / (reconnection_memory[i] + rec_k))
-            
+        
+            memory_factor = ( reconnection_memory[i]  / (reconnection_memory[i] + rec_k))
+        
             # ----------------------------------------------------
             # Injeção física no ring current
             # ----------------------------------------------------
             Q_raw = q_scale * ( 0.78 * injection_buffer[i] + 0.22 * memory_factor)
-            
+        
             # ----------------------------------------------------
-            # Ganho dinâmico por regime
+            # Ganho dinâmico dependente do regime
             # ----------------------------------------------------
             regime_gain = 1.0
-            
+        
             if regime_i == 'CME':
-                regime_gain += 0.18 * np.tanh(injection_buffer[i] / 10.0)
-            
+                regime_gain += ( 0.18 * np.tanh(injection_buffer[i] / 10.0))
             elif regime_i == 'HSS':
-                regime_gain -= 0.08 * np.tanh(injection_buffer[i] / 12.0)
-            
+                regime_gain -= ( 0.08 * np.tanh(injection_buffer[i] / 12.0))
+        
             Q_raw *= regime_gain
         
             # ----------------------------------------------------
-            # Tau dinâmico contínuo
+            # Tau dinâmico do ring current
             # ----------------------------------------------------
-            tau_dynamic = (
-                10.0
-                + 16.0 * np.tanh(
-                    abs(dst_ring[i-1]) / 120.0
-                )
-            )
-        
-            alpha = np.exp(
-                -dt_hours / tau_dynamic
-            )
+            tau_dynamic = ( 7.0 + 10.0 * np.tanh(abs(dst_ring[i-1]) / 140.0))
+            alpha = np.exp( -dt_hours / tau_dynamic)
         
             # ----------------------------------------------------
             # Evolução do ring current
             # ----------------------------------------------------
-            dst_ring[i] = (
-                dst_ring[i-1] * alpha
-                + Q_raw * tau_dynamic * (1.0 - alpha)
-            )
+            dst_ring[i] = ( dst_ring[i-1] * alpha + Q_raw * tau_dynamic * (1.0 - alpha))
+        
+            # Limite físico do ring current
+            dst_ring[i] = np.clip( dst_ring[i], -450, 40 )
         
             # ----------------------------------------------------
             # Dst total
             # ----------------------------------------------------
-            dst_physical[i] = (
-                dst_ring[i]
-                + dst_pressure[i]
-            )
+            dst_physical[i] = ( dst_ring[i]  + dst_pressure[i])
         
-            dst_physical[i] = np.clip(
-                dst_physical[i],
-                -500,
-                50
-            )
+            dst_physical[i] = np.clip( dst_physical[i], -500, 50)
         
+            # ----------------------------------------------------
             # Dst* = ring current puro
+            # ----------------------------------------------------
             dst_star[i] = dst_ring[i]
         
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
