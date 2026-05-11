@@ -559,7 +559,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             if regime_i == 'CME':
         
-                tau_inj_rise = 1.2
+                tau_inj_rise = 0.55
                 tau_inj_decay = 3.0
         
             elif regime_i == 'HSS':
@@ -593,7 +593,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             alpha_rec = np.exp( -dt_hours / tau_rec)
         
-            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i - 1] + 0.32 * injection_buffer[i] * dt_hours)
+            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i - 1] + 0.52 * injection_buffer[i] * dt_hours)
         
             reconnection_memory[i] = np.clip( reconnection_memory[i], 0, rec_sat )
         
@@ -613,7 +613,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             # Injeção física
             # ----------------------------------------------------
-            Q_raw = q_scale * (  0.68 * injection_buffer[i]**0.96  + 0.32 * memory_factor)
+            Q_raw = q_scale * (  0.68 * injection_buffer[i]**1.08  + 0.32 * memory_factor)
         
             # ----------------------------------------------------
             # Ganho dependente do regime
@@ -643,7 +643,7 @@ class ProductionHACModel:
             # ====================================================
             storm_state = ( 0.68 * injection_buffer[i] + 0.32 * ring_memory[i] * 7.0)
             
-            if storm_state > 2.1:
+            if storm_state > 1.45:
                 tau_dynamic = ( 7.0 + 6.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 3.5 * memory_factor + 3.0 * ring_memory[i])
             else:
                 tau_dynamic = ( 18.0 + 13.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 12.0 * ring_memory[i] )
