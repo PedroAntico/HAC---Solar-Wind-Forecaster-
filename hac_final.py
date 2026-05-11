@@ -641,12 +641,12 @@ class ProductionHACModel:
             # ====================================================
             # Estado global da tempestade
             # ====================================================
-            storm_state = ( 0.75 * injection_buffer[i] + 0.25 * ring_memory[i] * 6.0)
+            storm_state = ( 0.68 * injection_buffer[i] + 0.32 * ring_memory[i] * 7.0)
             
-            if storm_state > 2.8:
+            if storm_state > 2.1:
                 tau_dynamic = ( 7.0 + 6.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 3.5 * memory_factor + 3.0 * ring_memory[i])
             else:
-                tau_dynamic = ( 13.0 + 9.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 5.0 * memory_factor + 7.0 * ring_memory[i] )
+                tau_dynamic = ( 16.0 + 12.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 9.0 * ring_memory[i] )
         
             # ----------------------------------------------------
             # Limites físicos
