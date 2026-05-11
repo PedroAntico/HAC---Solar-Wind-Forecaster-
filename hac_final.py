@@ -597,25 +597,46 @@ class ProductionHACModel:
             # ----------------------------------------------------
             # Injeção física no ring current
             # ----------------------------------------------------
-            Q_raw = q_scale * ( 0.78 * injection_buffer[i] + 0.22 * memory_factor)
-        
+            Q_raw = q_scale * ( 0.78 * injection_buffer[i]  + 0.22 * memory_factor)
+
             # ----------------------------------------------------
             # Ganho dinâmico dependente do regime
             # ----------------------------------------------------
             regime_gain = 1.0
-        
+
             if regime_i == 'CME':
                 regime_gain += ( 0.18 * np.tanh(injection_buffer[i] / 10.0))
+
             elif regime_i == 'HSS':
                 regime_gain -= ( 0.08 * np.tanh(injection_buffer[i] / 12.0))
-        
+
             Q_raw *= regime_gain
-        
-            # ----------------------------------------------------
+
+            # ====================================================
             # Tau dinâmico do ring current
+            # Separação física:
+            #   • Main phase  -> decay rápido
+            #   • Recovery    -> decay lento
+            # ====================================================
+
+            # -----------------------------
+            # Fase principal (injeção ativa)
+            # -----------------------------
+            if injection_buffer[i] > 1.5:
+                tau_dynamic = ( 7.0 + 8.0 * np.tanh(abs(dst_ring[i-1]) / 140.0) + 4.0 * memory_factor)
+
+            # -----------------------------
+            # Recovery phase
+            # -----------------------------
+            else:
+                tau_dynamic = ( 16.0 + 18.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor)
+
             # ----------------------------------------------------
-            tau_dynamic = ( 7.0 + 8.0 * np.tanh(abs(dst_ring[i-1]) / 140.0) + 4.0 * memory_factor)
-            alpha = np.exp( -dt_hours / tau_dynamic)
+            # Limites físicos do tau
+            # ----------------------------------------------------
+            tau_dynamic = np.clip( tau_dynamic, 4.0, 42.0 )
+
+            alpha = np.exp( -dt_hours / tau_dynamic )
         
             # ----------------------------------------------------
             # Evolução do ring current
