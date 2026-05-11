@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com memória de reconexão saturada, recuperação contínua e métricas temporais
+Versão refinada com SSC Burton/O'Brien, atraso consistente e ganho dinâmico
 (maio/2026)
 
 Melhorias aplicadas:
-- Memória de reconexão invariante (tau=18h) com saturação racional (R/(R+20)).
-- Peso da memória reduzido para 22% (evita double counting).
-- Tau dinâmico contínuo: 12 + 24*tanh(|Dst|/140).
-- Compressão Burton‑like reduzida (q_comp = -0.18*sqrt(Pdyn)).
-- Forecast com persistência suave e decaimento lento (4.5h).
-- Métricas de fase temporal: timing do mínimo, área integrada do erro, recovery slope.
+- SSC corrigido: 7.26 * sqrt(Pdyn) - 11.0 (fórmula Burton/O'Brien).
+- Memória de reconexão agora usa VBs atrasado (delay consistente).
+- Ganho de regime dinâmico: tanh(VBs_delayed / 10) para CME, etc.
+- Métricas de fase com recovery slope em nT/h real.
+- Separação Dst_ring / Dst_pressure para análise científica.
 """
 
 import json
@@ -18,6 +17,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
+from collections import deque
 
 # ============================================================
 # CONFIGURAÇÃO FÍSICA (CALIBRADA)
@@ -33,7 +33,7 @@ class HACPhysicsConfig:
     # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.5            # resposta quase instantânea a choques
+    TAU_BZ_CME = 0.5
 
     # Escalas físicas fixas
     E_FIELD_REF = 5.0           # mV/m
@@ -47,14 +47,14 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
-    Q_SCALE = -2.8              # nT/h por mV/m
+    Q_SCALE = -3.0              # nT/h por mV/m
     TAU_DST = 12.0              # horas
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
-    # Memória de reconexão (NOVO)
+    # Memória de reconexão
     TAU_RECONNECTION = 10.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
-    RECONNECTION_K = 27.0       # constante de saturação racional
+    RECONNECTION_K = 22.0       # constante de saturação racional
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -67,10 +67,10 @@ class HACPhysicsConfig:
     NEWELL_SCALE = 5e-4
 
     # Escalas operacionais do HAC (provisórias)
-    HAC_SCALE_MAX = 200.0       # ajustado para valores brutos
+    HAC_SCALE_MAX = 200.0
     HAC_NORM_FACTOR = 150.0     # não aplicado agora
 
-    # Limiares do HAC (provisórios – calibrar com dados)
+    # Limiares do HAC (provisórios)
     HAC_G1 = 20
     HAC_G2 = 40
     HAC_G3 = 60
@@ -83,7 +83,7 @@ class HACPhysicsConfig:
     BZ_MIN, BZ_MAX = -100, 100
 
     # Nowcast + Inércia
-    THETA_CRITICAL = 50.0       # nT/h
+    THETA_CRITICAL = 50.0
     HG3_THRESHOLD = 150.0
     VSW_CRITICAL = 700.0
     BZ_CRITICAL = -8.0
@@ -182,9 +182,7 @@ class PhysicalFieldsCalculator:
         v = df['speed'].fillna(400).values
         density = df['density'].fillna(5).values
 
-        # ------------------------------------------------------------
-        # Bz efetivo com TAU_BZ DINÂMICO (para HAC/Nowcast)
-        # ------------------------------------------------------------
+        # --- Bz efetivo com TAU_BZ DINÂMICO ---
         time_sec = pd.to_datetime(df['time_tag']).values.astype('datetime64[s]')
         dt_sec = np.diff(time_sec).astype(float)
         dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
@@ -193,9 +191,7 @@ class PhysicalFieldsCalculator:
         bz_neg = np.minimum(0, bz)
         bz_eff = np.zeros_like(bz)
         bz_eff[0] = bz_neg[0]
-
         regimes = np.array([_detect_regime_scalar(v[i], density[i], bz[i]) for i in range(len(bz))])
-
         for i in range(1, len(bz)):
             if regimes[i] == 'CME':
                 tau_bz = config.TAU_BZ_CME
@@ -203,35 +199,27 @@ class PhysicalFieldsCalculator:
                 tau_bz = config.TAU_BZ_HSS
             else:
                 tau_bz = config.TAU_BZ_QUIET
-
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
+        bz_eff = np.minimum(bz_eff, 0.0)
 
-        bz_eff = np.minimum(bz_eff, 0.0)   # garante não positivo
-
-        # ------------------------------------------------------------
-        # Driver Burton: VBs com Bz REAL (sem memória)
-        # ------------------------------------------------------------
+        # --- VBs real (sem memória) ---
         bz_south_real = np.maximum(0, -bz)
         vbs_real = v * bz_south_real * 1e-3
         vbs_real = np.clip(vbs_real, 0, config.E_FIELD_SATURATION)
         df['VBs_real'] = vbs_real
 
-        # VBs efetivo (com bz_eff) para HAC/Nowcast
+        # --- VBs efetivo (com bz_eff) ---
         bz_south_eff = np.maximum(0, -bz_eff)
         vbs_eff = v * bz_south_eff * 1e-3
         vbs_eff = np.clip(vbs_eff, 0, config.E_FIELD_SATURATION)
         df['VBs_eff'] = vbs_eff
 
-        # ------------------------------------------------------------
-        # Pressão dinâmica CORRIGIDA (nPa)
-        # ------------------------------------------------------------
+        # --- Pressão dinâmica ---
         pdyn = 1.6726e-6 * density * (v ** 2)
         df['Pdyn'] = pdyn
 
-        # ------------------------------------------------------------
-        # Acoplamento Newell (mantido para HAC)
-        # ------------------------------------------------------------
+        # --- Acoplamento Newell (para HAC) ---
         bt = df.get('bt', pd.Series(np.abs(bz), index=df.index)).fillna(0).values
         by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
         theta = np.arctan2(by, bz)
@@ -247,7 +235,6 @@ class PhysicalFieldsCalculator:
         coupling_comb = 0.6 * coupling_newell + 0.4 * coupling_nl
         coupling_signal = np.where(bz_eff < 0, coupling_comb, 0.0)
         coupling_signal = 45 * np.tanh(coupling_signal / 26)
-
         df['coupling_signal'] = coupling_signal
         df['bz_eff'] = bz_eff
 
@@ -261,7 +248,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+
+# 3. MODELO HAC+ (COM SEPARAÇÃO Dst_ring / Dst_pressure)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None):
@@ -282,7 +269,6 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização removida – usamos valores brutos."""
         norm = np.clip(values, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(norm):.1f}, méd: {np.mean(norm):.1f}")
         return norm
@@ -293,8 +279,6 @@ class ProductionHACModel:
         dt = np.insert(dt, 0, np.median(dt))
         dt[dt <= 0] = 1.0
         dt_h = np.maximum(dt / 3600.0, 1e-3)
-
-        # Adaptativo: para tempestades fortes, usa gradiente simples (preserva picos)
         if np.max(hac_total) > 40:
             dH = np.gradient(hac_total) / dt_h
         else:
@@ -308,7 +292,6 @@ class ProductionHACModel:
                     dH = savgol_filter(hac_total, w, 2, deriv=1, delta=np.median(dt_h))
                 except:
                     dH = np.gradient(hac_total) / dt_h
-
         dH = np.nan_to_num(dH, nan=0.0)
         dH = np.clip(dH, -150, 150)
         print(f"     Derivada máx: {np.max(dH):.1f} nT/h")
@@ -345,12 +328,8 @@ class ProductionHACModel:
         coupling = df['coupling_signal'].fillna(0).values
         Bz = df['bz_gsm'].fillna(0).values
         Vsw = df['speed'].fillna(400).values
-
-        # Driver Burton (Bz REAL) – array NumPy
         vbs_real = df.get('VBs_real', pd.Series(np.zeros_like(Bz))).values
-        # Pressão dinâmica – array NumPy
         pdyn = df.get('Pdyn', pd.Series(np.full_like(Bz, 3.0))).values
-
         density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
 
         dt = self._safe_deltat(times)
@@ -394,16 +373,15 @@ class ProductionHACModel:
             tau_ion = self.config.TAU_IONOSPHERE * 3600
 
             dt_hours = dt[i] / 3600.0
-            injection_eff = np.clip( injection * (dt_hours ** 0.82), 0, 100)
+            injection_eff = np.clip(injection * (dt_hours ** 0.82), 0, 100)
 
             base_loss = 0.010
-
             if regime == 'CME':
                 base_loss *= 0.72
             elif regime == 'HSS':
                 base_loss *= 0.88
-            
-            loss_ring = ( base_loss + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+
+            loss_ring = (base_loss + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             loss_sub = (0.015 + 0.00003 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.00003 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
 
@@ -420,7 +398,6 @@ class ProductionHACModel:
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
 
-        # HAC total (bruto, sem normalização)
         hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
 
@@ -428,7 +405,7 @@ class ProductionHACModel:
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
 
         # ========================================================
-        # Dst Burton (VBs REAL, com memória de reconexão e regime)
+        # Dst físico total = Dst_ring + Dst_pressure (SSC Burton/O'Brien)
         # ========================================================
         tau_dst_base = self.config.TAU_DST
         q_scale = self.config.Q_SCALE
@@ -438,68 +415,71 @@ class ProductionHACModel:
         rec_sat = self.config.RECONNECTION_SAT
         rec_k = self.config.RECONNECTION_K
 
+        dst_ring = np.zeros(n)
+        dst_pressure = np.zeros(n)
         dst_physical = np.zeros(n)
-        dst_physical[0] = -20.0
+        dst_star = np.zeros(n)  # Dst* = Dst_physical - correção de pressão (para análise)
 
-        from collections import deque
+        dst_ring[0] = -20.0
+        dst_pressure[0] = 7.26 * np.sqrt(max(0.0, pdyn[0])) - 11.0
+        dst_physical[0] = dst_ring[0] + dst_pressure[0]
+        dst_star[0] = dst_ring[0]  # Dst* inicial
+
+        # Memória de reconexão
         reconnection_memory = np.zeros(n)
-        delay_hours = 1.0
-        mean_dt_hours = np.median(dt) / 3600.0
-        delay_steps = max(1, int(delay_hours / mean_dt_hours))
-        vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
 
+        # Atraso de transporte (1 hora)
+        mean_dt_hours = np.median(dt) / 3600.0
+        delay_steps = max(1, int(1.0 / mean_dt_hours))
+        vbs_buffer = deque([0.0] * delay_steps, maxlen=delay_steps)
 
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
 
-            # VBs efetivo acima do limiar
+            # ---------- Pressão dinâmica (SSC Burton/O'Brien) ----------
+            dst_pressure[i] = 7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0
+
+            # ---------- Ring current (Burton) ----------
+            # VBs não‑linear com atraso
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
-
-            # SATURAÇÃO NÃO‑LINEAR
-            vbs_nl = vbs_sat * ( 1.0 - np.exp(-vbs_eff_val / vbs_sat))
-
+            vbs_nl = vbs_sat * (1.0 - np.exp(-vbs_eff_val / vbs_sat))
             vbs_buffer.append(vbs_nl)
-
-            # valor atrasado
             vbs_delayed = vbs_buffer[0]
-            
-            # Memória de reconexão (decaimento temporal, invariante à resolução)
-            alpha_rec = np.exp(-dt_hours / tau_rec)
-            delay_alpha = 0.35
-            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i-1] + delay_alpha * vbs_nl * dt_hours)
-            reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
 
-            # SATURAÇÃO RACIONAL (substitui R^0.55)
+            # Memória de reconexão (AGORA USA vbs_delayed para consistência)
+            alpha_rec = np.exp(-dt_hours / tau_rec)
+            reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + 0.35 * vbs_delayed * dt_hours
+            reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
             memory_factor = reconnection_memory[i] / (reconnection_memory[i] + rec_k)
 
-            # Q instantâneo + contribuição da memória (peso reduzido para 22%)
-            Q_raw = q_scale * ( 0.78 * vbs_delayed + 0.22 * memory_factor)
+            # Injeção apenas por reconexão (sem q_comp)
+            Q_raw = q_scale * (0.78 * vbs_delayed + 0.22 * memory_factor)
 
-            # Compressão Burton‑like (reduzida)
-            shock = max(0.0, pdyn[i] - 8.0)
-            q_comp = ( -0.10 * np.sqrt(max(0.0, pdyn[i])) -0.45 * np.tanh(shock / 6.0))
-            Q_injection = Q_raw + q_comp
-
-            # Diferenciação de regime no próprio Burton
+            # Ganho de regime DINÂMICO (substitui fatores fixos)
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            regime_gain = 1.0
             if regime_i == 'CME':
-                Q_injection *= 1.32
+                regime_gain += 0.18 * np.tanh(vbs_delayed / 10.0)
             elif regime_i == 'HSS':
-                Q_injection *= 0.92
+                regime_gain -= 0.08 * np.tanh(vbs_delayed / 12.0)
+            Q_raw *= regime_gain
 
-            # Tau dinâmico CONTÍNUO (substitui degraus)
+            # Tau dinâmico contínuo
             tau_dynamic = 10.0 + 16.0 * np.tanh(abs(dst_physical[i-1]) / 120.0)
-
             alpha = np.exp(-dt_hours / tau_dynamic)
 
-            dst_physical[i] = (dst_physical[i-1] * alpha
-                               + Q_injection * tau_dynamic * (1.0 - alpha))
+            dst_ring[i] = (dst_ring[i-1] * alpha
+                           + Q_raw * tau_dynamic * (1.0 - alpha))
+
+            # Dst total e Dst* (para análise científica)
+            dst_physical[i] = dst_ring[i] + dst_pressure[i]
             dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+            dst_star[i] = dst_ring[i]  # Dst* = ring current puro
 
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
         # ========================================================
-        # Forecast com persistência suave e decaimento lento
+        # Forecast (consistente com separação ring/pressure)
         # ========================================================
         forecast = {}
         dt_median = np.median(dt) / 3600.0
@@ -512,12 +492,12 @@ class ProductionHACModel:
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
+            dst_ring_fut = dst_ring[-1]
             for step in range(steps):
                 tau_dyn = tau_dst_base * (1.0 + 0.28 * abs(dst_fut) / 140.0)
                 alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
-                decay = np.exp(-time_elapsed / 4.5)          # decaimento mais lento
-                # Tendência recente suavizada com Savitzky‑Golay
+                decay = np.exp(-time_elapsed / 4.5)
                 recent_window = vbs_real[-18:]
                 if len(recent_window) >= 7:
                     smooth_recent = savgol_filter(recent_window, 7, 2)
@@ -526,21 +506,23 @@ class ProductionHACModel:
                     recent_trend = 0.0
                 vbs_future = max(0, vbs_persist * decay + recent_trend * 0.25)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
-                vbs_future_nl = vbs_sat * ( 1.0 - np.exp(-vbs_future_eff / vbs_sat))
+                vbs_future_nl = vbs_sat * (1.0 - np.exp(-vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
-                q_comp_fut = -0.10 * np.sqrt(max(0.0, pdyn_persist))
-                Q_fut = q_fut + q_comp_fut
-                dst_fut = dst_fut * alpha + Q_fut * tau_dyn * (1.0 - alpha)
+                dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
+                # Pressão futura assume persistência (SSC)
+                dst_fut = dst_ring_fut + 7.26 * np.sqrt(max(0.0, pdyn_persist)) - 11.0
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
 
         self.results.update({
             'time': times,
             'HAC_total': hac_total,
             'dHAC_dt': dHAC_dt,
-            'Bz': Bz,
-            'Vsw': Vsw,
+            'Bz': Bz, 'Vsw': Vsw,
             'coupling_signal': coupling,
             'Dst_physical': dst_physical,
+            'Dst_ring': dst_ring,
+            'Dst_pressure': dst_pressure,
+            'Dst_star': dst_star,  # Dst* para análise
             'Dst_min_physical': np.min(dst_physical),
             'Dst_now': dst_physical[-1],
             'forecast': forecast
@@ -738,6 +720,8 @@ def main():
         'HAC': model.results['HAC_total'],
         'dHAC_dt': model.results['dHAC_dt'],
         'Dst': model.results['Dst_physical'],
+        'Dst_ring': model.results['Dst_ring'],
+        'Dst_pressure': model.results['Dst_pressure'],
         'Storm_level': model.results['Storm_level']
     })
     df_out.to_csv("hac_nowcast_results.csv", index=False)
