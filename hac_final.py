@@ -559,13 +559,13 @@ class ProductionHACModel:
             # ----------------------------------------------------
             if regime_i == 'CME':
         
-                tau_inj_rise = 0.45
-                tau_inj_decay = 1.8
+                tau_inj_rise = 1.2
+                tau_inj_decay = 3.0
         
             elif regime_i == 'HSS':
         
-                tau_inj_rise = 1.5
-                tau_inj_decay = 3.8
+                tau_inj_rise = 2.5
+                tau_inj_decay = 5.5
         
             else:
         
@@ -626,7 +626,14 @@ class ProductionHACModel:
             elif regime_i == 'HSS':
                 regime_gain -= ( 0.06 * np.tanh(injection_buffer[i] / 12.0))
         
-            Q_raw *= regime_gain
+            # ----------------------------------------------------
+            # Extreme CME enhancement
+            # ----------------------------------------------------
+            if regime_i == 'CME':
+            
+                extreme_factor = np.clip( injection_buffer[i] / 18.0, 0.0, 2.0)
+            
+                Q_raw *= ( 1.0 + 0.22 * extreme_factor**1.4)
         
             # Saturação física
             Q_raw = np.clip( Q_raw, -450,  80)
