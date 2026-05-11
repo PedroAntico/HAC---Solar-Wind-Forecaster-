@@ -520,7 +520,7 @@ class ProductionHACModel:
         # --------------------------------------------------------
         mean_dt_hours = np.median(dt) / 3600.0
         
-        transport_delay_h = 0.35
+        transport_delay_h = 1.6
         delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
         
         vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
