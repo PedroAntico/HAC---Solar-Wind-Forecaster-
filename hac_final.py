@@ -473,7 +473,7 @@ class ProductionHACModel:
             memory_factor = reconnection_memory[i] / (reconnection_memory[i] + rec_k)
 
             # Q instantâneo + contribuição da memória (peso reduzido para 22%)
-            Q_raw = q_scale * (0.78 * vbs_nl + 0.22 * memory_factor)
+            Q_raw = q_scale * ( 0.78 * vbs_delayed + 0.22 * memory_factor)
 
             # Compressão Burton‑like (reduzida)
             shock = max(0.0, pdyn[i] - 8.0)
@@ -526,7 +526,7 @@ class ProductionHACModel:
                     recent_trend = 0.0
                 vbs_future = max(0, vbs_persist * decay + recent_trend * 0.25)
                 vbs_future_eff = max(0.0, vbs_future - vbs_thr)
-                vbs_future_nl = vbs_future_eff / (1.0 + vbs_future_eff / vbs_sat)
+                vbs_future_nl = vbs_sat * ( 1.0 - np.exp(-vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
                 q_comp_fut = -0.10 * np.sqrt(max(0.0, pdyn_persist))
                 Q_fut = q_fut + q_comp_fut
