@@ -633,7 +633,7 @@ class ProductionHACModel:
             
                 extreme_factor = np.clip( injection_buffer[i] / 18.0, 0.0, 2.0)
             
-                Q_raw *= ( 1.0 + 0.22 * extreme_factor**1.4)
+                Q_raw *= ( 1.0 + 0.12 * extreme_factor**1.25)
         
             # Saturação física
             Q_raw = np.clip( Q_raw, -450,  80)
@@ -641,25 +641,12 @@ class ProductionHACModel:
             # ====================================================
             # Estado global da tempestade
             # ====================================================
-            storm_state = ( 0.75 * memory_factor + 0.25 * ring_memory[i])
-        
-            # ====================================================
-            # Tau dinâmico do ring current
-            # ====================================================
-        
-            # -----------------------------
-            # Main phase
-            # -----------------------------
-            if storm_state > 0.22:
-        
-                tau_dynamic = (  6.0  + 7.0 * np.tanh(abs(dst_ring[i - 1]) / 150.0)  + 3.5 * memory_factor + 3.0 * ring_memory[i])
-        
-            # -----------------------------
-            # Recovery phase
-            # -----------------------------
+            storm_state = ( 0.75 * injection_buffer[i] + 0.25 * ring_memory[i] * 6.0)
+            
+            if storm_state > 2.8:
+                tau_dynamic = ( 7.0 + 6.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 3.5 * memory_factor + 3.0 * ring_memory[i])
             else:
-        
-                tau_dynamic = ( 15.0  + 12.0 * np.tanh(abs(dst_ring[i - 1]) / 180.0) + 7.0 * memory_factor + 12.0 * ring_memory[i])
+                tau_dynamic = ( 13.0 + 9.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 5.0 * memory_factor + 7.0 * ring_memory[i] )
         
             # ----------------------------------------------------
             # Limites físicos
