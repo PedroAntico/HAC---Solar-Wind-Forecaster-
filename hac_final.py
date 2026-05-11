@@ -516,7 +516,8 @@ class ProductionHACModel:
         # Delay de propagação solar wind → magnetosfera
         # --------------------------------------------------------
         mean_dt_hours = np.median(dt) / 3600.0
-        delay_steps = max( 1, int(1.0 / mean_dt_hours))
+        transport_delay_h = 0.35
+        delay_steps = max( 1, int(transport_delay_h / mean_dt_hours))
         vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
         
        # ========================================================
