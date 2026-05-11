@@ -33,7 +33,7 @@ class HACPhysicsConfig:
     # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
-    TAU_BZ_CME = 0.5
+    TAU_BZ_CME = 0.25
 
     # Escalas físicas fixas
     E_FIELD_REF = 5.0           # mV/m
@@ -561,18 +561,20 @@ class ProductionHACModel:
             vbs_delayed = vbs_buffer[0]
         
             # ----------------------------------------------------
-            # Build-up magnetosférico
+            # Build-up magnetosférico dependente do regime
             # ----------------------------------------------------
-            tau_inj = 2.5  # horas
+            if regime_i == 'CME':
+                tau_inj = 1.0
+            
+            elif regime_i == 'HSS':
+                tau_inj = 3.0
+            
+            else:
+                tau_inj = 2.0
         
-            alpha_inj = np.exp(
-                -dt_hours / tau_inj
-            )
+            alpha_inj = np.exp( -dt_hours / tau_inj)
         
-            injection_buffer[i] = (
-                alpha_inj * injection_buffer[i-1]
-                + (1.0 - alpha_inj) * vbs_delayed
-            )
+            injection_buffer[i] = ( alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed)
         
             # ----------------------------------------------------
             # Memória de reconexão
