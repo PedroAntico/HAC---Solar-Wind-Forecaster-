@@ -421,7 +421,7 @@ class ProductionHACModel:
         dst_star = np.zeros(n)  # Dst* = Dst_physical - correção de pressão (para análise)
 
         dst_ring[0] = -20.0
-        dst_pressure[0] = 7.26 * np.sqrt(max(0.0, pdyn[0])) - 11.0
+        dst_pressure[i] = np.clip( 7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35)
         dst_physical[0] = dst_ring[0] + dst_pressure[0]
         dst_star[0] = dst_ring[0]  # Dst* inicial
 
@@ -465,7 +465,7 @@ class ProductionHACModel:
             Q_raw *= regime_gain
 
             # Tau dinâmico contínuo
-            tau_dynamic = 10.0 + 16.0 * np.tanh(abs(dst_physical[i-1]) / 120.0)
+            tau_dynamic = 10.0 + 16.0 * np.tanh(abs(dst_ring[i-1]) / 120.0)
             alpha = np.exp(-dt_hours / tau_dynamic)
 
             dst_ring[i] = (dst_ring[i-1] * alpha
@@ -474,7 +474,7 @@ class ProductionHACModel:
             # Dst total e Dst* (para análise científica)
             dst_physical[i] = dst_ring[i] + dst_pressure[i]
             dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-            dst_star[i] = dst_ring[i]  # Dst* = ring current puro
+            dst_star[i] = dst_physical[i] - dst_pressure[i]
 
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
@@ -487,7 +487,8 @@ class ProductionHACModel:
         weights = np.exp(-np.linspace(0, 3, window_persist))
         weights /= weights.sum()
         vbs_persist = np.sum(vbs_real[-window_persist:] * weights)
-        pdyn_persist = pdyn[-1]
+        pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
+        dst_pressure_future = 7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0
 
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
