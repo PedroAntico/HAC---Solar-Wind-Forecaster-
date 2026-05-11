@@ -551,22 +551,21 @@ class ProductionHACModel:
         
             # ----------------------------------------------------
             # Build-up magnetosférico ASSIMÉTRICO
-            # subida rápida / decay lento
             # ----------------------------------------------------
             if regime_i == 'CME':
-        
-                tau_inj_rise = 0.5
-                tau_inj_decay = 2.0
-        
+            
+                tau_inj_rise = 0.20
+                tau_inj_decay = 1.5
+            
             elif regime_i == 'HSS':
-        
-                tau_inj_rise = 2.5
-                tau_inj_decay = 4.0
-        
-            else:
-        
+            
                 tau_inj_rise = 1.5
-                tau_inj_decay = 2.5
+                tau_inj_decay = 3.5
+            
+            else:
+            
+                tau_inj_rise = 0.8
+                tau_inj_decay = 2.0
         
             # Escolha dinâmica do tau
             if vbs_delayed > injection_buffer[i-1]:
@@ -614,7 +613,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             # Tau dinâmico do ring current
             # ----------------------------------------------------
-            tau_dynamic = ( 7.0 + 10.0 * np.tanh(abs(dst_ring[i-1]) / 140.0))
+            tau_dynamic = ( 7.0 + 8.0 * np.tanh(abs(dst_ring[i-1]) / 140.0) + 4.0 * memory_factor)
             alpha = np.exp( -dt_hours / tau_dynamic)
         
             # ----------------------------------------------------
