@@ -52,7 +52,7 @@ class HACPhysicsConfig:
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
     # Memória de reconexão
-    TAU_RECONNECTION = 10.0     # horas – decaimento da memória
+    TAU_RECONNECTION = 6.0     # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
     RECONNECTION_K = 22.0       # constante de saturação racional
 
