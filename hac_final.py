@@ -555,7 +555,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             if regime_i == 'CME':
             
-                tau_inj_rise = 0.20
+                tau_inj_rise = 0.45
                 tau_inj_decay = 1.5
             
             elif regime_i == 'HSS':
@@ -593,11 +593,19 @@ class ProductionHACModel:
             reconnection_memory[i] = np.clip( reconnection_memory[i], 0, rec_sat)
         
             memory_factor = ( reconnection_memory[i]  / (reconnection_memory[i] + rec_k))
-        
+
+            # ----------------------------------------------------
+            # Memória lenta do ring current
+            # ----------------------------------------------------
+            tau_ring_memory = 18.0
+            alpha_ring_mem = np.exp( -dt_hours / tau_ring_memory)
+            ring_memory[i] = ( alpha_ring_mem * ring_memory[i-1] + (1.0 - alpha_ring_mem) * abs(dst_ring[i-1]) / 150.0)
+            ring_memory[i] = np.clip( ring_memory[i], 0, 1.5
+                                    )
             # ----------------------------------------------------
             # Injeção física no ring current
             # ----------------------------------------------------
-            Q_raw = q_scale * ( 0.78 * injection_buffer[i]  + 0.22 * memory_factor)
+            Q_raw = q_scale * ( 0.68 * injection_buffer[i]**1.08 + 0.32 * memory_factor)
 
             # ----------------------------------------------------
             # Ganho dinâmico dependente do regime
@@ -614,29 +622,27 @@ class ProductionHACModel:
 
             # ====================================================
             # Tau dinâmico do ring current
-            # Separação física:
-            #   • Main phase  -> decay rápido
-            #   • Recovery    -> decay lento
             # ====================================================
-
+            
             # -----------------------------
-            # Fase principal (injeção ativa)
+            # Main phase
             # -----------------------------
-            if injection_buffer[i] > 1.5:
-                tau_dynamic = ( 7.0 + 8.0 * np.tanh(abs(dst_ring[i-1]) / 140.0) + 4.0 * memory_factor)
+            storm_state = ( 0.55 * injection_buffer[i] + 0.45 * ring_memory[i] * 10.0)
 
+            if storm_state > 1.8:
+                tau_dynamic = ( 7.0 + 7.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 4.0 * memory_factor + 4.0 * ring_memory[i])
+            
             # -----------------------------
             # Recovery phase
             # -----------------------------
             else:
-                tau_dynamic = ( 16.0 + 18.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor)
-
+                tau_dynamic = ( 14.0 + 10.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 10.0 * ring_memory[i])
+            
             # ----------------------------------------------------
-            # Limites físicos do tau
+            # Limites físicos
             # ----------------------------------------------------
-            tau_dynamic = np.clip( tau_dynamic, 4.0, 42.0 )
-
-            alpha = np.exp( -dt_hours / tau_dynamic )
+            tau_dynamic = np.clip( tau_dynamic, 4.0, 40.0)
+            alpha = np.exp( -dt_hours / tau_dynamic)
         
             # ----------------------------------------------------
             # Evolução do ring current
