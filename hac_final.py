@@ -455,7 +455,8 @@ class ProductionHACModel:
 
             # Memória de reconexão (decaimento temporal, invariante à resolução)
             alpha_rec = np.exp(-dt_hours / tau_rec)
-            reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + vbs_nl * dt_hours
+            delay_alpha = 0.35
+            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i-1] + delay_alpha * vbs_nl * dt_hours)
             reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
 
             # SATURAÇÃO RACIONAL (substitui R^0.55)
@@ -465,7 +466,8 @@ class ProductionHACModel:
             Q_raw = q_scale * (0.78 * vbs_nl + 0.22 * memory_factor)
 
             # Compressão Burton‑like (reduzida)
-            q_comp = -0.18 * np.sqrt(max(0.0, pdyn[i]))
+            shock = max(0.0, pdyn[i] - 8.0)
+            q_comp = ( -0.10 * np.sqrt(max(0.0, pdyn[i])) -0.45 * np.tanh(shock / 6.0))
             Q_injection = Q_raw + q_comp
 
             # Diferenciação de regime no próprio Burton
