@@ -510,21 +510,14 @@ class ProductionHACModel:
         
         # Novo reservatório de build-up magnetosférico
         injection_buffer = np.zeros(n)
+        injection_buffer[0] = 0.0
         
         # --------------------------------------------------------
         # Delay de propagação solar wind → magnetosfera
         # --------------------------------------------------------
         mean_dt_hours = np.median(dt) / 3600.0
-        
-        delay_steps = max(
-            1,
-            int(1.0 / mean_dt_hours)
-        )
-        
-        vbs_buffer = deque(
-            [0.0] * delay_steps,
-            maxlen=delay_steps
-        )
+        delay_steps = max( 1, int(1.0 / mean_dt_hours))
+        vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
         
         # ========================================================
         # Evolução temporal do Dst
@@ -561,6 +554,11 @@ class ProductionHACModel:
             vbs_delayed = vbs_buffer[0]
         
             # ----------------------------------------------------
+            # Regime físico atual
+            # ----------------------------------------------------
+            regime_i = _detect_regime_scalar( Vsw[i], density[i], Bz[i])
+            
+            # ----------------------------------------------------
             # Build-up magnetosférico dependente do regime
             # ----------------------------------------------------
             if regime_i == 'CME':
@@ -571,63 +569,38 @@ class ProductionHACModel:
             
             else:
                 tau_inj = 2.0
-        
-            alpha_inj = np.exp( -dt_hours / tau_inj)
-        
+            
+            alpha_inj = np.exp(-dt_hours / tau_inj)
+            
             injection_buffer[i] = ( alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed)
-        
+            
             # ----------------------------------------------------
             # Memória de reconexão
             # ----------------------------------------------------
-            alpha_rec = np.exp(
-                -dt_hours / tau_rec
-            )
-        
-            reconnection_memory[i] = (
-                alpha_rec * reconnection_memory[i-1]
-                + 0.35 * injection_buffer[i] * dt_hours
-            )
-        
-            reconnection_memory[i] = np.clip(
-                reconnection_memory[i],
-                0,
-                rec_sat
-            )
-        
-            memory_factor = (
-                reconnection_memory[i]
-                / (reconnection_memory[i] + rec_k)
-            )
-        
+            alpha_rec = np.exp(-dt_hours / tau_rec)
+            
+            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i-1] + 0.35 * injection_buffer[i] * dt_hours)
+            
+            reconnection_memory[i] = np.clip( reconnection_memory[i], 0, rec_sat)
+            
+            memory_factor = ( reconnection_memory[i] / (reconnection_memory[i] + rec_k))
+            
             # ----------------------------------------------------
             # Injeção física no ring current
             # ----------------------------------------------------
-            Q_raw = q_scale * (
-                0.78 * injection_buffer[i]
-                + 0.22 * memory_factor
-            )
-        
+            Q_raw = q_scale * ( 0.78 * injection_buffer[i] + 0.22 * memory_factor)
+            
             # ----------------------------------------------------
             # Ganho dinâmico por regime
             # ----------------------------------------------------
-            regime_i = _detect_regime_scalar(
-                Vsw[i],
-                density[i],
-                Bz[i]
-            )
-        
             regime_gain = 1.0
-        
+            
             if regime_i == 'CME':
-                regime_gain += (
-                    0.18 * np.tanh(injection_buffer[i] / 10.0)
-                )
-        
+                regime_gain += 0.18 * np.tanh(injection_buffer[i] / 10.0)
+            
             elif regime_i == 'HSS':
-                regime_gain -= (
-                    0.08 * np.tanh(injection_buffer[i] / 12.0)
-                )
-        
+                regime_gain -= 0.08 * np.tanh(injection_buffer[i] / 12.0)
+            
             Q_raw *= regime_gain
         
             # ----------------------------------------------------
