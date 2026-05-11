@@ -386,7 +386,8 @@ def phase_metrics(time, obs, pred):
     # Área integrada do erro (nT·h)
     dt_sec = np.diff(time).astype('timedelta64[s]').astype(float) / 3600.0
     dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
-    iae = np.trapz(np.abs(obs - pred), dx=dt_sec)
+    err = np.abs(obs - pred)
+    iae = np.sum(err * dt_sec)
 
     # Recovery slope (6h a 12h após o mínimo observado)
     t_min_obs = time[idx_obs]
