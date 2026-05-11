@@ -482,14 +482,12 @@ class ProductionHACModel:
         # Forecast (consistente com separação ring/pressure)
         # ========================================================
         forecast = {}
-        dt_median = np.median(dt) / 3600.0
+        dt_median = np.median(dt) / 3600.0 
         window_persist = min(120, n)
         weights = np.exp(-np.linspace(0, 3, window_persist))
         weights /= weights.sum()
         vbs_persist = np.sum(vbs_real[-window_persist:] * weights)
-        pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
-        dst_pressure_future = 7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0
-
+        pdyn_persist = pdyn[-1]
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
@@ -510,8 +508,9 @@ class ProductionHACModel:
                 vbs_future_nl = vbs_sat * (1.0 - np.exp(-vbs_future_eff / vbs_sat))
                 q_fut = q_scale * vbs_future_nl
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
-                # Pressão futura assume persistência (SSC)
-                dst_fut = dst_ring_fut + 7.26 * np.sqrt(max(0.0, pdyn_persist)) - 11.0
+                pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
+                dst_pressure_future = np.clip( 7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0, -20, 35)
+                dst_fut = dst_ring_fut + dst_pressure_future
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
 
         self.results.update({
