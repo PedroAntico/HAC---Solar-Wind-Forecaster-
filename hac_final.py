@@ -613,7 +613,7 @@ class ProductionHACModel:
             # ----------------------------------------------------
             # Injeção física
             # ----------------------------------------------------
-            Q_raw = q_scale * (  0.68 * injection_buffer[i]**1.06  + 0.32 * memory_factor)
+            Q_raw = q_scale * (  0.68 * injection_buffer[i]**0.96  + 0.32 * memory_factor)
         
             # ----------------------------------------------------
             # Ganho dependente do regime
@@ -624,7 +624,7 @@ class ProductionHACModel:
                 regime_gain += ( 0.16 * np.tanh(injection_buffer[i] / 10.0))
         
             elif regime_i == 'HSS':
-                regime_gain -= ( 0.06 * np.tanh(injection_buffer[i] / 12.0))
+                regime_gain -= ( 0.04 * np.tanh(injection_buffer[i] / 14.0))
         
             # ----------------------------------------------------
             # Extreme CME enhancement
@@ -646,7 +646,7 @@ class ProductionHACModel:
             if storm_state > 2.1:
                 tau_dynamic = ( 7.0 + 6.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 3.5 * memory_factor + 3.0 * ring_memory[i])
             else:
-                tau_dynamic = ( 16.0 + 12.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 9.0 * ring_memory[i] )
+                tau_dynamic = ( 18.0 + 13.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 12.0 * ring_memory[i] )
         
             # ----------------------------------------------------
             # Limites físicos
