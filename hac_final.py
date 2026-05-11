@@ -441,8 +441,13 @@ class ProductionHACModel:
         dst_physical = np.zeros(n)
         dst_physical[0] = -20.0
 
-        # Memória de reconexão (acumula VBs não‑linear ao longo do tempo)
+        from collections import deque
         reconnection_memory = np.zeros(n)
+        delay_hours = 3.0
+        mean_dt_hours = np.median(dt) / 3600.0
+        delay_steps = max(1, int(delay_hours / mean_dt_hours))
+        vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
+
 
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
@@ -453,6 +458,11 @@ class ProductionHACModel:
             # SATURAÇÃO NÃO‑LINEAR
             vbs_nl = vbs_eff_val / (1.0 + vbs_eff_val / vbs_sat)
 
+            vbs_buffer.append(vbs_nl)
+
+            # valor atrasado
+            vbs_delayed = vbs_buffer[0]
+            
             # Memória de reconexão (decaimento temporal, invariante à resolução)
             alpha_rec = np.exp(-dt_hours / tau_rec)
             delay_alpha = 0.35
