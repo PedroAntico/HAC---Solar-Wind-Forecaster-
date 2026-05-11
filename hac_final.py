@@ -708,10 +708,7 @@ class ProductionHACModel:
         
         for h in [1, 2, 3]:
         
-            steps = max(
-                1,
-                int(h / dt_median)
-            )
+            steps = max( 1,  int(h / dt_median))
         
             dst_fut = dst_physical[-1]
             dst_ring_fut = dst_ring[-1]
@@ -721,14 +718,8 @@ class ProductionHACModel:
         
             for step in range(steps):
         
-                tau_dyn = (
-                    tau_dst_base
-                    * (1.0 + 0.28 * abs(dst_fut) / 140.0)
-                )
-        
-                alpha = np.exp(
-                    -dt_median / tau_dyn
-                )
+                tau_dyn = np.clip( 14.0 + 12.0 * np.tanh(abs(dst_ring_fut) / 180.0), 6.0, 40.0)
+                alpha = np.exp( -dt_median / tau_dyn)
         
                 time_elapsed = step * dt_median
         
