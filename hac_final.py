@@ -443,7 +443,7 @@ class ProductionHACModel:
 
         from collections import deque
         reconnection_memory = np.zeros(n)
-        delay_hours = 3.0
+        delay_hours = 1.0
         mean_dt_hours = np.median(dt) / 3600.0
         delay_steps = max(1, int(delay_hours / mean_dt_hours))
         vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
@@ -456,7 +456,7 @@ class ProductionHACModel:
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
 
             # SATURAÇÃO NÃO‑LINEAR
-            vbs_nl = vbs_eff_val / (1.0 + vbs_eff_val / vbs_sat)
+            vbs_nl = vbs_sat * ( 1.0 - np.exp(-vbs_eff_val / vbs_sat))
 
             vbs_buffer.append(vbs_nl)
 
@@ -483,7 +483,7 @@ class ProductionHACModel:
             # Diferenciação de regime no próprio Burton
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             if regime_i == 'CME':
-                Q_injection *= 1.18
+                Q_injection *= 1.32
             elif regime_i == 'HSS':
                 Q_injection *= 0.92
 
