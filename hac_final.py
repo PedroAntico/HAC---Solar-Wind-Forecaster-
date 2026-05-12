@@ -48,7 +48,7 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
-    Q_SCALE = -4.5              # nT/h por unidade de driver (aumentado)
+    Q_SCALE = -7.5              # nT/h por unidade de driver (aumentado)
     TAU_DST = 12.0              # horas
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
@@ -530,7 +530,7 @@ class ProductionHACModel:
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
 
             # Unloading explosivo AUMENTADO (coeficientes 0.14 + 0.12)
-            tail_unloading = (0.035 + 0.045 * substorm_factor) * tail_energy[i-1] * dt_hours
+            tail_unloading = (0.055 + 0.085 * substorm_factor) * tail_energy[i-1] * dt_hours
 
             # Dissipação natural
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
@@ -554,8 +554,14 @@ class ProductionHACModel:
                 explosive_release = np.clip( explosive_release, 0, 65)
             
             tail_release[i] = ( tail_unloading + explosive_release)
-            tail_energy[i] -= explosive_release
-            tail_energy[i] = max(tail_energy[i], 0.0)
+            explosive_factor = 1.0
+
+            if ( tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD
+                and injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD
+                and Bz[i] < -12):
+                explosive_factor = np.clip( 1.0 + tail_energy[i] / 90.0,  1.0,  2.5 )
+            
+            tail_release[i] = ( tail_unloading * explosive_factor)
 
             # =================================================
             # Ring current injection FROM TAIL
