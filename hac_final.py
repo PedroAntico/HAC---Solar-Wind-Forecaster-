@@ -495,10 +495,10 @@ class ProductionHACModel:
             # ----------------------------------------------------
             if regime_i == 'CME':
                 tau_inj_rise = 0.55
-                tau_inj_decay = 6.5
+                tau_inj_decay = 4.5
             elif regime_i == 'HSS':
                 tau_inj_rise = 2.5
-                tau_inj_decay = 8.0
+                tau_inj_decay = 6.0
             else:
                 tau_inj_rise = 0.8
                 tau_inj_decay = 2.2
@@ -530,7 +530,7 @@ class ProductionHACModel:
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
 
             # Unloading explosivo AUMENTADO (coeficientes 0.14 + 0.12)
-            tail_unloading = (0.14 + 0.12 * substorm_factor) * tail_energy[i-1] * dt_hours
+            tail_unloading = (0.035 + 0.045 * substorm_factor) * tail_energy[i-1] * dt_hours
 
             # Dissipação natural
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
@@ -545,15 +545,17 @@ class ProductionHACModel:
             # =================================================
             # EXPLOSIVE UNLOADING (NOVO)
             # =================================================
-            if (tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD and
-                injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD):
-                explosive_boost = np.clip(tail_energy[i] / 80.0, 1.0, 2.8)
-                tail_release[i] = np.clip(tail_release[i], 0, 45)
+            explosive_release = 0.0
 
-                # Conservação de energia
-                extra_release = ( tail_release[i] - tail_unloading)
-                tail_energy[i] -= extra_release
-                tail_energy[i] = max( tail_energy[i],  0.0)
+            if ( tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD
+                and injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD
+                and Bz[i] < -12):
+                explosive_release = (  0.22 * tail_energy[i] * dt_hours )
+                explosive_release = np.clip( explosive_release, 0, 65)
+            
+            tail_release[i] = ( tail_unloading + explosive_release)
+            tail_energy[i] -= explosive_release
+            tail_energy[i] = max(tail_energy[i], 0.0)
 
             # =================================================
             # Ring current injection FROM TAIL
@@ -592,10 +594,10 @@ class ProductionHACModel:
 
             if effective_bz < 0:
                 # Main phase – decaimento LENTO (tau ALTO)
-                tau_dynamic = (18.0 + 10.0 * memory_factor + 8.0 * ring_memory[i-1])
+                tau_dynamic = (10.0 + 5.0 * memory_factor + 8.0 * ring_memory[i-1])
             else:
                 # Recovery phase – decaimento RÁPIDO (tau BAIXO)
-                tau_dynamic = (8.0 + 4.0 * memory_factor + 3.0 * ring_memory[i-1])
+                tau_dynamic = (5.5 + 2.5 * memory_factor + 3.0 * ring_memory[i-1])
 
             tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)
 
