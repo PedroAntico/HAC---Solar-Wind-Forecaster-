@@ -530,7 +530,9 @@ class ProductionHACModel:
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
 
             # Unloading explosivo AUMENTADO (coeficientes 0.14 + 0.12)
-            tail_unloading = (0.055 + 0.085 * substorm_factor) * tail_energy[i-1] * dt_hours
+            tail_unloading = ( 0.11 + 0.07 * np.tanh(substorm_factor))
+            * tail_energy[i-1]
+            * dt_hours
 
             # Dissipação natural
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
@@ -559,7 +561,7 @@ class ProductionHACModel:
             if ( tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD
                 and injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD
                 and Bz[i] < -12):
-                explosive_factor = np.clip( 1.0 + tail_energy[i] / 90.0,  1.0,  2.5 )
+                explosive_factor = ( 1.0 + 0.6 * np.tanh(tail_energy[i] / 90.0))
             
             tail_release[i] = ( tail_unloading * explosive_factor)
 
@@ -567,7 +569,7 @@ class ProductionHACModel:
             # Ring current injection FROM TAIL
             # =================================================
             ring_driver = ( self.config.TAIL_TO_RING * tail_release[i] + 0.28 * memory_factor)
-            Q_raw = q_scale * (ring_driver ** 0.92)
+            Q_raw = q_scale * ( 0.55 * ring_driver + 0.45 * (ring_driver ** 0.82))
 
             # ----------------------------------------------------
             # Ganho dependente do regime
