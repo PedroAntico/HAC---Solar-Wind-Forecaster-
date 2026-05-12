@@ -495,10 +495,10 @@ class ProductionHACModel:
             # ----------------------------------------------------
             if regime_i == 'CME':
                 tau_inj_rise = 0.55
-                tau_inj_decay = 3.0
+                tau_inj_decay = 6.5
             elif regime_i == 'HSS':
                 tau_inj_rise = 2.5
-                tau_inj_decay = 5.5
+                tau_inj_decay = 8.0
             else:
                 tau_inj_rise = 0.8
                 tau_inj_decay = 2.2
@@ -548,12 +548,17 @@ class ProductionHACModel:
             if (tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD and
                 injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD):
                 explosive_boost = np.clip(tail_energy[i] / 80.0, 1.0, 2.8)
-                tail_release[i] *= explosive_boost
+                tail_release[i] = np.clip(tail_release[i], 0, 45)
+
+                # Conservação de energia
+                extra_release = ( tail_release[i] - tail_unloading)
+                tail_energy[i] -= extra_release
+                tail_energy[i] = max( tail_energy[i],  0.0)
 
             # =================================================
             # Ring current injection FROM TAIL
             # =================================================
-            ring_driver = 0.72 * tail_release[i] + 0.28 * memory_factor
+            ring_driver = ( self.config.TAIL_TO_RING * tail_release[i] + 0.28 * memory_factor)
             Q_raw = q_scale * (ring_driver ** 0.92)
 
             # ----------------------------------------------------
@@ -564,7 +569,10 @@ class ProductionHACModel:
                 regime_gain += 0.16 * np.tanh(injection_buffer[i] / 10.0)
             elif regime_i == 'HSS':
                 regime_gain -= 0.04 * np.tanh(injection_buffer[i] / 14.0)
-            Q_raw *= regime_gain
+            # HAC feedback coupling
+            hac_feedback = np.clip( hac_total[i-1] / 120.0, 0.7, 1.5)
+            
+            Q_raw *= hac_feedback
 
             # Extreme CME enhancement (controlado)
             if regime_i == 'CME':
