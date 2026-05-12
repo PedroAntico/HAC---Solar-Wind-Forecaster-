@@ -530,9 +530,9 @@ class ProductionHACModel:
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
 
             # Unloading explosivo AUMENTADO (coeficientes 0.14 + 0.12)
-            tail_unloading = ( 0.11 + 0.07 * np.tanh(substorm_factor))
+            tail_unloading = ((0.11 + 0.07 * np.tanh(substorm_factor))
             * tail_energy[i-1]
-            * dt_hours
+            * dt_hours)
 
             # Dissipação natural
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
