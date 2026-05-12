@@ -524,7 +524,7 @@ class ProductionHACModel:
             # MAGNETOTAIL STORAGE PHYSICS (MELHORADO)
             # =================================================
             # Loading do tail
-            tail_loading = 0.22 * injection_buffer[i] * dt_hours
+            tail_loading = 0.34 * injection_buffer[i] * dt_hours
 
             # Trigger de subtempestade (quanto mais energia, mais descarga)
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
@@ -617,7 +617,10 @@ class ProductionHACModel:
             alpha = np.clip(alpha, 0.02, 0.995)
 
             # Evolução do ring current
-            dst_ring[i] = dst_ring[i-1] * alpha + Q_raw * tau_dynamic * (1.0 - alpha)
+            injection_term = Q_raw * dt_hours
+            decay_term = ( dst_ring[i-1] * np.exp(-dt_hours /tau_dynamic))
+        
+            dst_ring[i] = decay_term + injection_term
             dst_ring[i] = np.clip(dst_ring[i], -450, 40)
 
             # Dst total
@@ -667,7 +670,7 @@ class ProductionHACModel:
                 tail_unloading_f = (0.14 + 0.12 * np.clip(tail_fut / self.config.SUBSTORM_TRIGGER, 0, 3)) * tail_fut * dt_median
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
-                ring_driver_f = 0.72 * tail_unloading_f + 0.28 * memory_factor
+                ring_driver_f = 0.88 * tail_unloading_f + 0.12 * memory_factor
                 q_fut = q_scale * (ring_driver_f ** 0.92)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
