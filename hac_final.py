@@ -563,7 +563,7 @@ class ProductionHACModel:
                 and Bz[i] < -12):
                 explosive_factor = ( 1.0 + 0.6 * np.tanh(tail_energy[i] / 90.0))
             
-            tail_release[i] = ( tail_unloading * explosive_factor)
+            tail_release[i] = ( tail_unloading * explosive_factor + explosive_release)
 
             # =================================================
             # Ring current injection FROM TAIL
@@ -622,7 +622,7 @@ class ProductionHACModel:
             injection_term = Q_raw * dt_hours
             decay_term = ( dst_ring[i-1] * np.exp(-dt_hours /tau_dynamic))
         
-            dst_ring[i] = decay_term + injection_term
+            dst_ring[i] = ( dst_ring[i-1] + (Q_raw - dst_ring[i-1] / tau_dynamic) * dt_hours)
             dst_ring[i] = np.clip(dst_ring[i], -450, 40)
 
             # Dst total
