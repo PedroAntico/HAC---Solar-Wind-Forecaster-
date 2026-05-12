@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão refinada com SSC Burton/O'Brien, atraso consistente e ganho dinâmico
-(maio/2026)
+Versão com magnetotail energy storage, descarga explosiva e histerese (junho/2026)
 
-Melhorias aplicadas:
-- SSC corrigido: 7.26 * sqrt(Pdyn) - 11.0 (fórmula Burton/O'Brien).
-- Memória de reconexão agora usa VBs atrasado (delay consistente).
-- Ganho de regime dinâmico: tanh(VBs_delayed / 10) para CME, etc.
-- Métricas de fase com recovery slope em nT/h real.
-- Separação Dst_ring / Dst_pressure para análise científica.
+Correções aplicadas:
+- tau_dynamic corrigido: main phase longa (18h+), recovery curta (8h+).
+- Tail unloading aumentado (0.14 + 0.12*substorm_factor).
+- Transport delay reduzido para 0.55 h.
+- Q_SCALE elevado para -4.5 (compensa amortecimento pelo tail).
+- Explosive unloading quando tail_energy > 55 e injection_buffer > 12.
+- Hysterese magnética: quando ring_memory > 0.6 e Bz vira norte, mantém effective_bz < 0.
+- SSC Burton/O'Brien mantido.
 """
 
 import json
@@ -47,14 +48,27 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5         # mV/m
-    Q_SCALE = -3.0              # nT/h por mV/m
+    Q_SCALE = -4.5              # nT/h por unidade de driver (aumentado)
     TAU_DST = 12.0              # horas
     VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
 
     # Memória de reconexão
-    TAU_RECONNECTION = 6.0     # horas – decaimento da memória
+    TAU_RECONNECTION = 6.0      # horas – decaimento da memória
     RECONNECTION_SAT = 120.0    # saturação da memória
     RECONNECTION_K = 22.0       # constante de saturação racional
+
+    # Magnetotail Storage Physics
+    TAU_TAIL_LOADING = 3.5      # horas (constante de carga)
+    TAU_TAIL_UNLOADING = 7.0    # horas (constante de descarga)
+    TAIL_ENERGY_MAX = 250.0     # saturação da energia armazenada
+    TAIL_TO_RING = 0.58         # fração da energia liberada que vai para o anel
+    TAIL_TO_SUBSTORM = 0.42     # fração para subtempestades
+    SUBSTORM_TRIGGER = 18.0     # limiar para descarga explosiva
+    TAIL_DISSIPATION = 0.015    # taxa de dissipação natural
+
+    # Explosive unloading thresholds
+    EXPLOSIVE_TAIL_THRESHOLD = 55.0    # energia mínima para explosão
+    EXPLOSIVE_VBS_THRESHOLD = 12.0     # VBs mínimo para explosão
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -248,7 +262,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM SEPARAÇÃO Dst_ring / Dst_pressure)
+# 3. MODELO HAC+ (COM MAGNETOTAIL STORAGE MELHORADO)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None):
@@ -334,476 +348,320 @@ class ProductionHACModel:
 
         dt = self._safe_deltat(times)
         n = len(times)
-        
+
         # ========================================================
         # Reservatórios HAC (indicador auxiliar)
         # ========================================================
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
-        
+
         print("   Simulando reservatórios...")
-        
         for i in range(1, n):
-        
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
-        
-            # ----------------------------------------------------
-            # Baseline magnetosférico
-            # ----------------------------------------------------
+
             if coupling[i] < 0.02 and bz_eff_i > -3.0:
-                baseline = 0.05 + 0.10 * (density[i] / 10.0)
+                baseline = 0.05 + 0.1 * (density[i] / 10.0)
             else:
                 baseline = 0.15 + 0.25 * (density[i] / 10.0)
-        
             injection = coupling[i] + baseline
-        
-            # ----------------------------------------------------
-            # Boosts opcionais
-            # ----------------------------------------------------
+
             if self.config.USE_BZ_BOOST and Bz[i] < -5:
                 injection *= (1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0))
-        
+
             if self.config.USE_REGIME_BOOST:
                 if regime == 'CME':
                     injection *= 1.3
                 elif regime == 'HSS':
                     injection *= 1.1
-        
-            # ----------------------------------------------------
-            # Tempos característicos
-            # ----------------------------------------------------
+
             if regime == 'CME':
                 tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
             elif regime == 'HSS':
                 tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
             else:
                 tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
-        
+
             tau_sub = self.config.TAU_SUBSTORM * 3600
             tau_ion = self.config.TAU_IONOSPHERE * 3600
-        
+
             dt_hours = dt[i] / 3600.0
-        
-            # ----------------------------------------------------
-            # Injeção sublinear
-            # ----------------------------------------------------
-            injection_eff = np.clip(
-                injection * (dt_hours ** 0.82),
-                0,
-                100
-            )
-        
-            # ----------------------------------------------------
-            # Perdas adaptativas
-            # ----------------------------------------------------
+            injection_eff = np.clip(injection * (dt_hours ** 0.82), 0, 100)
+
             base_loss = 0.010
-        
             if regime == 'CME':
                 base_loss *= 0.72
             elif regime == 'HSS':
                 base_loss *= 0.88
-        
-            loss_ring = (
-                base_loss
-                + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))
-            ) * hac_ring[i-1]
-        
-            loss_sub = (
-                0.015
-                + 0.00003 * np.sqrt(max(0, hac_substorm[i-1]))
-            ) * hac_substorm[i-1]
-        
-            loss_ion = (
-                0.015
-                + 0.00003 * np.sqrt(max(0, hac_ionosphere[i-1]))
-            ) * hac_ionosphere[i-1]
-        
-            # Recuperação acelerada em Bz norte
+
+            loss_ring = (base_loss + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
+            loss_sub = (0.015 + 0.00003 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
+            loss_ion = (0.015 + 0.00003 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
+
             if Bz[i] > 0:
                 loss_ring *= 1.3
                 loss_sub *= 1.3
                 loss_ion *= 1.3
-        
-            # ----------------------------------------------------
-            # Evolução temporal
-            # ----------------------------------------------------
+
             alpha_rc = np.exp(-dt[i] / tau_rc)
             alpha_sub = np.exp(-dt[i] / tau_sub)
             alpha_ion = np.exp(-dt[i] / tau_ion)
-        
-            hac_ring[i] = (
-                alpha_rc * hac_ring[i-1]
-                + self.config.ALPHA_RING * injection_eff
-                - loss_ring
-            )
-        
-            hac_substorm[i] = (
-                alpha_sub * hac_substorm[i-1]
-                + self.config.ALPHA_SUBSTORM * injection_eff
-                - loss_sub
-            )
-        
-            hac_ionosphere[i] = (
-                alpha_ion * hac_ionosphere[i-1]
-                + self.config.ALPHA_IONOSPHERE * injection_eff
-                - loss_ion
-            )
-        
-        # ========================================================
-        # HAC total
-        # ========================================================
-        hac_total = np.clip(
-            hac_ring + hac_substorm + hac_ionosphere,
-            0,
-            self.config.HAC_SCALE_MAX
-        )
-        
+
+            hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
+            hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
+            hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
+
+        hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
-        
+
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
-        
-        _ = self._detect_escalation_triggers(
-            hac_total,
-            dHAC_dt,
-            Bz,
-            Vsw,
-            times
-        )
-        
+        _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
+
         # ========================================================
         # Dst físico total = Dst_ring + Dst_pressure
         # ========================================================
-        
         tau_rec = self.config.TAU_RECONNECTION
         rec_sat = self.config.RECONNECTION_SAT
         rec_k = self.config.RECONNECTION_K
-        
         q_scale = self.config.Q_SCALE
         vbs_thr = self.config.VBs_THRESHOLD
         vbs_sat = self.config.VBS_SAT
-        
-        # --------------------------------------------------------
-        # Componentes Dst
-        # --------------------------------------------------------
+
         dst_ring = np.zeros(n)
         dst_pressure = np.zeros(n)
         dst_physical = np.zeros(n)
         dst_star = np.zeros(n)
-        
-        # --------------------------------------------------------
-        # Estado inicial
-        # --------------------------------------------------------
+
         dst_ring[0] = -20.0
-        
-        dst_pressure[0] = np.clip( 7.26 * np.sqrt(max(0.0, pdyn[0])) - 11.0, -20, 35)
-        
+        dst_pressure[0] = np.clip(7.26 * np.sqrt(max(0.0, pdyn[0])) - 11.0, -20, 35)
         dst_physical[0] = dst_ring[0] + dst_pressure[0]
         dst_star[0] = dst_ring[0]
-        
-        # --------------------------------------------------------
-        # Memórias internas
-        # --------------------------------------------------------
+
+        # Memória de reconexão
         reconnection_memory = np.zeros(n)
-        
+
         # Build-up magnetosférico
         injection_buffer = np.zeros(n)
         injection_buffer[0] = 0.0
-        
+
         # Memória lenta do ring current
         ring_memory = np.zeros(n)
         ring_memory[0] = 0.0
-        
-        # --------------------------------------------------------
-        # Delay solar wind → magnetosfera
-        # --------------------------------------------------------
+
+        # ========================================================
+        # Magnetotail reservoir
+        # ========================================================
+        tail_energy = np.zeros(n)
+        tail_release = np.zeros(n)
+        tail_energy[0] = 0.0
+
+        # Atraso de transporte reduzido (0.55 h)
         mean_dt_hours = np.median(dt) / 3600.0
-        
-        transport_delay_h = 1.6
+        transport_delay_h = 0.55  # CORRIGIDO: era 1.6, agora 0.55 h (~33 min)
         delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
-        
-        vbs_buffer = deque( [0.0] * delay_steps, maxlen=delay_steps)
-        
+        vbs_buffer = deque([0.0] * delay_steps, maxlen=delay_steps)
+
         # ========================================================
         # Evolução temporal do Dst
         # ========================================================
         for i in range(1, n):
-        
             dt_hours = dt[i] / 3600.0
-        
+
             # ----------------------------------------------------
             # SSC / pressão dinâmica
             # ----------------------------------------------------
-            dst_pressure[i] = np.clip( 7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35 )
-        
+            dst_pressure[i] = np.clip(7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35)
+
             # ----------------------------------------------------
             # Campo elétrico efetivo
             # ----------------------------------------------------
-            vbs_eff_val = max( 0.0, vbs_real[i] - vbs_thr)
-            vbs_nl = ( vbs_sat * (1.0 - np.exp(-vbs_eff_val / vbs_sat)))
-        
+            vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
+            vbs_nl = vbs_sat * (1.0 - np.exp(-vbs_eff_val / vbs_sat))
+
             # ----------------------------------------------------
             # Delay SW → magnetosfera
             # ----------------------------------------------------
             vbs_buffer.append(vbs_nl)
             vbs_delayed = vbs_buffer[0]
-        
+
             # ----------------------------------------------------
             # Regime físico
             # ----------------------------------------------------
-            regime_i = _detect_regime_scalar( Vsw[i], density[i], Bz[i])
-        
+            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+
             # ----------------------------------------------------
             # Build-up magnetosférico assimétrico
             # ----------------------------------------------------
             if regime_i == 'CME':
-        
                 tau_inj_rise = 0.55
                 tau_inj_decay = 3.0
-        
             elif regime_i == 'HSS':
-        
                 tau_inj_rise = 2.5
                 tau_inj_decay = 5.5
-        
             else:
-        
                 tau_inj_rise = 0.8
                 tau_inj_decay = 2.2
-        
-            # Rise vs decay
-            if vbs_delayed > injection_buffer[i - 1]:
-        
+
+            if vbs_delayed > injection_buffer[i-1]:
                 tau_inj = tau_inj_rise
-        
             else:
-        
                 tau_inj = tau_inj_decay
-        
-            alpha_inj = np.exp( -dt_hours / tau_inj )
-        
-            injection_buffer[i] = ( alpha_inj * injection_buffer[i - 1] + (1.0 - alpha_inj) * vbs_delayed)
-        
-            # Saturação física
-            injection_buffer[i] = np.clip( injection_buffer[i], 0, vbs_sat)
-        
+
+            alpha_inj = np.exp(-dt_hours / tau_inj)
+            injection_buffer[i] = alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed
+            injection_buffer[i] = np.clip(injection_buffer[i], 0, vbs_sat)
+
             # ----------------------------------------------------
-            # Memória de reconexão
+            # Memória de reconexão (mantida, agora secundária)
             # ----------------------------------------------------
-            alpha_rec = np.exp( -dt_hours / tau_rec)
-        
-            reconnection_memory[i] = ( alpha_rec * reconnection_memory[i - 1] + 0.52 * injection_buffer[i] * dt_hours)
-        
-            reconnection_memory[i] = np.clip( reconnection_memory[i], 0, rec_sat )
-        
-            memory_factor = ( reconnection_memory[i] / (reconnection_memory[i] + rec_k))
-        
-            # ----------------------------------------------------
-            # Memória lenta do ring current
-            # ----------------------------------------------------
-            tau_ring_memory = 18.0
-        
-            alpha_ring_mem = np.exp( -dt_hours / tau_ring_memory)
-        
-            ring_memory[i] = ( alpha_ring_mem * ring_memory[i - 1] + (1.0 - alpha_ring_mem) * abs(dst_ring[i - 1]) / 140.0)
-        
-            ring_memory[i] = np.clip( ring_memory[i], 0, 1.5)
-        
-            # ----------------------------------------------------
-            # Injeção física
-            # ----------------------------------------------------
-            Q_raw = q_scale * (  0.68 * injection_buffer[i]**1.08  + 0.32 * memory_factor)
-        
+            alpha_rec = np.exp(-dt_hours / tau_rec)
+            reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + 0.52 * injection_buffer[i] * dt_hours
+            reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
+            memory_factor = reconnection_memory[i] / (reconnection_memory[i] + rec_k)
+
+            # =================================================
+            # MAGNETOTAIL STORAGE PHYSICS (MELHORADO)
+            # =================================================
+            # Loading do tail
+            tail_loading = 0.22 * injection_buffer[i] * dt_hours
+
+            # Trigger de subtempestade (quanto mais energia, mais descarga)
+            substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
+
+            # Unloading explosivo AUMENTADO (coeficientes 0.14 + 0.12)
+            tail_unloading = (0.14 + 0.12 * substorm_factor) * tail_energy[i-1] * dt_hours
+
+            # Dissipação natural
+            tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
+
+            # Evolução temporal da energia na cauda
+            tail_energy[i] = tail_energy[i-1] + tail_loading - tail_unloading - tail_loss
+            tail_energy[i] = np.clip(tail_energy[i], 0, self.config.TAIL_ENERGY_MAX)
+
+            # Energia descarregada (vai alimentar o anel)
+            tail_release[i] = tail_unloading
+
+            # =================================================
+            # EXPLOSIVE UNLOADING (NOVO)
+            # =================================================
+            if (tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD and
+                injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD):
+                explosive_boost = np.clip(tail_energy[i] / 80.0, 1.0, 2.8)
+                tail_release[i] *= explosive_boost
+
+            # =================================================
+            # Ring current injection FROM TAIL
+            # =================================================
+            ring_driver = 0.72 * tail_release[i] + 0.28 * memory_factor
+            Q_raw = q_scale * (ring_driver ** 0.92)
+
             # ----------------------------------------------------
             # Ganho dependente do regime
             # ----------------------------------------------------
             regime_gain = 1.0
-        
             if regime_i == 'CME':
-                regime_gain += ( 0.16 * np.tanh(injection_buffer[i] / 10.0))
-        
+                regime_gain += 0.16 * np.tanh(injection_buffer[i] / 10.0)
             elif regime_i == 'HSS':
-                regime_gain -= ( 0.04 * np.tanh(injection_buffer[i] / 14.0))
-        
-            # ----------------------------------------------------
-            # Extreme CME enhancement
-            # ----------------------------------------------------
+                regime_gain -= 0.04 * np.tanh(injection_buffer[i] / 14.0)
+            Q_raw *= regime_gain
+
+            # Extreme CME enhancement (controlado)
             if regime_i == 'CME':
-            
-                extreme_factor = np.clip( injection_buffer[i] / 18.0, 0.0, 2.0)
-            
-                Q_raw *= ( 1.0 + 0.12 * extreme_factor**1.25)
-        
-            # Saturação física
-            Q_raw = np.clip( Q_raw, -450,  80)
-        
+                extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
+                Q_raw *= (1.0 + 0.12 * extreme_factor ** 1.25)
+
+            Q_raw = np.clip(Q_raw, -450, 80)
+
             # ====================================================
-            # Estado global da tempestade
+            # Dynamic recovery physics (CORRIGIDO)
             # ====================================================
-            storm_state = ( 0.68 * injection_buffer[i] + 0.32 * ring_memory[i] * 7.0)
-            
-            if storm_state > 1.45:
-                tau_dynamic = ( 7.0 + 6.0 * np.tanh(abs(dst_ring[i-1]) / 160.0) + 3.5 * memory_factor + 3.0 * ring_memory[i])
+            # Hysterese magnética: quando ring current está forte,
+            # mesmo com Bz norte o sistema continua degradando
+            effective_bz = Bz[i]
+            if ring_memory[i-1] > 0.6 and Bz[i] > 0:
+                effective_bz = -2.0
+
+            if effective_bz < 0:
+                # Main phase – decaimento LENTO (tau ALTO)
+                tau_dynamic = (18.0 + 10.0 * memory_factor + 8.0 * ring_memory[i-1])
             else:
-                tau_dynamic = ( 18.0 + 13.0 * np.tanh(abs(dst_ring[i-1]) / 180.0) + 6.0 * memory_factor + 12.0 * ring_memory[i] )
-        
-            # ----------------------------------------------------
-            # Limites físicos
-            # ----------------------------------------------------
-            tau_dynamic = np.clip( tau_dynamic,  4.0, 42.0 )
-        
-            alpha = np.exp( -dt_hours / tau_dynamic )
-        
-            # Pequeno amortecimento numérico
-            alpha = np.clip(  alpha, 0.02, 0.995)
-        
-            # ----------------------------------------------------
+                # Recovery phase – decaimento RÁPIDO (tau BAIXO)
+                tau_dynamic = (8.0 + 4.0 * memory_factor + 3.0 * ring_memory[i-1])
+
+            tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)
+
+            # Memória lenta do ring current
+            tau_ring_memory = 18.0
+            alpha_ring_mem = np.exp(-dt_hours / tau_ring_memory)
+            ring_memory[i] = alpha_ring_mem * ring_memory[i-1] + (1.0 - alpha_ring_mem) * abs(dst_ring[i-1]) / 140.0
+            ring_memory[i] = np.clip(ring_memory[i], 0, 1.5)
+
+            alpha = np.exp(-dt_hours / tau_dynamic)
+            alpha = np.clip(alpha, 0.02, 0.995)
+
             # Evolução do ring current
-            # ----------------------------------------------------
-            dst_ring[i] = ( dst_ring[i - 1] * alpha + Q_raw * tau_dynamic * (1.0 - alpha))
-        
-            # Limite físico
-            dst_ring[i] = np.clip( dst_ring[i], -450, 40)
-        
-            # ----------------------------------------------------
+            dst_ring[i] = dst_ring[i-1] * alpha + Q_raw * tau_dynamic * (1.0 - alpha)
+            dst_ring[i] = np.clip(dst_ring[i], -450, 40)
+
             # Dst total
-            # ----------------------------------------------------
-            dst_physical[i] = ( dst_ring[i] + dst_pressure[i])
-        
-            dst_physical[i] = np.clip( dst_physical[i], -500, 50)
-        
-            # ----------------------------------------------------
+            dst_physical[i] = dst_ring[i] + dst_pressure[i]
+            dst_physical[i] = np.clip(dst_physical[i], -500, 50)
+
             # Dst*
-            # ----------------------------------------------------
             dst_star[i] = dst_ring[i]
-        
-        print(
-            f"   • Dst físico mín: "
-            f"{np.min(dst_physical):.1f} nT"
-        )
-        
+
+        print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
+
         # ========================================================
-        # Forecast físico
+        # Forecast físico (simplificado, mas consistente)
         # ========================================================
         forecast = {}
-        
         dt_median = np.median(dt) / 3600.0
-        
         window_persist = min(120, n)
-        
-        weights = np.exp( -np.linspace(0, 3, window_persist))
-        
+        weights = np.exp(-np.linspace(0, 3, window_persist))
         weights /= weights.sum()
-        
         vbs_persist = np.sum(vbs_real[-window_persist:] * weights)
-        
         pdyn_persist = pdyn[-1]
-        
+
         for h in [1, 2, 3]:
-        
-            steps = max( 1,  int(h / dt_median))
-        
+            steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             dst_ring_fut = dst_ring[-1]
-        
-            # Persistência do injection buffer
             inj_future = injection_buffer[-1]
-        
+            tail_fut = tail_energy[-1]
+
             for step in range(steps):
-        
-                tau_dyn = np.clip( 14.0 + 12.0 * np.tanh(abs(dst_ring_fut) / 180.0), 6.0, 40.0)
-                alpha = np.exp( -dt_median / tau_dyn)
-        
+                tau_dyn = np.clip(14.0 + 12.0 * np.tanh(abs(dst_ring_fut) / 180.0), 6.0, 40.0)
+                alpha = np.exp(-dt_median / tau_dyn)
                 time_elapsed = step * dt_median
-        
-                # ------------------------------------------------
-                # Decaimento do driver solar
-                # ------------------------------------------------
                 decay = np.exp(-time_elapsed / 4.5)
-        
                 recent_window = vbs_real[-18:]
-        
                 if len(recent_window) >= 7:
-        
-                    smooth_recent = savgol_filter(
-                        recent_window,
-                        7,
-                        2
-                    )
-        
-                    recent_trend = np.mean(
-                        np.diff(smooth_recent)
-                    )
-        
+                    smooth_recent = savgol_filter(recent_window, 7, 2)
+                    recent_trend = np.mean(np.diff(smooth_recent))
                 else:
                     recent_trend = 0.0
-        
-                vbs_future = max(
-                    0,
-                    vbs_persist * decay
-                    + recent_trend * 0.25
-                )
-        
-                # ------------------------------------------------
-                # Build-up futuro
-                # ------------------------------------------------
-                alpha_inj_f = np.exp(
-                    -dt_median / 2.5
-                )
-        
-                inj_future = (
-                    alpha_inj_f * inj_future
-                    + (1.0 - alpha_inj_f) * vbs_future
-                )
-        
-                # ------------------------------------------------
-                # Injeção futura
-                # ------------------------------------------------
-                vbs_future_eff = max(
-                    0.0,
-                    inj_future - vbs_thr
-                )
-        
-                vbs_future_nl = vbs_sat * (
-                    1.0 - np.exp(-vbs_future_eff / vbs_sat)
-                )
-        
-                q_fut = q_scale * vbs_future_nl
-        
-                # ------------------------------------------------
-                # Evolução do ring current
-                # ------------------------------------------------
-                dst_ring_fut = (
-                    dst_ring_fut * alpha
-                    + q_fut * tau_dyn * (1.0 - alpha)
-                )
-        
-                # ------------------------------------------------
-                # SSC futuro
-                # ------------------------------------------------
-                pdyn_future = (
-                    pdyn_persist
-                    * np.exp(-time_elapsed / 2.0)
-                )
-        
-                dst_pressure_future = np.clip(
-                    7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0,
-                    -20,
-                    35
-                )
-        
-                dst_fut = (
-                    dst_ring_fut
-                    + dst_pressure_future
-                )
-        
-            forecast[f"{h}h"] = np.clip(
-                dst_fut,
-                -500,
-                50
-            )
-        
+                vbs_future = max(0, vbs_persist * decay + recent_trend * 0.25)
+
+                alpha_inj_f = np.exp(-dt_median / 2.5)
+                inj_future = alpha_inj_f * inj_future + (1.0 - alpha_inj_f) * vbs_future
+
+                tail_loading_f = 0.22 * inj_future * dt_median
+                tail_unloading_f = (0.14 + 0.12 * np.clip(tail_fut / self.config.SUBSTORM_TRIGGER, 0, 3)) * tail_fut * dt_median
+                tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
+
+                ring_driver_f = 0.72 * tail_unloading_f + 0.28 * memory_factor
+                q_fut = q_scale * (ring_driver_f ** 0.92)
+
+                dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
+
+                pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
+                dst_pressure_future = np.clip(7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0, -20, 35)
+                dst_fut = dst_ring_fut + dst_pressure_future
+
+            forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
+
         # ========================================================
         # Resultados
         # ========================================================
@@ -819,13 +677,14 @@ class ProductionHACModel:
             'Dst_pressure': dst_pressure,
             'Dst_star': dst_star,
             'injection_buffer': injection_buffer,
+            'tail_energy': tail_energy,
+            'tail_release': tail_release,
             'Dst_min_physical': np.min(dst_physical),
             'Dst_now': dst_physical[-1],
             'forecast': forecast
         })
-        
+
         self._validate_output(hac_total)
-        
         return hac_total
 
     def _validate_output(self, hac_values):
@@ -909,7 +768,7 @@ class ProductionHACModel:
         Vsw = self.results.get('Vsw', np.full_like(hac_values, 400))
 
         # Estimativa de Kp melhorada
-        kp_from_dst = np.clip( 0.072 * abs(dst_min)**0.8 + 0.7, 0, 9)
+        kp_from_dst = np.clip(0.072 * abs(dst_min)**0.8 + 0.7, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
 
         storm_levels, logs = [], []
@@ -1019,6 +878,7 @@ def main():
         'Dst': model.results['Dst_physical'],
         'Dst_ring': model.results['Dst_ring'],
         'Dst_pressure': model.results['Dst_pressure'],
+        'tail_energy': model.results['tail_energy'],
         'Storm_level': model.results['Storm_level']
     })
     df_out.to_csv("hac_nowcast_results.csv", index=False)
