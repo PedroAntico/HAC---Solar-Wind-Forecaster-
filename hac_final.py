@@ -569,7 +569,7 @@ class ProductionHACModel:
             # Ring current injection FROM TAIL
             # =================================================
             ring_driver = ( self.config.TAIL_TO_RING * tail_release[i] + 0.28 * memory_factor)
-            Q_raw = q_scale * ( 0.55 * ring_driver + 0.45 * (ring_driver ** 0.82))
+            Q_raw = q_scale * (ring_driver ** 1.08)
 
             # ----------------------------------------------------
             # Ganho dependente do regime
