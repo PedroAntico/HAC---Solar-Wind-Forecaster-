@@ -458,7 +458,7 @@ class ProductionHACModel:
 
         # Atraso de transporte reduzido (0.55 h)
         mean_dt_hours = np.median(dt) / 3600.0
-        transport_delay_h = 0.55  # CORRIGIDO: era 1.6, agora 0.55 h (~33 min)
+        transport_delay_h = np.clip(  2.4 - (Vsw[i] - 400) / 500, 0.45,  2.5)
         delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
         vbs_buffer = deque([0.0] * delay_steps, maxlen=delay_steps)
 
@@ -607,7 +607,9 @@ class ProductionHACModel:
                 # Recovery phase – decaimento RÁPIDO (tau BAIXO)
                 tau_dynamic = (5.5 + 2.5 * memory_factor + 3.0 * ring_memory[i-1])
 
-            tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)
+            depth_factor = np.clip(abs(dst_ring[i-1]) / 180.0, 0, 2.5)
+            tau_dynamic *= ( 1.0 - 0.22 * np.tanh(depth_factor))
+            tau_dynamic = np.clip(tau_dynamic, 3.2, 42.0)
 
             # Memória lenta do ring current
             tau_ring_memory = 18.0
