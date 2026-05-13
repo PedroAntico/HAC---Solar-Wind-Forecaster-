@@ -343,29 +343,18 @@ class ProductionHACModel:
         return norm
 
     def _compute_robust_derivative(self, hac_total, times):
-        """
-        Calcula dHAC/dt de forma robusta.
-        Para tempestades fortes (HAC > 40), usa gradiente simples (preserva picos).
-        Caso contrário, Savitzky-Golay (apenas para suavização, NÃO no pipeline principal).
-        """
+        """Derivada temporal CAUSAL (usa apenas diff)."""
         t_sec = times.astype('datetime64[s]')
         dt = np.diff(t_sec).astype(float)
-        dt = np.insert(dt, 0, np.median(dt))
+        dt = np.insert(dt, 0, np.median(dt))   # fallback para primeiro ponto
         dt[dt <= 0] = 1.0
         dt_h = np.maximum(dt / 3600.0, 1e-3)
-        if np.max(hac_total) > 40:
-            dH = np.gradient(hac_total) / dt_h
-        else:
-            if len(hac_total) < 7:
-                dH = np.gradient(hac_total) / dt_h
-            else:
-                w = min(7, len(hac_total))
-                if w % 2 == 0:
-                    w -= 1
-                try:
-                    dH = savgol_filter(hac_total, w, 2, deriv=1, delta=np.median(dt_h))
-                except:
-                    dH = np.gradient(hac_total) / dt_h
+    
+        # Cálculo 100% causal: diferença entre instante atual e anterior
+        dH = np.zeros_like(hac_total)
+        dH[1:] = np.diff(hac_total) / dt_h[1:]
+    
+        # Clipping físico
         dH = np.nan_to_num(dH, nan=0.0)
         dH = np.clip(dH, -150, 150)
         print(f"     Derivada máx: {np.max(dH):.1f} nT/h")
@@ -728,23 +717,27 @@ class ProductionHACModel:
           forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
   
       self.results.update({
-          'time': times,
-          'HAC_total': hac_total,
-          'dHAC_dt': dHAC_dt,
-          'Bz': Bz,
-          'Vsw': Vsw,
-          'coupling_signal': coupling,
-          'Dst_physical': dst_physical,
-          'Dst_ring': dst_ring,
-          'Dst_pressure': dst_pressure,
-          'Dst_star': dst_star,
-          'injection_buffer': injection_buffer,
-          'tail_energy': tail_energy,
-          'tail_release': tail_release,
-          'Dst_min_physical': np.min(dst_physical),
-          'Dst_now': dst_physical[-1],
-          'forecast': forecast
-      })
+        'time': times,
+        'HAC_total': hac_total,
+        'dHAC_dt': dHAC_dt,
+        'Bz': Bz,
+        'Vsw': Vsw,
+        'coupling_signal': coupling,
+        'Dst_physical': dst_physical,
+        'Dst_ring': dst_ring,
+        'Dst_pressure': dst_pressure,
+        'Dst_star': dst_star,
+        'injection_buffer': injection_buffer,
+        'tail_energy': tail_energy,
+        'tail_release': tail_release,
+        'Pdyn': pdyn,                       # ← ADICIONADO
+        'VBs_eff': df['VBs_eff'].values,   # ← ADICIONADO
+        'ring_memory': ring_memory,         # ← ADICIONADO
+        'density': density,                 # ← ADICIONADO
+        'Dst_min_physical': np.min(dst_physical),
+        'Dst_now': dst_physical[-1],
+        'forecast': forecast
+    })
   
       self._validate_output(hac_total)
       return hac_total
