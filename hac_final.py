@@ -74,7 +74,7 @@ class HACPhysicsConfig:
     TAU_TAIL_LOADING = 3.5      # horas (constante de carga)
     TAU_TAIL_UNLOADING = 7.0    # horas (constante de descarga)
     TAIL_ENERGY_MAX = 250.0     # saturação da energia armazenada
-    TAIL_TO_RING = 0.58         # fração da energia liberada que vai para o anel
+    TAIL_TO_RING = 0.75         # fração da energia liberada que vai para o anel
     TAIL_TO_SUBSTORM = 0.42     # fração para subtempestades
     SUBSTORM_TRIGGER = 18.0     # limiar para descarga explosiva
     TAIL_DISSIPATION = 0.015    # taxa de dissipação natural
@@ -609,7 +609,7 @@ class ProductionHACModel:
             # Ring current injection FROM TAIL
             # =================================================
             ring_driver = self.config.TAIL_TO_RING * tail_release[i] + 0.28 * memory_factor
-            Q_raw = q_scale * (ring_driver ** 1.08)
+            Q_raw = q_scale * (ring_driver ** 1.22)
     
             # ----------------------------------------------------
             # Ganho dependente do regime
