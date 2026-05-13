@@ -24,7 +24,6 @@ from hac_final import (
     PhysicalFieldsCalculator,
     HACPhysicsConfig,
     normalize_omni_columns,
-    HACResidualCorrector
 )
 from hac_core import HACCoreModel, HACCoreConfig, evaluate_event, compute_hac
 
