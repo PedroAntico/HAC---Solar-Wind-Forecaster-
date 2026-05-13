@@ -53,10 +53,10 @@ class HACPhysicsConfig:
     TAU_TAIL_LOADING = 3.5
     TAU_TAIL_UNLOADING = 7.0
     TAIL_ENERGY_MAX = 250.0
-    TAIL_TO_RING = 0.75  # AUMENTADO de 0.58
+    TAIL_TO_RING = 0.66  # AUMENTADO de 0.58
     TAIL_TO_SUBSTORM = 0.25  # reduzido (0.42 antes)
     SUBSTORM_TRIGGER = 18.0
-    TAIL_DISSIPATION = 0.010  # REDUZIDO de 0.015
+    TAIL_DISSIPATION = 0.013  # REDUZIDO de 0.015
 
     EXPLOSIVE_TAIL_THRESHOLD = 55.0
     EXPLOSIVE_VBS_THRESHOLD = 12.0
@@ -535,7 +535,7 @@ class ProductionHACModel:
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
-                q_fut = q_scale * (ring_driver_f ** 0.92)
+                q_fut = q_scale * (ring_driver_f ** 1.22)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
 
