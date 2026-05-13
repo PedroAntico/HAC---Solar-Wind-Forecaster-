@@ -431,7 +431,7 @@ class ProductionHACModel:
             injection_buffer[i] = alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed
             injection_buffer[i] = np.clip(injection_buffer[i], 0, vbs_sat)
 
-            tail_loading = 0.34 * injection_buffer[i] * dt_hours
+            tail_loading = 0.28 * injection_buffer[i] * dt_hours
 
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
             tail_unloading = ((0.11 + 0.07 * np.tanh(substorm_factor)) * tail_energy[i-1] * dt_hours)
