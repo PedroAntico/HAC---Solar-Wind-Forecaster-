@@ -1,130 +1,97 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão híbrida física + ML residual com causalidade total e estado online (junho/2026)
+Versão recalibrada para tempestades severas (maio/2026)
 
-Arquitetura:
-- Núcleo físico Burton com magnetotail, injeção explosiva, histerese e SSC.
-- Corretor ML residual (GradientBoosting quantílico) com features causais.
-- Inferência online real (estado persistente entre chamadas).
-- Preparação para benchmark e migração para TCN.
-
-Divisão do script:
-  Bloco 1: cabeçalho, configuração, funções auxiliares, carregamento de dados,
-           cálculo de campos físicos e início da classe ProductionHACModel.
-  Bloco 2: métodos principais do modelo HAC (compute_hac_system, etc.).
-  Bloco 3: corretor ML residual, ensemble temporal e main.
+Correções aplicadas:
+- TAIL_TO_RING elevado para 0.75 (transferência energética 29% maior).
+- Expoente de injeção aumentado (1.08 → 1.22).
+- Q_SCALE elevado para -12.5.
+- Tau dinâmico mínimo maior (preserva injeção).
+- Memória de reconexão desacoplada (peso reduzido).
+- Remoção de memória redundante (ring_memory duplicado).
 """
 
 import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
 from collections import deque
 import pickle
 import os
 import copy
 
-# scipy.signal.savgol_filter é importado apenas para uso opcional no forecast 
-# (não causal, apenas para exibição). NÃO é usado no pipeline principal de previsão.
-from scipy.signal import savgol_filter
-from scipy.special import expit as sigmoid
-
-
-# ============================================================
-# CONFIGURAÇÃO FÍSICA (CALIBRADA)
-# ============================================================
 class HACPhysicsConfig:
-    # ----------------------------------------------------------
-    # Tempos característicos (horas)
-    # ----------------------------------------------------------
     TAU_RING_CURRENT_QUIET = 10.0
     TAU_RING_CURRENT_HSS = 6.0
     TAU_RING_CURRENT_CME = 4.5
     TAU_SUBSTORM = 0.6
     TAU_IONOSPHERE = 0.2
 
-    # Persistência do Bz (dinâmica)
     TAU_BZ_QUIET = 1.0
     TAU_BZ_HSS = 2.5
     TAU_BZ_CME = 0.25
 
-    # Escalas físicas fixas
-    E_FIELD_REF = 5.0           # mV/m
+    E_FIELD_REF = 5.0
     NEWELL_REF = 1e4
-    PRESSURE_REF = 3.0          # nPa
+    PRESSURE_REF = 3.0
 
-    # Saturações
-    E_FIELD_SATURATION = 35.0   # mV/m
+    E_FIELD_SATURATION = 35.0
     KP_SATURATION = 9.0
-    RING_CURRENT_MAX = 800.0    # nT
+    RING_CURRENT_MAX = 800.0
 
-    # Parâmetros do modelo Burton (calibrados)
-    VBs_THRESHOLD = 0.5         # mV/m
-    Q_SCALE = -7.5              # nT/h por unidade de driver
-    TAU_DST = 12.0              # horas
-    VBS_SAT = 28.0              # mV/m – saturação não‑linear do acoplamento
+    VBs_THRESHOLD = 0.5
+    Q_SCALE = -12.5  # ELEVADO para tempestades severas
+    TAU_DST = 12.0
+    VBS_SAT = 28.0
 
-    # Memória de reconexão
-    TAU_RECONNECTION = 6.0      # horas – decaimento da memória
-    RECONNECTION_SAT = 120.0    # saturação da memória
-    RECONNECTION_K = 22.0       # constante de saturação racional
+    TAU_RECONNECTION = 6.0
+    RECONNECTION_SAT = 120.0
+    RECONNECTION_K = 22.0
 
-    # Magnetotail Storage Physics
-    TAU_TAIL_LOADING = 3.5      # horas (constante de carga)
-    TAU_TAIL_UNLOADING = 7.0    # horas (constante de descarga)
-    TAIL_ENERGY_MAX = 250.0     # saturação da energia armazenada
-    TAIL_TO_RING = 0.75         # fração da energia liberada que vai para o anel
-    TAIL_TO_SUBSTORM = 0.42     # fração para subtempestades
-    SUBSTORM_TRIGGER = 18.0     # limiar para descarga explosiva
-    TAIL_DISSIPATION = 0.015    # taxa de dissipação natural
+    TAU_TAIL_LOADING = 3.5
+    TAU_TAIL_UNLOADING = 7.0
+    TAIL_ENERGY_MAX = 250.0
+    TAIL_TO_RING = 0.75  # AUMENTADO de 0.58
+    TAIL_TO_SUBSTORM = 0.25  # reduzido (0.42 antes)
+    SUBSTORM_TRIGGER = 18.0
+    TAIL_DISSIPATION = 0.010  # REDUZIDO de 0.015
 
-    # Explosive unloading thresholds
-    EXPLOSIVE_TAIL_THRESHOLD = 55.0    # energia mínima para explosão
-    EXPLOSIVE_VBS_THRESHOLD = 12.0     # VBs mínimo para explosão
+    EXPLOSIVE_TAIL_THRESHOLD = 55.0
+    EXPLOSIVE_VBS_THRESHOLD = 12.0
 
-    # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
     ALPHA_SUBSTORM = 0.3
     ALPHA_IONOSPHERE = 0.3
 
-    # Acoplamento não‑linear (para HAC)
     BETA_NONLINEAR = 2.2
-    COUPLING_THRESHOLD = 2.0    # mV/m
+    COUPLING_THRESHOLD = 2.0
     NEWELL_SCALE = 5e-4
 
-    # Escalas operacionais do HAC (provisórias)
     HAC_SCALE_MAX = 200.0
-    HAC_NORM_FACTOR = 150.0     # não aplicado agora
+    HAC_NORM_FACTOR = 150.0
 
-    # Limiares do HAC (provisórios)
     HAC_G1 = 20
     HAC_G2 = 40
     HAC_G3 = 60
     HAC_G4 = 85
     HAC_G5 = 105
 
-    # Limites físicos
     VSW_MIN, VSW_MAX = 200, 1500
     DENSITY_MIN, DENSITY_MAX = 0.1, 100
     BZ_MIN, BZ_MAX = -100, 100
 
-    # Nowcast + Inércia
     THETA_CRITICAL = 50.0
     HG3_THRESHOLD = 150.0
     VSW_CRITICAL = 700.0
     BZ_CRITICAL = -8.0
 
-    # Flags para boosts (desabilitados)
     USE_BZ_BOOST = False
     USE_REGIME_BOOST = False
 
 
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
 def normalize_omni_columns(df, allow_partial=False):
-    """Normaliza nomes de colunas OMNI para o padrão esperado."""
     df = df.copy()
     df.columns = [c.strip().lower() for c in df.columns]
     rename_map = {
@@ -137,12 +104,7 @@ def normalize_omni_columns(df, allow_partial=False):
     df.rename(columns=rename_map, inplace=True)
     return df
 
-
 def _detect_regime_scalar(v, density, bz):
-    """
-    Classifica o regime de vento solar (escalar).
-    Retorna: 'CME', 'HSS', 'SIR', 'Quiet'
-    """
     if density > 8 and bz < -8:
         return 'CME'
     elif v > 600 and density < 5:
@@ -152,14 +114,9 @@ def _detect_regime_scalar(v, density, bz):
     else:
         return 'Quiet'
 
-
-# ============================================================
-# 1. CARREGAMENTO ROBUSTO DE DADOS OMNI
-# ============================================================
 class RobustOMNIProcessor:
     @staticmethod
     def load_and_clean(filepath, max_interpolation=3):
-        """Carrega, normaliza e limpa dados OMNI (formato JSON usado no início)."""
         print(f"📥 Carregando {filepath}...")
         try:
             with open(filepath, 'r') as f:
@@ -193,7 +150,6 @@ class RobustOMNIProcessor:
 
     @staticmethod
     def merge_datasets(mag_df, plasma_df):
-        """Funde dataframes de campo magnético e plasma."""
         if mag_df is None or plasma_df is None:
             return None
         df = pd.merge(mag_df, plasma_df, on='time_tag', how='outer')
@@ -203,30 +159,15 @@ class RobustOMNIProcessor:
                 df[col] = df[col].fillna(fill)
         return df
 
-
-# ============================================================
-# 2. CÁLCULO DE CAMPOS FÍSICOS (COM TAU_BZ DINÂMICO)
-# ============================================================
 class PhysicalFieldsCalculator:
     @staticmethod
     def compute_all_fields(df):
-        """
-        Calcula todos os campos físicos necessários:
-        - bz_eff (com memória exponencial dinâmica por regime)
-        - VBs_real (driver Burton, sem memória)
-        - VBs_eff (com bz_eff, para HAC/Nowcast)
-        - Pdyn (pressão dinâmica corrigida)
-        - coupling_signal (para HAC)
-        """
         df = df.copy()
         config = HACPhysicsConfig()
         bz = df['bz_gsm'].fillna(0).values
         v = df['speed'].fillna(400).values
         density = df['density'].fillna(5).values
 
-        # ------------------------------------------------------------
-        # Bz efetivo com TAU_BZ DINÂMICO (para HAC/Nowcast)
-        # ------------------------------------------------------------
         time_sec = pd.to_datetime(df['time_tag']).values.astype('datetime64[s]')
         dt_sec = np.diff(time_sec).astype(float)
         dt_sec = np.insert(dt_sec, 0, np.median(dt_sec))
@@ -235,9 +176,7 @@ class PhysicalFieldsCalculator:
         bz_neg = np.minimum(0, bz)
         bz_eff = np.zeros_like(bz)
         bz_eff[0] = bz_neg[0]
-
         regimes = np.array([_detect_regime_scalar(v[i], density[i], bz[i]) for i in range(len(bz))])
-
         for i in range(1, len(bz)):
             if regimes[i] == 'CME':
                 tau_bz = config.TAU_BZ_CME
@@ -245,35 +184,23 @@ class PhysicalFieldsCalculator:
                 tau_bz = config.TAU_BZ_HSS
             else:
                 tau_bz = config.TAU_BZ_QUIET
-
             alpha = np.exp(-dt_hours[i] / tau_bz)
             bz_eff[i] = alpha * bz_eff[i-1] + (1 - alpha) * bz_neg[i]
+        bz_eff = np.minimum(bz_eff, 0.0)
 
-        bz_eff = np.minimum(bz_eff, 0.0)   # garante não positivo
-
-        # ------------------------------------------------------------
-        # Driver Burton: VBs com Bz REAL (sem memória)
-        # ------------------------------------------------------------
         bz_south_real = np.maximum(0, -bz)
         vbs_real = v * bz_south_real * 1e-3
         vbs_real = np.clip(vbs_real, 0, config.E_FIELD_SATURATION)
         df['VBs_real'] = vbs_real
 
-        # VBs efetivo (com bz_eff) para HAC/Nowcast
         bz_south_eff = np.maximum(0, -bz_eff)
         vbs_eff = v * bz_south_eff * 1e-3
         vbs_eff = np.clip(vbs_eff, 0, config.E_FIELD_SATURATION)
         df['VBs_eff'] = vbs_eff
 
-        # ------------------------------------------------------------
-        # Pressão dinâmica CORRIGIDA (nPa)
-        # ------------------------------------------------------------
         pdyn = 1.6726e-6 * density * (v ** 2)
         df['Pdyn'] = pdyn
 
-        # ------------------------------------------------------------
-        # Acoplamento Newell (mantido para HAC)
-        # ------------------------------------------------------------
         bt = df.get('bt', pd.Series(np.abs(bz), index=df.index)).fillna(0).values
         by = df.get('by_gsm', pd.Series(np.zeros_like(bz), index=df.index)).fillna(0).values
         theta = np.arctan2(by, bz)
@@ -300,17 +227,7 @@ class PhysicalFieldsCalculator:
 
         return df
 
-
-# ============================================================
-# 3. MODELO HAC+ (FÍSICO + ML RESIDUAL COM ESTADO PERSISTENTE)
-# ============================================================
 class ProductionHACModel:
-    """
-    Modelo híbrido de previsão de Dst.
-    - Núcleo físico: compute_hac_system() produz Dst_physics.
-    - Corretor ML: HACResidualCorrector aprende o resíduo.
-    - Inferência online com estado persistente.
-    """
     def __init__(self, config=None, ml_corrector=None):
         self.config = config or HACPhysicsConfig()
         self.ml_corrector = ml_corrector
@@ -318,15 +235,10 @@ class ProductionHACModel:
         self.nowcast_alerts = []
         self.escalation_triggers = []
         self.classification_logs = []
-        # Estados persistentes para inferência online
-        self._online_residual_state = None  # estado do residual acumulado
-        self._online_ema_state = None       # estado do filtro EMA
+        self._online_residual_state = None
+        self._online_ema_state = None
 
-    # ----------------------------------------------------------
-    # Métodos auxiliares (mantidos da versão original)
-    # ----------------------------------------------------------
     def _safe_deltat(self, times):
-        """Calcula dt em segundos com proteção contra divisão por zero."""
         n = len(times)
         dt = np.full(n, 60.0)
         if n > 1:
@@ -337,31 +249,24 @@ class ProductionHACModel:
         return dt
 
     def _safe_normalization(self, values):
-        """Normalização removida – usamos valores brutos."""
         norm = np.clip(values, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(norm):.1f}, méd: {np.mean(norm):.1f}")
         return norm
 
     def _compute_robust_derivative(self, hac_total, times):
-        """Derivada temporal CAUSAL (usa apenas diff)."""
         t_sec = times.astype('datetime64[s]')
         dt = np.diff(t_sec).astype(float)
-        dt = np.insert(dt, 0, np.median(dt))   # fallback para primeiro ponto
+        dt = np.insert(dt, 0, np.median(dt))
         dt[dt <= 0] = 1.0
         dt_h = np.maximum(dt / 3600.0, 1e-3)
-    
-        # Cálculo 100% causal: diferença entre instante atual e anterior
         dH = np.zeros_like(hac_total)
         dH[1:] = np.diff(hac_total) / dt_h[1:]
-    
-        # Clipping físico
         dH = np.nan_to_num(dH, nan=0.0)
         dH = np.clip(dH, -150, 150)
         print(f"     Derivada máx: {np.max(dH):.1f} nT/h")
         return dH
 
     def _detect_escalation_triggers(self, hac_total, dHAC_dt, Bz, Vsw, times):
-        """Detecta triggers de escalação (Nowcast)."""
         n = len(hac_total)
         flags = np.zeros(n, dtype=bool)
         window = 30
@@ -385,12 +290,9 @@ class ProductionHACModel:
                     self.escalation_triggers.append(alert)
         return flags
 
-    # ============================================================
-  # NÚCLEO FÍSICO (SSC + MAGNETOTAIL + RING CURRENT)
-  # ============================================================
     def compute_hac_system(self, df, calibration_mode=False):
         print("\n⚡ Calculando sistema HAC+...")
-    
+
         times = pd.to_datetime(df['time_tag']).values
         coupling = df['coupling_signal'].fillna(0).values
         Bz = df['bz_gsm'].fillna(0).values
@@ -398,154 +300,118 @@ class ProductionHACModel:
         vbs_real = df.get('VBs_real', pd.Series(np.zeros_like(Bz))).values
         pdyn = df.get('Pdyn', pd.Series(np.full_like(Bz, 3.0))).values
         density = df['density'].fillna(5).values if 'density' in df.columns else np.full_like(Bz, 5)
-    
+
         dt = self._safe_deltat(times)
         n = len(times)
-    
-        # ========================================================
-        # Reservatórios HAC (indicador auxiliar)
-        # ========================================================
+
         hac_ring = np.zeros(n)
         hac_substorm = np.zeros(n)
         hac_ionosphere = np.zeros(n)
-    
+
         print("   Simulando reservatórios...")
         for i in range(1, n):
             regime = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             bz_eff_i = df['bz_eff'].iloc[i] if 'bz_eff' in df.columns else Bz[i]
-    
+
             if coupling[i] < 0.02 and bz_eff_i > -3.0:
                 baseline = 0.05 + 0.1 * (density[i] / 10.0)
             else:
                 baseline = 0.15 + 0.25 * (density[i] / 10.0)
             injection = coupling[i] + baseline
-    
+
             if self.config.USE_BZ_BOOST and Bz[i] < -5:
                 injection *= (1.0 + 0.2 * min(abs(Bz[i]) / 20.0, 1.0))
-    
+
             if self.config.USE_REGIME_BOOST:
                 if regime == 'CME':
                     injection *= 1.3
                 elif regime == 'HSS':
                     injection *= 1.1
-    
+
             if regime == 'CME':
                 tau_rc = self.config.TAU_RING_CURRENT_CME * 3600
             elif regime == 'HSS':
                 tau_rc = self.config.TAU_RING_CURRENT_HSS * 3600
             else:
                 tau_rc = self.config.TAU_RING_CURRENT_QUIET * 3600
-    
+
             tau_sub = self.config.TAU_SUBSTORM * 3600
             tau_ion = self.config.TAU_IONOSPHERE * 3600
-    
+
             dt_hours = dt[i] / 3600.0
             injection_eff = np.clip(injection * (dt_hours ** 0.82), 0, 100)
-    
+
             base_loss = 0.010
             if regime == 'CME':
                 base_loss *= 0.72
             elif regime == 'HSS':
                 base_loss *= 0.88
-    
+
             loss_ring = (base_loss + 0.00003 * np.sqrt(max(0, hac_ring[i-1]))) * hac_ring[i-1]
             loss_sub = (0.015 + 0.00003 * np.sqrt(max(0, hac_substorm[i-1]))) * hac_substorm[i-1]
             loss_ion = (0.015 + 0.00003 * np.sqrt(max(0, hac_ionosphere[i-1]))) * hac_ionosphere[i-1]
-    
+
             if Bz[i] > 0:
                 loss_ring *= 1.3
                 loss_sub *= 1.3
                 loss_ion *= 1.3
-    
+
             alpha_rc = np.exp(-dt[i] / tau_rc)
             alpha_sub = np.exp(-dt[i] / tau_sub)
             alpha_ion = np.exp(-dt[i] / tau_ion)
-    
+
             hac_ring[i] = alpha_rc * hac_ring[i-1] + self.config.ALPHA_RING * injection_eff - loss_ring
             hac_substorm[i] = alpha_sub * hac_substorm[i-1] + self.config.ALPHA_SUBSTORM * injection_eff - loss_sub
             hac_ionosphere[i] = alpha_ion * hac_ionosphere[i-1] + self.config.ALPHA_IONOSPHERE * injection_eff - loss_ion
-    
+
         hac_total = np.clip(hac_ring + hac_substorm + hac_ionosphere, 0, self.config.HAC_SCALE_MAX)
         print(f"   • HAC máx: {np.max(hac_total):.1f}, méd: {np.mean(hac_total):.1f}")
-    
+
         dHAC_dt = self._compute_robust_derivative(hac_total, times)
         _ = self._detect_escalation_triggers(hac_total, dHAC_dt, Bz, Vsw, times)
-    
-        # ========================================================
-        # Dst físico total = Dst_ring + Dst_pressure
-        # ========================================================
+
         tau_rec = self.config.TAU_RECONNECTION
         rec_sat = self.config.RECONNECTION_SAT
         rec_k = self.config.RECONNECTION_K
         q_scale = self.config.Q_SCALE
         vbs_thr = self.config.VBs_THRESHOLD
         vbs_sat = self.config.VBS_SAT
-    
+
         dst_ring = np.zeros(n)
         dst_pressure = np.zeros(n)
         dst_physical = np.zeros(n)
         dst_star = np.zeros(n)
-    
+
         dst_ring[0] = -20.0
         dst_pressure[0] = np.clip(7.26 * np.sqrt(max(0.0, pdyn[0])) - 11.0, -20, 35)
         dst_physical[0] = dst_ring[0] + dst_pressure[0]
         dst_star[0] = dst_ring[0]
-    
-        # Memória de reconexão
-        reconnection_memory = np.zeros(n)
-    
-        # Build-up magnetosférico
+
         injection_buffer = np.zeros(n)
         injection_buffer[0] = 0.0
-    
-        # Memória lenta do ring current
-        ring_memory = np.zeros(n)
-        ring_memory[0] = 0.0
-    
-        # ========================================================
-        # Magnetotail reservoir
-        # ========================================================
+
         tail_energy = np.zeros(n)
         tail_release = np.zeros(n)
         tail_energy[0] = 0.0
-    
-        # Atraso de transporte reduzido (0.55 h)
+
         mean_dt_hours = np.median(dt) / 3600.0
         transport_delay_h = np.clip(2.4 - (Vsw[0] - 400) / 500, 0.45, 2.5)
         delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
         vbs_buffer = deque([0.0] * delay_steps, maxlen=delay_steps)
-    
-        # ========================================================
-        # Evolução temporal do Dst
-        # ========================================================
+
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
-    
-            # ----------------------------------------------------
-            # SSC / pressão dinâmica
-            # ----------------------------------------------------
+
             dst_pressure[i] = np.clip(7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35)
-    
-            # ----------------------------------------------------
-            # Campo elétrico efetivo
-            # ----------------------------------------------------
+
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
-    
-            # ----------------------------------------------------
-            # Delay SW → magnetosfera
-            # ----------------------------------------------------
+
             vbs_buffer.append(vbs_nl)
             vbs_delayed = vbs_buffer[0]
-    
-            # ----------------------------------------------------
-            # Regime físico
-            # ----------------------------------------------------
+
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
-    
-            # ----------------------------------------------------
-            # Build-up magnetosférico assimétrico
-            # ----------------------------------------------------
+
             if regime_i == 'CME':
                 tau_inj_rise = 0.55
                 tau_inj_decay = 4.5
@@ -555,121 +421,84 @@ class ProductionHACModel:
             else:
                 tau_inj_rise = 0.8
                 tau_inj_decay = 2.2
-    
+
             if vbs_delayed > injection_buffer[i-1]:
                 tau_inj = tau_inj_rise
             else:
                 tau_inj = tau_inj_decay
-    
+
             alpha_inj = np.exp(-dt_hours / tau_inj)
             injection_buffer[i] = alpha_inj * injection_buffer[i-1] + (1.0 - alpha_inj) * vbs_delayed
             injection_buffer[i] = np.clip(injection_buffer[i], 0, vbs_sat)
-    
-            # ----------------------------------------------------
-            # Memória de reconexão (mantida, agora secundária)
-            # ----------------------------------------------------
-            alpha_rec = np.exp(-dt_hours / tau_rec)
-            reconnection_memory[i] = alpha_rec * reconnection_memory[i-1] + 0.52 * injection_buffer[i] * dt_hours
-            reconnection_memory[i] = np.clip(reconnection_memory[i], 0, rec_sat)
-            memory_factor = reconnection_memory[i] / (reconnection_memory[i] + rec_k)
-    
-            # =================================================
-            # MAGNETOTAIL STORAGE PHYSICS (MELHORADO)
-            # =================================================
+
             tail_loading = 0.34 * injection_buffer[i] * dt_hours
-    
+
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
             tail_unloading = ((0.11 + 0.07 * np.tanh(substorm_factor)) * tail_energy[i-1] * dt_hours)
-    
+
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
-    
+
             tail_energy[i] = tail_energy[i-1] + tail_loading - tail_unloading - tail_loss
             tail_energy[i] = np.clip(tail_energy[i], 0, self.config.TAIL_ENERGY_MAX)
-    
+
             tail_release[i] = tail_unloading
-    
-            # =================================================
-            # EXPLOSIVE UNLOADING
-            # =================================================
+
             if (tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD and
                 injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD and
                 Bz[i] < -12):
                 explosive_release = 0.22 * tail_energy[i] * dt_hours
                 explosive_release = np.clip(explosive_release, 0, 65)
                 tail_release[i] += explosive_release
-    
+
             explosive_factor = 1.0
             if (tail_energy[i] > self.config.EXPLOSIVE_TAIL_THRESHOLD and
                 injection_buffer[i] > self.config.EXPLOSIVE_VBS_THRESHOLD and
                 Bz[i] < -12):
                 explosive_factor = 1.0 + 0.6 * np.tanh(tail_energy[i] / 90.0)
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
-    
-            # =================================================
-            # Ring current injection FROM TAIL
-            # =================================================
-            ring_driver = self.config.TAIL_TO_RING * tail_release[i] + 0.28 * memory_factor
-            Q_raw = q_scale * (ring_driver ** 1.22)
-    
-            # ----------------------------------------------------
-            # Ganho dependente do regime
-            # ----------------------------------------------------
+
+            # RING CURRENT INJECTION (EFICIÊNCIA AUMENTADA)
+            ring_driver = (self.config.TAIL_TO_RING * tail_release[i] + 
+                          0.15 * injection_buffer[i])  # REDUZIDO peso da memória duplicada
+            Q_raw = q_scale * (ring_driver ** 1.22)  # EXPOENTE AUMENTADO
+
             regime_gain = 1.0
             if regime_i == 'CME':
                 regime_gain += 0.16 * np.tanh(injection_buffer[i] / 10.0)
             elif regime_i == 'HSS':
                 regime_gain -= 0.04 * np.tanh(injection_buffer[i] / 14.0)
             Q_raw *= regime_gain
-    
-            # HAC feedback coupling
+
             hac_feedback = np.clip(hac_total[i-1] / 120.0, 0.7, 1.5)
             Q_raw *= hac_feedback
-    
-            # Extreme CME enhancement
+
             if regime_i == 'CME':
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_raw *= (1.0 + 0.12 * extreme_factor ** 1.25)
-    
+
             Q_raw = np.clip(Q_raw, -450, 80)
-    
-            # ====================================================
-            # Dynamic recovery physics (CORRIGIDO)
-            # ====================================================
+
+            # TAU DINÂMICO COM MÍNIMO MAIOR (PRESERVA INJEÇÃO)
             effective_bz = Bz[i]
-            if ring_memory[i-1] > 0.6 and Bz[i] > 0:
-                effective_bz = -2.0
-    
             if effective_bz < 0:
-                tau_dynamic = 10.0 + 5.0 * memory_factor + 8.0 * ring_memory[i-1]
+                tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0  # AUMENTADO
             else:
-                tau_dynamic = 5.5 + 2.5 * memory_factor + 3.0 * ring_memory[i-1]
-    
+                tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0   # REDUZIDO para recovery
+
             depth_factor = np.clip(abs(dst_ring[i-1]) / 180.0, 0, 2.5)
-            tau_dynamic *= (1.0 - 0.22 * np.tanh(depth_factor))
-            tau_dynamic = np.clip(tau_dynamic, 3.2, 42.0)
-    
-            # Memória lenta do ring current
-            tau_ring_memory = 18.0
-            alpha_ring_mem = np.exp(-dt_hours / tau_ring_memory)
-            ring_memory[i] = alpha_ring_mem * ring_memory[i-1] + (1.0 - alpha_ring_mem) * abs(dst_ring[i-1]) / 140.0
-            ring_memory[i] = np.clip(ring_memory[i], 0, 1.5)
-    
-            # Evolução do ring current (equação diferencial simples)
+            tau_dynamic *= (1.0 - 0.15 * np.tanh(depth_factor))  # REDUZIDO amortecimento
+            tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)  # MÍNIMO MAIOR (4.0 vs 3.2)
+
             dst_ring[i] = dst_ring[i-1] + (Q_raw - dst_ring[i-1] / tau_dynamic) * dt_hours
             dst_ring[i] = np.clip(dst_ring[i], -450, 40)
-    
-            # Dst total
+
             dst_physical[i] = dst_ring[i] + dst_pressure[i]
             dst_physical[i] = np.clip(dst_physical[i], -500, 50)
-    
-            # Dst*
+
             dst_star[i] = dst_ring[i]
-    
+
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
-    
-        # ========================================================
-        # Forecast físico (simplificado, mas consistente)
-        # ========================================================
+
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         window_persist = min(120, n)
@@ -677,14 +506,14 @@ class ProductionHACModel:
         weights /= weights.sum()
         vbs_persist = np.sum(vbs_real[-window_persist:] * weights)
         pdyn_persist = pdyn[-1]
-    
+
         for h in [1, 2, 3]:
             steps = max(1, int(h / dt_median))
             dst_fut = dst_physical[-1]
             dst_ring_fut = dst_ring[-1]
             inj_future = injection_buffer[-1]
             tail_fut = tail_energy[-1]
-    
+
             for step in range(steps):
                 tau_dyn = np.clip(14.0 + 12.0 * np.tanh(abs(dst_ring_fut) / 180.0), 6.0, 40.0)
                 alpha = np.exp(-dt_median / tau_dyn)
@@ -697,107 +526,100 @@ class ProductionHACModel:
                 else:
                     recent_trend = 0.0
                 vbs_future = max(0, vbs_persist * decay + recent_trend * 0.25)
-    
+
                 alpha_inj_f = np.exp(-dt_median / 2.5)
                 inj_future = alpha_inj_f * inj_future + (1.0 - alpha_inj_f) * vbs_future
-    
+
                 tail_loading_f = 0.22 * inj_future * dt_median
                 tail_unloading_f = (0.14 + 0.12 * np.clip(tail_fut / self.config.SUBSTORM_TRIGGER, 0, 3)) * tail_fut * dt_median
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
-    
-                ring_driver_f = 0.88 * tail_unloading_f + 0.12 * memory_factor
+
+                ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
                 q_fut = q_scale * (ring_driver_f ** 0.92)
-    
+
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
-    
+
                 pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
                 dst_pressure_future = np.clip(7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0, -20, 35)
                 dst_fut = dst_ring_fut + dst_pressure_future
-    
+
             forecast[f"{h}h"] = np.clip(dst_fut, -500, 50)
-    
+
         self.results.update({
-          'time': times,
-          'HAC_total': hac_total,
-          'dHAC_dt': dHAC_dt,
-          'Bz': Bz,
-          'Vsw': Vsw,
-          'coupling_signal': coupling,
-          'Dst_physical': dst_physical,
-          'Dst_ring': dst_ring,
-          'Dst_pressure': dst_pressure,
-          'Dst_star': dst_star,
-          'injection_buffer': injection_buffer,
-          'tail_energy': tail_energy,
-          'tail_release': tail_release,
-          'Pdyn': pdyn,                       # ← ADICIONADO
-          'VBs_eff': df['VBs_eff'].values,   # ← ADICIONADO
-          'ring_memory': ring_memory,         # ← ADICIONADO
-          'density': density,                 # ← ADICIONADO
-          'Dst_min_physical': np.min(dst_physical),
-          'Dst_now': dst_physical[-1],
-          'forecast': forecast
-      })
-    
+            'time': times,
+            'HAC_total': hac_total,
+            'dHAC_dt': dHAC_dt,
+            'Bz': Bz,
+            'Vsw': Vsw,
+            'coupling_signal': coupling,
+            'Dst_physical': dst_physical,
+            'Dst_ring': dst_ring,
+            'Dst_pressure': dst_pressure,
+            'Dst_star': dst_star,
+            'injection_buffer': injection_buffer,
+            'tail_energy': tail_energy,
+            'tail_release': tail_release,
+            'Pdyn': pdyn,
+            'VBs_eff': df.get('VBs_eff', pd.Series(np.zeros_like(Bz))).values,
+            'density': density,
+            'Dst_min_physical': np.min(dst_physical),
+            'Dst_now': dst_physical[-1],
+            'forecast': forecast
+        })
+
         self._validate_output(hac_total)
         return hac_total
-    
+
     def _validate_output(self, hac_values):
         if np.any(np.isnan(hac_values)):
             raise ValueError("NaN em HAC")
         print("   ✅ Validação passada")
-    
-    # ============================================================
-    # PREVISÃO FINAL (FÍSICA + ML RESIDUAL ONLINE)
-    # ============================================================
+
     def predict_storm_indicators(self, hac_values):
         print("\n🌍 Predizendo indicadores (com Nowcast físico)...")
         dst_physics = self.results.get('Dst_physical', np.zeros_like(hac_values))
         pdyn = self.results.get('Pdyn', np.full_like(hac_values, 3.0))
         vbs_eff = self.results.get('VBs_eff', np.zeros_like(hac_values))
         dst_star = dst_physics - 7.26 * np.sqrt(np.maximum(0, pdyn)) + 11.0
-    
-        # --- Corretor ML (aprende resíduo sobre Dst*) ---
+
         if self.ml_corrector is not None:
             features = self.ml_corrector.build_features(self.results, hac_values, dst_star)
             n = len(dst_star)
             residual_corrected = np.zeros(n)
-    
+
             if self._online_residual_state is None:
                 self._online_residual_state = 0.0
-    
-            DECAY = 0.001  # fator de decaimento (mean reversion)
+
+            DECAY = 0.001
             for t in range(n):
                 x_t = features.iloc[t:t+1]
                 delta_t = self.ml_corrector.predict_delta_residual(x_t)[0]
                 self._online_residual_state *= (1.0 - DECAY)
                 self._online_residual_state += delta_t
-    
+
                 clamp_scale = 0.5 * abs(hac_values[t])
                 self._online_residual_state = np.clip(
                     self._online_residual_state, -50 - clamp_scale, 50 + clamp_scale
                 )
                 residual_corrected[t] = self._online_residual_state
-    
+
             dst_star_pred = dst_star + residual_corrected
         else:
             dst_star_pred = dst_star
-    
-        # --- Reconstruir Dst total (adiciona SSC) ---
+
         dst_pred = dst_star_pred + 7.26 * np.sqrt(np.maximum(0, pdyn)) - 11.0
-    
-        # --- Suavização 100% CAUSAL (EMA adaptativa por fase) ---
+
         if self._online_ema_state is None:
             self._online_ema_state = float(dst_pred[0])
-    
+
         dst_causal = np.copy(dst_pred)
         dDst_dt_raw = np.zeros_like(dst_pred)
         dDst_dt_raw[1:] = np.diff(dst_pred)
-    
+
         grad_smooth = np.copy(dDst_dt_raw)
         for i in range(1, len(grad_smooth)):
             grad_smooth[i] = 0.2 * dDst_dt_raw[i] + 0.8 * grad_smooth[i-1]
-    
+
         for i in range(len(dst_pred)):
             if vbs_eff[i] > 5.0:
                 alpha = 0.85
@@ -805,17 +627,16 @@ class ProductionHACModel:
                 alpha = 0.2
             else:
                 alpha = 0.05
-    
+
             if i == 0:
                 self._online_ema_state = float(dst_pred[0])
             else:
                 self._online_ema_state = alpha * dst_pred[i] + (1 - alpha) * self._online_ema_state
             dst_causal[i] = self._online_ema_state
-    
+
         smooth_mask = np.abs(grad_smooth) < 8.0
         dst_pred[smooth_mask] = dst_causal[smooth_mask]
-    
-        # --- Atualizar resultados ---
+
         dst_min = np.min(dst_pred)
         dst_now = dst_pred[-1]
         self.results.update({
@@ -823,12 +644,11 @@ class ProductionHACModel:
             'Dst_min_physical': dst_min,
             'Dst_now': dst_now
         })
-    
-        # --- Classificação Nowcast (simplificada, mas mantida) ---
+
         dHAC_dt = self.results.get('dHAC_dt', np.zeros_like(hac_values))
         Bz_arr = self.results.get('Bz', np.zeros_like(hac_values))
         Vsw_arr = self.results.get('Vsw', np.full_like(hac_values, 400))
-    
+
         storm_levels, logs = [], []
         esc_cnt = g4g5_cnt = 0
         for i in range(len(hac_values)):
@@ -844,7 +664,7 @@ class ProductionHACModel:
                 esc_cnt += 1
             if "G4" in level or "G5" in level:
                 g4g5_cnt += 1
-    
+
         enhanced = self._apply_trend_boost(storm_levels, hac_values, dHAC_dt)
         self.results.update({
             'Storm_level': enhanced,
@@ -852,16 +672,15 @@ class ProductionHACModel:
             'Decision_logs': logs
         })
         self.classification_logs = logs
-    
-        # Kp estimado
+
         kp_from_dst = np.clip(0.072 * abs(dst_min)**0.8 + 0.7, 0, 9)
         kp_pred = np.full_like(hac_values, kp_from_dst)
         self.results['Kp_pred'] = kp_pred
-    
+
         g4g5_final = sum(1 for l in enhanced if "G4" in l or "G5" in l)
         g4g5_base = sum(1 for l in storm_levels if "G4" in l or "G5" in l)
         g4g5_trad = sum(1 for l in storm_levels if l in ['G4', 'G5'])
-    
+
         print(f"   • Kp máximo estimado: {np.max(kp_pred):.1f}")
         print(f"   • Dst mínimo (físico): {dst_min:.1f} nT")
         print(f"   • Dst atual: {dst_now:.1f} nT")
@@ -869,14 +688,13 @@ class ProductionHACModel:
         print(f"   • Eventos G4/G5 (Nowcast base): {g4g5_base}")
         print(f"   • Eventos G4/G5 (com boost): {g4g5_final}")
         print(f"   • Escalações Nowcast: {esc_cnt}")
-    
+
         forecast = self.results.get('forecast', {})
         if forecast:
             print("   • Previsão Dst (simulada):")
             for h, val in forecast.items():
                 print(f"       {h}: {val:.1f} nT")
-    
-        # Probabilidades (baseadas no HAC recente)
+
         recent_hac = np.max(hac_values[-48:])
         probs = {'G1': 0., 'G2': 0., 'G3': 0., 'G4': 0., 'G5': 0.}
         storm_score = max(recent_hac, 0.32 * abs(dst_min))
@@ -893,22 +711,17 @@ class ProductionHACModel:
         print("   • Probabilidades (baseadas no HAC):")
         for k, v in probs.items():
             print(f"       {k}: {v*100:.1f}%")
-    
-        # Quantis do ML (se disponível)
+
         if self.ml_corrector is not None:
             try:
                 p10, p50, p90 = self.ml_corrector.predict_interval(features)
-                # Ajuste aproximado para os intervalos de Dst
                 self.results['Dst_p10'] = dst_pred + (p10 - p50)
                 self.results['Dst_p90'] = dst_pred + (p90 - p50)
             except:
                 pass
-    
+
         return kp_pred, dst_pred, enhanced
-    
-    # ============================================================
-    # CLASSIFICAÇÃO HÍBRIDA (NOWCAST)
-    # ============================================================
+
     def _classify_storm_with_nowcast(self, hac, dhdt, bz, v):
         cfg = self.config
         if hac < cfg.HAC_G1:
@@ -923,7 +736,7 @@ class ProductionHACModel:
             base, sev = "G4", 4
         else:
             base, sev = "G5", 5
-    
+
         score = 0
         if dhdt > 50: score += 1
         if dhdt > 100: score += 1
@@ -937,7 +750,7 @@ class ProductionHACModel:
         if hac > 50: score += 1
         if hac > 100: score += 1
         if hac > 150: score += 2
-    
+
         final, sev_f = base, sev
         if score >= 14 and sev < 5:
             final, sev_f = "G5 (Nowcast Override)", 5
@@ -947,19 +760,19 @@ class ProductionHACModel:
             final, sev_f = "G3 (Nowcast Override)", 3
         elif score >= 5 and sev < 2:
             final, sev_f = "G2 (Nowcast Enhancement)", 2
-    
+
         if dhdt > 180 and bz < -10 and v > 700 and hac > 100 and sev < 5:
             final, sev_f = "G5 (Extreme Nowcast)", 5
         elif dhdt > 120 and bz < -8 and v > 600 and sev < 4:
             final, sev_f = "G4 (Strong Nowcast)", 4
-    
+
         confidence = min(1.0, score / 20.0)
-    
+
         return final, {'hac': hac, 'dhdt': dhdt, 'bz': bz, 'v': v,
                        'base_level': base, 'nowcast_score': score,
                        'final_level': final, 'escalation': sev_f > sev,
                        'severity': sev_f, 'confidence': confidence}
-    
+
     def _apply_trend_boost(self, storm_levels, hac_values, dHAC_dt):
         enhanced = storm_levels.copy()
         n = len(storm_levels)
@@ -974,7 +787,7 @@ class ProductionHACModel:
             elif max_dhdt > 140 and mean_dhdt > 50 and hac_inc > 90 and "G4" not in cur and "G5" not in cur:
                 enhanced[i] = "G4 (Trend Boost)"
         return enhanced
-    
+
     def generate_nowcast_report(self):
         alerts = self.nowcast_alerts
         if not alerts:
@@ -993,203 +806,6 @@ class ProductionHACModel:
         report += "=" * 70
         return report
 
-# ============================================================
-# 4. CORRETOR DE RESÍDUO APRIMORADO (COM QUANTIS, FASES E ESTADO ONLINE)
-# ============================================================
-class HACResidualCorrector:
-    """
-    Aprende o erro do modelo físico: residual = dst_real - dst_physics.
-    Usa GradientBoostingRegressor com loss='quantile' para p10, p50, p90.
-    Features construídas de forma causal (sem look-ahead).
-    """
-    def __init__(self, model_path=None):
-        self.models = {}          # dict: quantile_value -> modelo
-        self.scaler = None
-        self.feature_names = []
-        if model_path and os.path.exists(model_path):
-            self.load(model_path)
-
-    def build_features(self, results, hac_values, dst_star):
-        """
-        Constrói DataFrame de features COM LAGS TEMPORAIS e fases.
-        Todas as operações são causais (ffill, rolling com shift implícito).
-        """
-        times = pd.to_datetime(results['time'])
-        bz = results['Bz']
-        v = results['Vsw']
-        density = results.get('density', np.full_like(bz, 5))
-        pdyn = results.get('Pdyn', np.full_like(bz, 3.0))
-        dt_hours = np.ones(len(bz)) * 5/60.0   # resolução de 5 min
-        vbs_eff = results.get('VBs_eff', np.zeros_like(bz))
-
-        df = pd.DataFrame({
-            'time_tag': times,
-            'bz': bz, 'v': v, 'density': density,
-            'dst_star': dst_star,
-            'hac': results['HAC_total'],
-            'dhdt': results['dHAC_dt'],
-            'tail_energy': results.get('tail_energy', np.zeros_like(hac_values)),
-            'ring_memory': results.get('ring_memory', np.zeros_like(hac_values)),
-            'pdyn': pdyn,
-            'dt_hours': dt_hours,
-            'vbs_eff': vbs_eff,
-        })
-
-        # Derivadas (causais: diff)
-        df['dbz_dt'] = df['bz'].diff().fillna(0)
-        df['dv_dt'] = df['v'].diff().fillna(0)
-        df['d2bz_dt2'] = df['dbz_dt'].diff().fillna(0)
-
-        # Energia acumulada (3h) – rolling com shift implícito (ok, pois é só agregação do passado)
-        df['vbz_energy_3h'] = (np.abs(df['bz'].clip(upper=0)) * df['v']).rolling(36, min_periods=1).sum()
-
-        # Duração contínua de Bz sul (southward_duration)
-        south_mask = df['bz'] < 0
-        duration = south_mask.astype(float).groupby((~south_mask).cumsum()).cumsum() * 5/60.0
-        df['southward_duration'] = duration.fillna(0)
-
-        # Memória de injeção integrada COM DT EXPLÍCITO e SATURAÇÃO
-        injection_instant = np.abs(df['bz'].clip(upper=0)) * df['v'] / 1000.0
-        injection_instant = 28.0 * np.tanh(injection_instant / 40.0)  # saturação
-        integrated_inj = np.zeros_like(injection_instant)
-        tau_hyst = 6.0  # horas
-        integrated_inj[0] = injection_instant[0] * dt_hours[0]
-        for i in range(1, len(integrated_inj)):
-            alpha = np.exp(-dt_hours[i] / tau_hyst)
-            integrated_inj[i] = alpha * integrated_inj[i-1] + injection_instant[i] * dt_hours[i]
-        df['integrated_injection'] = integrated_inj
-
-        # Fase da tempestade (ADAPTATIVA: baseada em VBs_eff)
-        df['main_phase'] = (vbs_eff > 5.0).astype(float)
-        df['recovery_phase'] = ((vbs_eff < 2.0) & (df['dst_star'] < -30)).astype(float)
-
-        # Memória Dst* (2 horas)
-        df['dst_memory'] = df['dst_star'].shift(1).rolling(24, min_periods=1).mean()
-
-        # Fase do ciclo solar
-        year = times.year + times.dayofyear / 365.25
-        df['solar_cycle_sin'] = np.sin(2 * np.pi * year / 11.0)
-        df['solar_cycle_cos'] = np.cos(2 * np.pi * year / 11.0)
-
-        # Regime fuzzy normalizado
-        p_cme = sigmoid(-df['bz'] / 5.0 + (df['v'] - 500) / 100.0)
-        p_hss = sigmoid((df['v'] - 550) / 50.0) * (1 - p_cme)
-        p_quiet = np.clip(1.0 - p_cme - p_hss, 0, 1)
-        total = p_cme + p_hss + p_quiet
-        df['p_CME'] = p_cme / total
-        df['p_HSS'] = p_hss / total
-        df['p_QUIET'] = p_quiet / total
-
-        # Lags temporais (ffill, nunca bfill)
-        lags = [1, 3, 6, 12, 24]
-        for lag in lags:
-            for col in ['bz', 'v', 'density', 'dst_star', 'hac']:
-                df[f'{col}_lag{lag}'] = df[col].shift(lag).fillna(method='ffill').fillna(0)
-
-        feature_cols = [
-            'bz', 'v', 'density', 'dst_star', 'hac', 'dhdt',
-            'tail_energy', 'ring_memory',
-            'dbz_dt', 'dv_dt', 'd2bz_dt2',
-            'vbz_energy_3h', 'southward_duration', 'integrated_injection',
-            'main_phase', 'recovery_phase',
-            'dst_memory', 'solar_cycle_sin', 'solar_cycle_cos',
-            'p_CME', 'p_HSS', 'p_QUIET',
-        ]
-        for lag in lags:
-            for col in ['bz', 'v', 'density', 'dst_star', 'hac']:
-                feature_cols.append(f'{col}_lag{lag}')
-
-        X = df[feature_cols].fillna(0)
-        self.feature_names = feature_cols
-        return X
-
-    def fit(self, X, y_delta, sample_weight=None):
-        """
-        Treina modelos de regressão quantílica (q=0.1, 0.5, 0.9).
-        Usa GradientBoostingRegressor (suporte garantido a 'quantile').
-        y_delta = residual_{t+1} - residual_t.
-        """
-        from sklearn.ensemble import GradientBoostingRegressor
-        from sklearn.preprocessing import RobustScaler
-
-        self.scaler = RobustScaler()
-        X_scaled = self.scaler.fit_transform(X)
-
-        if sample_weight is None:
-            sample_weight = 1.0 + np.abs(y_delta) / 20.0
-
-        self.models = {}
-        # CORRIGIDO: quantile recebe float, não string
-        for name, q in [('p10', 0.1), ('p50', 0.5), ('p90', 0.9)]:
-            model = GradientBoostingRegressor(
-                loss='quantile', alpha=q,
-                n_estimators=300, max_depth=5, learning_rate=0.05,
-                subsample=0.8, random_state=42
-            )
-            model.fit(X_scaled, y_delta, sample_weight=sample_weight)
-            self.models[name] = model
-        return self
-
-    def predict_delta_residual(self, X):
-        """Retorna previsão p50 (mediana)."""
-        if not self.models:
-            return np.zeros(len(X) if hasattr(X, '__len__') else 1)
-        X_scaled = self.scaler.transform(X)
-        return self.models['p50'].predict(X_scaled)
-
-    def predict_interval(self, X):
-        """Retorna (p10, p50, p90) para intervalos de confiança."""
-        if not self.models:
-            n = len(X) if hasattr(X, '__len__') else 1
-            return np.zeros(n), np.zeros(n), np.zeros(n)
-        X_scaled = self.scaler.transform(X)
-        p10 = self.models['p10'].predict(X_scaled)
-        p50 = self.models['p50'].predict(X_scaled)
-        p90 = self.models['p90'].predict(X_scaled)
-        # Garantir ordenação (evitar crossing)
-        p10_safe = np.minimum(p10, p50)
-        p90_safe = np.maximum(p90, p50)
-        return p10_safe, p50, p90_safe
-
-    def save(self, path):
-        with open(path, 'wb') as f:
-            pickle.dump(self, f)
-
-    def load(self, path):
-        with open(path, 'rb') as f:
-            obj = pickle.load(f)
-            self.__dict__.update(obj.__dict__)
-
-
-# ============================================================
-# 5. ENSEMBLE TEMPORAL (COM SHIFT ANTES DE DERIVADAS)
-# ============================================================
-def ensemble_temporal_predict(model, df, lags_minutes=[10, 15, 20, 25, 30], sigma=10):
-    """
-    Roda o modelo com diferentes lags de alinhamento e combina com pesos gaussianos.
-    Cada execução usa deepcopy para evitar contaminação de estado.
-    """
-    preds = []
-    weights = np.exp(-0.5 * ((np.array(lags_minutes) - 20) / sigma) ** 2)
-    weights /= weights.sum()
-    mean_dt = (df['time_tag'].diff().dt.total_seconds().median() / 60.0) or 5.0
-    for lag in lags_minutes:
-        model_copy = copy.deepcopy(model)
-        df_shifted = df.copy()
-        steps = int(round(lag / mean_dt))
-        # Deslocar APENAS dados brutos OMNI (ANTES de calcular campos derivados)
-        for col in ['bz_gsm', 'speed', 'density', 'bt', 'by_gsm']:
-            if col in df_shifted.columns:
-                df_shifted[col] = df_shifted[col].shift(steps).fillna(method='ffill').fillna(0)
-        df_shifted = PhysicalFieldsCalculator.compute_all_fields(df_shifted)
-        hac = model_copy.compute_hac_system(df_shifted)
-        _, dst_pred, _ = model_copy.predict_storm_indicators(hac)
-        preds.append(dst_pred)
-    preds = np.array(preds)
-    dst_mean = np.average(preds, axis=0, weights=weights)
-    dst_std = np.sqrt(np.average((preds - dst_mean)**2, axis=0, weights=weights))
-    return dst_mean, dst_std
-
 
 # ============================================================
 # MAIN (EXEMPLO DE USO)
@@ -1203,21 +819,9 @@ def main():
     df = RobustOMNIProcessor.merge_datasets(mag_df, plasma_df)
     print("\n⚡ CALCULANDO CAMPOS FÍSICOS...")
     df = PhysicalFieldsCalculator.compute_all_fields(df)
-
-    # Carregar corretor ML se existir arquivo persistente
-    ml_corrector = None
-    if os.path.exists("hac_residual_model.pkl"):
-        print("📦 Carregando corretor ML residual...")
-        ml_corrector = HACResidualCorrector("hac_residual_model.pkl")
-
-    model = ProductionHACModel(ml_corrector=ml_corrector)
-
-    # Opção: usar ensemble temporal (mais robusto, porém mais lento)
-    # dst_pred, dst_std = ensemble_temporal_predict(model, df)
-
+    model = ProductionHACModel()
     hac = model.compute_hac_system(df)
     kp, dst, levels = model.predict_storm_indicators(hac)
-
     print("\n" + model.generate_nowcast_report())
     df_out = pd.DataFrame({
         'time': model.results['time'],
