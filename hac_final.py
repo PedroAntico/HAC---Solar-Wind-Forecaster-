@@ -476,7 +476,7 @@ class ProductionHACModel:
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_raw *= (1.0 + 0.12 * extreme_factor ** 1.25)
 
-            Q_raw = np.clip(Q_raw, -450, 80)
+            Q_raw = -260 * np.tanh((ring_driver / 18)**1.15)
 
             # TAU DINÂMICO COM MÍNIMO MAIOR (PRESERVA INJEÇÃO)
             effective_bz = Bz[i]
