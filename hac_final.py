@@ -49,7 +49,7 @@ class HACPhysicsConfig:
     VBs_THRESHOLD = 0.5
     Q_SCALE_CME = -250.0       # injeção para CMEs
     Q_SCALE_HSS = -50.0       # injeção para HSS
-    Q_SCALE_QUIET = -20.0     # injeção para condições calmas
+    Q_SCALE_QUIET = -25.0     # injeção para condições calmas
     Q_SATURATION = 8.0
     TAU_DST = 12.0
     VBS_SAT = 28.0
