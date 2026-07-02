@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com correção crítica de saturação e memória exponencial (julho/2026)
+Versão final com parâmetros calibráveis e ganho de memória dependente do regime
+(julho/2026)
 
-Correções aplicadas:
-- Eliminada a dupla multiplicação por Q_SCALE que limitava a injeção a ~12 nT/h.
-- Agora Q_linear é construído separadamente, saturado com tanh e escalado UMA vez.
-- Q_SCALE ajustado para -60.0 (permite tempestades intensas).
-- Memória exponencial (energy_memory) para eventos sustentados.
-- TAIL_TO_RING_GAIN calibrável.
-- Cálculo de derivada 100% causal (diff).
+Melhorias finais:
+- Q_SATURATION como parâmetro configurável (substitui o divisor fixo 6.0).
+- Ganho de memória dependente do regime (CME, HSS, Quiet).
+- Q_SCALE ajustado para -60.0.
+- Memória exponencial para eventos sustentados.
+- Derivada 100% causal.
 """
 
 import json
@@ -21,7 +21,7 @@ from collections import deque
 import os
 
 # ============================================================
-# CONFIGURAÇÃO FÍSICA (CALIBRADA)
+# CONFIGURAÇÃO FÍSICA (CALIBRÁVEL)
 # ============================================================
 class HACPhysicsConfig:
     # Tempos característicos (horas)
@@ -48,7 +48,8 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE = -60.0             # AUMENTADO para permitir tempestades severas
+    Q_SCALE = -60.0             # ganho principal da injeção
+    Q_SATURATION = 8.0          # controle da suavidade da saturação
     TAU_DST = 12.0
     VBS_SAT = 28.0
 
@@ -73,7 +74,9 @@ class HACPhysicsConfig:
 
     # Memória exponencial para eventos sustentados
     TAU_ENERGY_MEMORY = 4.0      # horas
-    ENERGY_MEMORY_GAIN = 0.4     # fator de amplificação máxima
+    ENERGY_MEMORY_GAIN_CME = 0.50
+    ENERGY_MEMORY_GAIN_HSS = 0.25
+    ENERGY_MEMORY_GAIN_QUIET = 0.15
 
     # Partição de energia (reservatórios HAC)
     ALPHA_RING = 0.4
@@ -262,7 +265,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM CORREÇÃO DE SATURAÇÃO)
+# 3. MODELO HAC+ (COM SATURAÇÃO E MEMÓRIA DEPENDENTE DO REGIME)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None, ml_corrector=None):
@@ -450,15 +453,23 @@ class ProductionHACModel:
             # Memória exponencial: amplifica eventos sustentados
             alpha_mem = np.exp(-dt_hours / tau_memory)
             energy_memory = alpha_mem * energy_memory + (1.0 - alpha_mem) * vbs_eff_val
-            memory_gain = 1.0 + self.config.ENERGY_MEMORY_GAIN * np.tanh(energy_memory / 8.0)
+
+            # Ganho de memória dependente do regime
+            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            if regime_i == 'CME':
+                mem_gain = self.config.ENERGY_MEMORY_GAIN_CME
+            elif regime_i == 'HSS':
+                mem_gain = self.config.ENERGY_MEMORY_GAIN_HSS
+            else:
+                mem_gain = self.config.ENERGY_MEMORY_GAIN_QUIET
+
+            memory_gain = 1.0 + mem_gain * np.tanh(energy_memory / 8.0)
             vbs_eff_val *= memory_gain
 
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
 
             vbs_buffer.append(vbs_nl)
             vbs_delayed = vbs_buffer[0]
-
-            regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
 
             if regime_i == 'CME':
                 tau_inj_rise = 0.55
@@ -506,15 +517,13 @@ class ProductionHACModel:
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
 
             # ================================================================
-            # INJEÇÃO NO ANEL DE CORRENTE (CORRIGIDA – SATURAÇÃO FÍSICA)
+            # INJEÇÃO NO ANEL DE CORRENTE (SATURAÇÃO FÍSICA)
             # ================================================================
             ring_driver = (self.config.TAIL_TO_RING * self.config.TAIL_TO_RING_GAIN * tail_release[i] +
                           0.15 * injection_buffer[i])
 
-            # 1. Potência não‑linear do driver (sem q_scale)
             Q_linear = ring_driver ** 1.22
 
-            # 2. Ganhos multiplicativos
             regime_gain = 1.0
             if regime_i == 'CME':
                 regime_gain += 0.16 * np.tanh(injection_buffer[i] / 10.0)
@@ -529,8 +538,8 @@ class ProductionHACModel:
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_linear *= (1.0 + 0.12 * extreme_factor ** 1.25)
 
-            # 3. Saturação suave (tanh) e escala final (q_scale aplicado UMA VEZ)
-            Q_raw = q_scale * np.tanh(Q_linear / 6.0)   # divisor 6.0 controla a suavidade
+            # Saturação suave e escala final
+            Q_raw = q_scale * np.tanh(Q_linear / self.config.Q_SATURATION)
 
             # ================================================================
             # TAU DINÂMICO
@@ -592,7 +601,7 @@ class ProductionHACModel:
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
-                q_fut = q_scale * np.tanh(ring_driver_f / 6.0)
+                q_fut = q_scale * np.tanh(ring_driver_f / self.config.Q_SATURATION)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
 
