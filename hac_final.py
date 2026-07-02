@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão recalibrada para tempestades severas (maio/2026)
+Versão com memória exponencial e Q_SCALE efetivo (julho/2026)
 
-Correções aplicadas:
-- TAIL_TO_RING elevado para 0.75 (transferência energética 29% maior).
-- Expoente de injeção aumentado (1.08 → 1.22).
-- Q_SCALE elevado para -12.5.
-- Tau dinâmico mínimo maior (preserva injeção).
-- Memória de reconexão desacoplada (peso reduzido).
-- Remoção de memória redundante (ring_memory duplicado).
+Correções:
+- Q_raw não é mais sobrescrito; tanh atua como saturação suave mantendo os ganhos.
+- Memória exponencial (energy_memory) para melhorar resposta a eventos sustentados.
+- TAIL_TO_RING_GAIN calibrável (default 1.0).
+- Q_SCALE agora realmente influencia a injeção.
 """
 
 import json
@@ -42,7 +40,7 @@ class HACPhysicsConfig:
     RING_CURRENT_MAX = 800.0
 
     VBs_THRESHOLD = 0.5
-    Q_SCALE = -12.5  # ELEVADO para tempestades severas
+    Q_SCALE = -12.5          # agora realmente usado
     TAU_DST = 12.0
     VBS_SAT = 28.0
 
@@ -53,13 +51,18 @@ class HACPhysicsConfig:
     TAU_TAIL_LOADING = 3.5
     TAU_TAIL_UNLOADING = 7.0
     TAIL_ENERGY_MAX = 250.0
-    TAIL_TO_RING = 0.66  # AUMENTADO de 0.58
-    TAIL_TO_SUBSTORM = 0.25  # reduzido (0.42 antes)
+    TAIL_TO_RING = 0.66
+    TAIL_TO_RING_GAIN = 1.0   # novo: fator calibrável
+    TAIL_TO_SUBSTORM = 0.25
     SUBSTORM_TRIGGER = 18.0
-    TAIL_DISSIPATION = 0.013  # REDUZIDO de 0.015
+    TAIL_DISSIPATION = 0.013
 
     EXPLOSIVE_TAIL_THRESHOLD = 55.0
     EXPLOSIVE_VBS_THRESHOLD = 12.0
+
+    # Memória exponencial para eventos sustentados
+    TAU_ENERGY_MEMORY = 4.0    # horas
+    ENERGY_MEMORY_GAIN = 0.4   # fator de amplificação máxima
 
     ALPHA_RING = 0.4
     ALPHA_SUBSTORM = 0.3
@@ -237,6 +240,8 @@ class ProductionHACModel:
         self.classification_logs = []
         self._online_residual_state = None
         self._online_ema_state = None
+        # Memória exponencial (persistente entre chamadas)
+        self._energy_memory = 0.0
 
     def _safe_deltat(self, times):
         n = len(times)
@@ -394,6 +399,10 @@ class ProductionHACModel:
         tail_release = np.zeros(n)
         tail_energy[0] = 0.0
 
+        # Memória exponencial (para eventos sustentados)
+        energy_memory = 0.0
+        tau_memory = self.config.TAU_ENERGY_MEMORY
+
         mean_dt_hours = np.median(dt) / 3600.0
         transport_delay_h = np.clip(2.4 - (Vsw[0] - 400) / 500, 0.45, 2.5)
         delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
@@ -405,6 +414,13 @@ class ProductionHACModel:
             dst_pressure[i] = np.clip(7.26 * np.sqrt(max(0.0, pdyn[i])) - 11.0, -20, 35)
 
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
+
+            # Memória exponencial: amplifica eventos sustentados
+            alpha_mem = np.exp(-dt_hours / tau_memory)
+            energy_memory = alpha_mem * energy_memory + (1.0 - alpha_mem) * vbs_eff_val
+            memory_gain = 1.0 + self.config.ENERGY_MEMORY_GAIN * np.tanh(energy_memory / 8.0)
+            vbs_eff_val *= memory_gain
+
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
 
             vbs_buffer.append(vbs_nl)
@@ -457,10 +473,15 @@ class ProductionHACModel:
                 explosive_factor = 1.0 + 0.6 * np.tanh(tail_energy[i] / 90.0)
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
 
-            # RING CURRENT INJECTION (EFICIÊNCIA AUMENTADA)
-            ring_driver = (self.config.TAIL_TO_RING * tail_release[i] + 
-                          0.15 * injection_buffer[i])  # REDUZIDO peso da memória duplicada
-            Q_raw = q_scale * (ring_driver ** 1.22)  # EXPOENTE AUMENTADO
+            # ================================================================
+            # INJEÇÃO NO ANEL DE CORRENTE (CORRIGIDA)
+            # ================================================================
+            # Driver base (tail release + injeção direta)
+            ring_driver = (self.config.TAIL_TO_RING * self.config.TAIL_TO_RING_GAIN * tail_release[i] +
+                          0.15 * injection_buffer[i])
+
+            # Ganhos multiplicativos (NÃO são mais descartados)
+            Q_raw = q_scale * (ring_driver ** 1.22)
 
             regime_gain = 1.0
             if regime_i == 'CME':
@@ -476,18 +497,21 @@ class ProductionHACModel:
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_raw *= (1.0 + 0.12 * extreme_factor ** 1.25)
 
-            Q_raw = -260 * np.tanh((ring_driver / 18)**1.15)
+            # Saturação suave (tanh) – preserva os ganhos aplicados
+            Q_raw = q_scale * np.tanh(Q_raw / abs(q_scale * 1.2))
 
-            # TAU DINÂMICO COM MÍNIMO MAIOR (PRESERVA INJEÇÃO)
+            # ================================================================
+            # TAU DINÂMICO
+            # ================================================================
             effective_bz = Bz[i]
             if effective_bz < 0:
-                tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0  # AUMENTADO
+                tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0
             else:
-                tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0   # REDUZIDO para recovery
+                tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0
 
             depth_factor = np.clip(abs(dst_ring[i-1]) / 180.0, 0, 2.5)
-            tau_dynamic *= (1.0 - 0.15 * np.tanh(depth_factor))  # REDUZIDO amortecimento
-            tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)  # MÍNIMO MAIOR (4.0 vs 3.2)
+            tau_dynamic *= (1.0 - 0.15 * np.tanh(depth_factor))
+            tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)
 
             dst_ring[i] = dst_ring[i-1] + (Q_raw - dst_ring[i-1] / tau_dynamic) * dt_hours
             dst_ring[i] = np.clip(dst_ring[i], -450, 40)
@@ -499,6 +523,7 @@ class ProductionHACModel:
 
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
+        # Previsão (forecast) – mantida simplificada, mas consistente
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         window_persist = min(120, n)
@@ -534,8 +559,9 @@ class ProductionHACModel:
                 tail_unloading_f = (0.14 + 0.12 * np.clip(tail_fut / self.config.SUBSTORM_TRIGGER, 0, 3)) * tail_fut * dt_median
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
+                # No forecast, usamos uma versão simplificada da injeção (sem todos os ganhos)
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
-                q_fut = q_scale * (ring_driver_f ** 1.22)
+                q_fut = q_scale * np.tanh(ring_driver_f / 18.0)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
 
