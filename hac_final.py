@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão final com parâmetros calibráveis e ganho de memória dependente do regime
-(julho/2026)
+Versão com delay variável corrigido e tau dependente da cauda (julho/2026)
 
-Melhorias finais:
-- Q_SATURATION como parâmetro configurável (substitui o divisor fixo 6.0).
-- Ganho de memória dependente do regime (CME, HSS, Quiet).
-- Q_SCALE ajustado para -60.0.
-- Memória exponencial para eventos sustentados.
+Correções e melhorias:
+- Buffer de delay corrigido (agora usa lista histórica com índice variável).
+- Aumento do efeito da cauda no tau dinâmico (+6 e +10).
+- Delay variável recalculado a cada passo com Vsw[i].
+- Saturação configurável (Q_SATURATION).
+- Ganho de memória dependente do regime.
 - Derivada 100% causal.
 """
 
@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
-from collections import deque
 import os
 
 # ============================================================
@@ -48,8 +47,8 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE = -60.0             # ganho principal da injeção
-    Q_SATURATION = 8.0          # controle da suavidade da saturação
+    Q_SCALE = -60.0
+    Q_SATURATION = 8.0
     TAU_DST = 12.0
     VBS_SAT = 28.0
 
@@ -63,7 +62,7 @@ class HACPhysicsConfig:
     TAU_TAIL_UNLOADING = 7.0
     TAIL_ENERGY_MAX = 250.0
     TAIL_TO_RING = 0.66
-    TAIL_TO_RING_GAIN = 1.0      # fator calibrável
+    TAIL_TO_RING_GAIN = 1.0
     TAIL_TO_SUBSTORM = 0.25
     SUBSTORM_TRIGGER = 18.0
     TAIL_DISSIPATION = 0.013
@@ -73,7 +72,7 @@ class HACPhysicsConfig:
     EXPLOSIVE_VBS_THRESHOLD = 12.0
 
     # Memória exponencial para eventos sustentados
-    TAU_ENERGY_MEMORY = 4.0      # horas
+    TAU_ENERGY_MEMORY = 4.0
     ENERGY_MEMORY_GAIN_CME = 0.50
     ENERGY_MEMORY_GAIN_HSS = 0.25
     ENERGY_MEMORY_GAIN_QUIET = 0.15
@@ -92,7 +91,7 @@ class HACPhysicsConfig:
     HAC_SCALE_MAX = 200.0
     HAC_NORM_FACTOR = 150.0
 
-    # Limiares do HAC (provisórios)
+    # Limiares do HAC
     HAC_G1 = 20
     HAC_G2 = 40
     HAC_G3 = 60
@@ -110,7 +109,6 @@ class HACPhysicsConfig:
     VSW_CRITICAL = 700.0
     BZ_CRITICAL = -8.0
 
-    # Flags para boosts (desabilitados)
     USE_BZ_BOOST = False
     USE_REGIME_BOOST = False
 
@@ -265,7 +263,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM SATURAÇÃO E MEMÓRIA DEPENDENTE DO REGIME)
+# 3. MODELO HAC+ (COM BUFFER DE DELAY CORRIGIDO)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None, ml_corrector=None):
@@ -278,6 +276,7 @@ class ProductionHACModel:
         self._online_residual_state = None
         self._online_ema_state = None
         self._energy_memory = 0.0
+        self._history_vbs = []  # histórico para delay variável
 
     def _safe_deltat(self, times):
         n = len(times)
@@ -438,10 +437,8 @@ class ProductionHACModel:
         energy_memory = 0.0
         tau_memory = self.config.TAU_ENERGY_MEMORY
 
-        mean_dt_hours = np.median(dt) / 3600.0
-        transport_delay_h = np.clip(2.4 - (Vsw[0] - 400) / 500, 0.45, 2.5)
-        delay_steps = max(1, int(transport_delay_h / mean_dt_hours))
-        vbs_buffer = deque([0.0] * delay_steps, maxlen=delay_steps)
+        # Histórico para delay variável (CORRIGIDO)
+        self._history_vbs = [0.0]  # inicializa com um valor
 
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
@@ -450,11 +447,10 @@ class ProductionHACModel:
 
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
 
-            # Memória exponencial: amplifica eventos sustentados
+            # Memória exponencial
             alpha_mem = np.exp(-dt_hours / tau_memory)
             energy_memory = alpha_mem * energy_memory + (1.0 - alpha_mem) * vbs_eff_val
 
-            # Ganho de memória dependente do regime
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
             if regime_i == 'CME':
                 mem_gain = self.config.ENERGY_MEMORY_GAIN_CME
@@ -468,8 +464,14 @@ class ProductionHACModel:
 
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
 
-            vbs_buffer.append(vbs_nl)
-            vbs_delayed = vbs_buffer[0]
+            # --- BUFFER DE DELAY CORRIGIDO ---
+            self._history_vbs.append(vbs_nl)
+            # Calcula steps de atraso baseado na velocidade ATUAL
+            transport_delay_h = np.clip(2.4 - (Vsw[i] - 400) / 500.0, 0.45, 2.5)
+            transport_delay_steps = max(1, int(transport_delay_h / (dt[i] / 3600.0)))
+            # Índice no histórico: len(history)-1 menos os steps de atraso
+            idx_delayed = max(0, len(self._history_vbs) - 1 - transport_delay_steps)
+            vbs_delayed = self._history_vbs[idx_delayed]
 
             if regime_i == 'CME':
                 tau_inj_rise = 0.55
@@ -517,7 +519,7 @@ class ProductionHACModel:
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
 
             # ================================================================
-            # INJEÇÃO NO ANEL DE CORRENTE (SATURAÇÃO FÍSICA)
+            # INJEÇÃO NO ANEL DE CORRENTE
             # ================================================================
             ring_driver = (self.config.TAIL_TO_RING * self.config.TAIL_TO_RING_GAIN * tail_release[i] +
                           0.15 * injection_buffer[i])
@@ -538,17 +540,17 @@ class ProductionHACModel:
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_linear *= (1.0 + 0.12 * extreme_factor ** 1.25)
 
-            # Saturação suave e escala final
             Q_raw = q_scale * np.tanh(Q_linear / self.config.Q_SATURATION)
 
             # ================================================================
-            # TAU DINÂMICO
+            # TAU DINÂMICO (COM MAIOR EFEITO DA CAUDA)
             # ================================================================
             effective_bz = Bz[i]
+            tail_factor = np.clip(tail_energy[i] / 50.0, 0.0, 2.0)
             if effective_bz < 0:
-                tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0
+                tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0 + 6.0 * tail_factor
             else:
-                tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0
+                tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0 + 10.0 * tail_factor
 
             depth_factor = np.clip(abs(dst_ring[i-1]) / 180.0, 0, 2.5)
             tau_dynamic *= (1.0 - 0.15 * np.tanh(depth_factor))
