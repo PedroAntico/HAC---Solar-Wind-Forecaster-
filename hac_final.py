@@ -48,7 +48,7 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE_CME = -250.0
+    Q_SCALE_CME = -320.0
     Q_SCALE_HSS = -50.0
     Q_SCALE_QUIET = -25.0
     Q_SATURATION = 12.0
