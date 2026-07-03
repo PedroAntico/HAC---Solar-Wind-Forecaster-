@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com delay multivariável, tau dinâmico refinado e parâmetros calibráveis
-(julho/2026)
+Versão com modulação por derivada do HAC e forecast corrigido (julho/2026)
 
-Melhorias:
-- Delay dinâmico multivariável (Vsw, Bz, Pdyn, tail_energy).
-- Tau dinâmico dependente da profundidade do Dst para evitar superestimação.
-- Ganhos de regime separados para injeção (Q_SCALE_CME, Q_SCALE_HSS).
-- Derivada causal mantida.
-- Estrutura pronta para calibração automática.
+Correções:
+- Modulação contínua de Q_SCALE agora usa dHAC_dt (derivada) em vez de HAC total.
+- Forecast usa o Q_SCALE do regime do último ponto (não fixo CME).
+- Q_SATURATION = 12.0, Q_SCALE_CME = -60, Q_SCALE_HSS = -50, Q_SCALE_QUIET = -25.
+- Delay dinâmico multivariável, tau dinâmico com profundidade e cauda.
 """
 
 import json
@@ -47,10 +45,11 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE_CME = -250.0       # injeção para CMEs
-    Q_SCALE_HSS = -50.0       # injeção para HSS
-    Q_SCALE_QUIET = -25.0     # injeção para condições calmas
-    Q_SATURATION = 8.0
+    Q_SCALE_CME = -60.0
+    Q_SCALE_HSS = -50.0
+    Q_SCALE_QUIET = -25.0
+    Q_SATURATION = 12.0
+    HAC_MODULATION_STRENGTH = 0.15   # força da modulação por derivada
     TAU_DST = 12.0
     VBS_SAT = 28.0
 
@@ -265,7 +264,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM DELAY MULTIVARIÁVEL E TAU REFINADO)
+# 3. MODELO HAC+ (COM MODULAÇÃO POR DERIVADA E FORECAST CORRIGIDO)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None, ml_corrector=None):
@@ -336,19 +335,11 @@ class ProductionHACModel:
         """
         Calcula o atraso de transporte (horas) baseado em múltiplas variáveis.
         """
-        # Tempo de propagação básico (velocidade)
         base_delay = np.clip(2.4 - (v - 400) / 500.0, 0.45, 2.5)
-
-        # Modulação por Bz sul (campos mais intensos penetram mais rápido)
         bz_south = max(0.0, -bz)
-        bz_factor = 1.0 + 0.3 * np.tanh(bz_south / 10.0)  # 1.0 a 1.3
-
-        # Modulação por pressão dinâmica (compressão reduz delay)
-        pdyn_factor = 1.0 - 0.2 * np.tanh(pdyn / 5.0)     # 0.8 a 1.0
-
-        # Modulação pela energia da cauda (cauda carregada → resposta mais rápida)
-        tail_factor = 1.0 - 0.3 * np.tanh(tail_energy / 50.0)  # 0.7 a 1.0
-
+        bz_factor = 1.0 + 0.3 * np.tanh(bz_south / 10.0)
+        pdyn_factor = 1.0 - 0.2 * np.tanh(pdyn / 5.0)
+        tail_factor = 1.0 - 0.3 * np.tanh(tail_energy / 50.0)
         delay = base_delay * bz_factor * pdyn_factor * tail_factor
         return np.clip(delay, 0.35, 2.8)
 
@@ -458,8 +449,10 @@ class ProductionHACModel:
         energy_memory = 0.0
         tau_memory = self.config.TAU_ENERGY_MEMORY
 
-        # Histórico para delay variável
         self._history_vbs = [0.0]
+
+        # Para o forecast, guardar o último regime
+        last_regime = 'Quiet'
 
         for i in range(1, n):
             dt_hours = dt[i] / 3600.0
@@ -468,11 +461,12 @@ class ProductionHACModel:
 
             vbs_eff_val = max(0.0, vbs_real[i] - vbs_thr)
 
-            # Memória exponencial
             alpha_mem = np.exp(-dt_hours / tau_memory)
             energy_memory = alpha_mem * energy_memory + (1.0 - alpha_mem) * vbs_eff_val
 
             regime_i = _detect_regime_scalar(Vsw[i], density[i], Bz[i])
+            last_regime = regime_i  # atualiza último regime
+
             if regime_i == 'CME':
                 mem_gain = self.config.ENERGY_MEMORY_GAIN_CME
             elif regime_i == 'HSS':
@@ -485,9 +479,8 @@ class ProductionHACModel:
 
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
 
-            # --- DELAY MULTIVARIÁVEL ---
+            # Delay multivariável
             self._history_vbs.append(vbs_nl)
-            # Calcula delay com base em Vsw, Bz, Pdyn, tail_energy
             transport_delay_h = self._compute_dynamic_delay(
                 Vsw[i], Bz[i], pdyn[i], tail_energy[i-1]
             )
@@ -541,18 +534,23 @@ class ProductionHACModel:
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
 
             # ================================================================
-            # INJEÇÃO NO ANEL DE CORRENTE (COM GANHO DEPENDENTE DO REGIME)
+            # INJEÇÃO NO ANEL DE CORRENTE (MODULAÇÃO POR DERIVADA)
             # ================================================================
             ring_driver = (self.config.TAIL_TO_RING * self.config.TAIL_TO_RING_GAIN * tail_release[i] +
                           0.15 * injection_buffer[i])
 
-            # Seleciona Q_SCALE baseado no regime
+            # Base Q_SCALE por regime
             if regime_i == 'CME':
-                q_scale = self.config.Q_SCALE_CME
+                q_base = self.config.Q_SCALE_CME
             elif regime_i == 'HSS':
-                q_scale = self.config.Q_SCALE_HSS
+                q_base = self.config.Q_SCALE_HSS
             else:
-                q_scale = self.config.Q_SCALE_QUIET
+                q_base = self.config.Q_SCALE_QUIET
+
+            # Modulação contínua pela derivada do HAC (reduz injeção quando derivada é alta)
+            dhdt_val = dHAC_dt[i] if i > 0 else 0.0
+            hac_modulation = 1.0 - self.config.HAC_MODULATION_STRENGTH * np.tanh(max(0, dhdt_val) / 30.0)
+            q_scale = q_base * hac_modulation
 
             Q_linear = ring_driver ** 1.22
 
@@ -573,16 +571,15 @@ class ProductionHACModel:
             Q_raw = q_scale * np.tanh(Q_linear / self.config.Q_SATURATION)
 
             # ================================================================
-            # TAU DINÂMICO (COM PROFUNDIDADE DO DST)
+            # TAU DINÂMICO
             # ================================================================
             effective_bz = Bz[i]
             tail_factor = np.clip(tail_energy[i] / 50.0, 0.0, 2.0)
-            depth_factor = np.clip(abs(dst_ring[i-1]) / 200.0, 0.0, 2.0)  # novo: limita tau em tempestades extremas
+            depth_factor = np.clip(abs(dst_ring[i-1]) / 200.0, 0.0, 2.0)
             if effective_bz < 0:
                 tau_dynamic = 12.0 + 6.0 * injection_buffer[i] / 15.0 + 6.0 * tail_factor - 3.0 * depth_factor
             else:
                 tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0 + 10.0 * tail_factor - 3.0 * depth_factor
-
             tau_dynamic = np.clip(tau_dynamic, 4.0, 42.0)
 
             dst_ring[i] = dst_ring[i-1] + (Q_raw - dst_ring[i-1] / tau_dynamic) * dt_hours
@@ -595,7 +592,15 @@ class ProductionHACModel:
 
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
-        # Previsão (forecast) simplificada
+        # Previsão (forecast) usando Q_SCALE do último regime
+        # Determina q_scale para o forecast baseado no último regime
+        if last_regime == 'CME':
+            q_forecast = self.config.Q_SCALE_CME
+        elif last_regime == 'HSS':
+            q_forecast = self.config.Q_SCALE_HSS
+        else:
+            q_forecast = self.config.Q_SCALE_QUIET
+
         forecast = {}
         dt_median = np.median(dt) / 3600.0
         window_persist = min(120, n)
@@ -632,7 +637,8 @@ class ProductionHACModel:
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
-                q_fut = self.config.Q_SCALE_CME * np.tanh(ring_driver_f / self.config.Q_SATURATION)
+                # Usa q_forecast (do último regime) em vez de fixo CME
+                q_fut = q_forecast * np.tanh(ring_driver_f / self.config.Q_SATURATION)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
 
