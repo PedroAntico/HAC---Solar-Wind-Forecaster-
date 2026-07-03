@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com modulação por derivada, forecast corrigido e delay arredondado (julho/2026)
+Versão com modulação por derivada do HAC e forecast corrigido (julho/2026)
 
-Correções e melhorias:
-- Modulação contínua de Q_SCALE por dHAC/dt (derivada) em vez de HAC total.
-- Forecast usa Q_SCALE do último regime (não fixo CME).
-- Transport delay com arredondamento (round) para evitar saltos bruscos.
-- Delay dinâmico multivariável (Vsw, Bz, Pdyn, tail_energy).
-- Tau dinâmico com profundidade do Dst e energia da cauda.
-- Buffer histórico com índice variável para delay físico.
+Correções:
+- Modulação contínua de Q_SCALE agora usa dHAC_dt (derivada) em vez de HAC total.
+- Forecast usa o Q_SCALE do regime do último ponto (não fixo CME).
 - Q_SATURATION = 12.0, Q_SCALE_CME = -60, Q_SCALE_HSS = -50, Q_SCALE_QUIET = -25.
+- Delay dinâmico multivariável, tau dinâmico com profundidade e cauda.
 """
 
 import json
@@ -267,7 +264,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM DELAY ARREDONDADO E MODULAÇÃO POR DERIVADA)
+# 3. MODELO HAC+ (COM MODULAÇÃO POR DERIVADA E FORECAST CORRIGIDO)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None, ml_corrector=None):
@@ -487,8 +484,7 @@ class ProductionHACModel:
             transport_delay_h = self._compute_dynamic_delay(
                 Vsw[i], Bz[i], pdyn[i], tail_energy[i-1]
             )
-            # CORREÇÃO: usar round() em vez de int() para evitar saltos bruscos
-            transport_delay_steps = max(1, int(round(transport_delay_h / max(0.001, dt_hours))))
+            transport_delay_steps = max(1, int(transport_delay_h / max(0.001, dt_hours)))
             idx_delayed = max(0, len(self._history_vbs) - 1 - transport_delay_steps)
             vbs_delayed = self._history_vbs[idx_delayed]
 
@@ -597,6 +593,7 @@ class ProductionHACModel:
         print(f"   • Dst físico mín: {np.min(dst_physical):.1f} nT")
 
         # Previsão (forecast) usando Q_SCALE do último regime
+        # Determina q_scale para o forecast baseado no último regime
         if last_regime == 'CME':
             q_forecast = self.config.Q_SCALE_CME
         elif last_regime == 'HSS':
@@ -640,6 +637,7 @@ class ProductionHACModel:
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
+                # Usa q_forecast (do último regime) em vez de fixo CME
                 q_fut = q_forecast * np.tanh(ring_driver_f / self.config.Q_SATURATION)
 
                 dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
