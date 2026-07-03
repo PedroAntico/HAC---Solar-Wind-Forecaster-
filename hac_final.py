@@ -45,8 +45,8 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE_CME = -300.0
-    Q_SCALE_HSS = -50.0
+    Q_SCALE_CME = -350.0
+    Q_SCALE_HSS = -60.0
     Q_SCALE_QUIET = -25.0
     Q_SATURATION = 12.0
     HAC_MODULATION_STRENGTH = 0.15   # força da modulação por derivada
