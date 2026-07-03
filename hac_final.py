@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
 hac_final.py - HAC++ Model: Sistema de Produção com Nowcast + Inércia Híbrido
-Versão com física aprimorada: plasmasfera, descarga explosiva, injeção 1-exp (julho/2026)
+Versão incremental: plasmasfera (tau efetivo), instabilidade da cauda, memória no tau
+(julho/2026)
 
-Melhorias:
-- Injeção Q_raw = q_scale * (1 - exp(-Q_linear / Q_SATURATION)) para sensibilidade moderada.
-- Descarga explosiva da cauda baseada em instabilidade (dTail/dt).
-- Reservatório da plasmasfera para recuperação lenta e troca de carga.
+Melhorias (isoladas para validação):
+- Plasmasfera atua no decaimento (effective_tau), não na injeção.
+- Instabilidade da cauda apenas com dtail_dt > 0.
 - Tau dinâmico dependente de energy_memory (histórico da tempestade).
-- Detecção de regime melhorada (sheath, cloud, HSS).
-- Delay de transporte com arredondamento (round).
+- round() no delay de transporte.
+- Classificação de regime avançada (sheath, cloud, HSS).
+- Função de injeção tanh mantida (Q_SCALE inalterados: -60, -50, -25).
 """
 
 import json
@@ -47,10 +48,10 @@ class HACPhysicsConfig:
 
     # Parâmetros do modelo Burton (calibrados)
     VBs_THRESHOLD = 0.5
-    Q_SCALE_CME = -80.0          # recalibrado para uso com 1-exp
-    Q_SCALE_HSS = -55.0
+    Q_SCALE_CME = -320.0
+    Q_SCALE_HSS = -60.0
     Q_SCALE_QUIET = -25.0
-    Q_SATURATION = 14.0          # ajustado para 1-exp (antes 12 com tanh)
+    Q_SATURATION = 12.0
     HAC_MODULATION_STRENGTH = 0.15
     TAU_DST = 12.0
     VBS_SAT = 28.0
@@ -73,11 +74,11 @@ class HACPhysicsConfig:
     # Explosive unloading thresholds
     EXPLOSIVE_TAIL_THRESHOLD = 55.0
     EXPLOSIVE_VBS_THRESHOLD = 12.0
-    TAIL_INSTABILITY_GAIN = 0.5   # ganho da instabilidade dTail/dt
+    TAIL_INSTABILITY_GAIN = 0.5
 
-    # Plasmasphere reservoir
-    TAU_PLASMASPHERE = 40.0       # horas, decaimento muito lento
-    PLASMA_TO_RING = 0.15         # fração que realimenta o anel
+    # Plasmasphere reservoir (atua no decaimento, não na injeção)
+    TAU_PLASMASPHERE = 40.0       # horas
+    PLASMA_TO_RING = 0.15         # fração que realimenta o anel (via tau)
     RING_TO_PLASMA = 0.08         # fração do anel que vai para a plasmasfera
 
     # Memória exponencial para eventos sustentados
@@ -140,7 +141,6 @@ def normalize_omni_columns(df, allow_partial=False):
 
 
 def _detect_regime_scalar(v, density, bz):
-    """Classificação simples de regime (mantida para compatibilidade)"""
     if density > 8 and bz < -8:
         return 'CME'
     elif v > 600 and density < 5:
@@ -152,17 +152,11 @@ def _detect_regime_scalar(v, density, bz):
 
 
 def _detect_regime_advanced(v, density, bz, pdyn, vbs, dbz_dt):
-    """
-    Classificação de regime melhorada: sheath, cloud, HSS, quiet.
-    Usa mais variáveis físicas.
-    """
-    # Sheath: alta densidade, alta Pdyn, Bz variável
+    """Classificação de regime melhorada: sheath, cloud, HSS, quiet."""
     if density > 10 and pdyn > 5 and np.abs(dbz_dt) > 2:
         return 'CME_sheath'
-    # Cloud: Bz muito negativo, rotação suave (aqui simplificado)
     if bz < -10 and vbs > 3:
         return 'CME_cloud'
-    # HSS: velocidade alta, densidade baixa
     if v > 550 and density < 5:
         return 'HSS'
     return 'Quiet'
@@ -290,7 +284,7 @@ class PhysicalFieldsCalculator:
 
 
 # ============================================================
-# 3. MODELO HAC+ (COM PLASMASFERA, DESCARGA EXPLOSIVA, 1-EXP)
+# 3. MODELO HAC+ (COM PLASMASFERA NO TAU, INSTABILIDADE POSITIVA)
 # ============================================================
 class ProductionHACModel:
     def __init__(self, config=None, ml_corrector=None):
@@ -469,8 +463,7 @@ class ProductionHACModel:
         tail_release = np.zeros(n)
         tail_energy[0] = 0.0
 
-        # Novos reservatórios
-        plasmasphere_energy = np.zeros(n)   # energia na plasmasfera
+        plasmasphere_energy = np.zeros(n)
         plasmasphere_energy[0] = 0.0
 
         energy_memory = 0.0
@@ -478,8 +471,6 @@ class ProductionHACModel:
 
         self._history_vbs = [0.0]
         last_regime = 'Quiet'
-
-        # Para o cálculo da derivada da cauda (instabilidade)
         prev_tail_energy = 0.0
 
         for i in range(1, n):
@@ -492,13 +483,12 @@ class ProductionHACModel:
             alpha_mem = np.exp(-dt_hours / tau_memory)
             energy_memory = alpha_mem * energy_memory + (1.0 - alpha_mem) * vbs_eff_val
 
-            # Regime avançado
+            # Regime avançado (para ganhos de memória)
             dbz_dt = Bz[i] - Bz[i-1] if i > 0 else 0.0
-            regime_i = _detect_regime_advanced(Vsw[i], density[i], Bz[i], pdyn[i], vbs_eff_val, dbz_dt)
-            # Mapear para categorias simples para ganhos (pode ser refinado)
-            if regime_i.startswith('CME'):
+            regime_adv = _detect_regime_advanced(Vsw[i], density[i], Bz[i], pdyn[i], vbs_eff_val, dbz_dt)
+            if regime_adv.startswith('CME'):
                 simple_regime = 'CME'
-            elif regime_i == 'HSS':
+            elif regime_adv == 'HSS':
                 simple_regime = 'HSS'
             else:
                 simple_regime = 'Quiet'
@@ -516,7 +506,7 @@ class ProductionHACModel:
 
             vbs_nl = vbs_sat * np.tanh(vbs_eff_val / 40.0)
 
-            # Delay multivariável
+            # Delay multivariável com round()
             self._history_vbs.append(vbs_nl)
             transport_delay_h = self._compute_dynamic_delay(
                 Vsw[i], Bz[i], pdyn[i], tail_energy[i-1]
@@ -547,12 +537,11 @@ class ProductionHACModel:
             tail_loading = 0.28 * injection_buffer[i] * dt_hours
 
             substorm_factor = np.clip(tail_energy[i-1] / self.config.SUBSTORM_TRIGGER, 0, 3)
-            # Descarga base
             tail_unloading = ((0.11 + 0.07 * np.tanh(substorm_factor)) * tail_energy[i-1] * dt_hours)
 
-            # Instabilidade da cauda (derivada)
+            # Instabilidade da cauda (apenas crescimento positivo)
             dtail_dt = (tail_energy[i-1] - prev_tail_energy) / max(0.001, dt_hours)
-            instability = np.tanh(dtail_dt / 15.0)  # threshold de 15 nT/h
+            instability = np.tanh(max(0.0, dtail_dt) / 15.0)
             tail_unloading *= (1.0 + self.config.TAIL_INSTABILITY_GAIN * instability)
 
             tail_loss = self.config.TAIL_DISSIPATION * tail_energy[i-1] * dt_hours
@@ -578,7 +567,7 @@ class ProductionHACModel:
             tail_release[i] = tail_unloading * explosive_factor + (tail_release[i] - tail_unloading)
 
             # ================================================================
-            # INJEÇÃO NO ANEL DE CORRENTE (1-EXP)
+            # INJEÇÃO NO ANEL DE CORRENTE (tanh mantida)
             # ================================================================
             ring_driver = (self.config.TAIL_TO_RING * self.config.TAIL_TO_RING_GAIN * tail_release[i] +
                           0.15 * injection_buffer[i])
@@ -610,11 +599,10 @@ class ProductionHACModel:
                 extreme_factor = np.clip(injection_buffer[i] / 18.0, 0.0, 2.0)
                 Q_linear *= (1.0 + 0.12 * extreme_factor ** 1.25)
 
-            # NOVA função de injeção: 1 - exp(-x) para sensibilidade moderada
-            Q_raw = q_scale * (1.0 - np.exp(-Q_linear / self.config.Q_SATURATION))
+            Q_raw = q_scale * np.tanh(Q_linear / self.config.Q_SATURATION)
 
             # ================================================================
-            # TAU DINÂMICO (com memória e plasmasfera)
+            # TAU DINÂMICO COM PLASMASFERA (atuando no decaimento)
             # ================================================================
             effective_bz = Bz[i]
             tail_factor = np.clip(tail_energy[i] / 50.0, 0.0, 2.0)
@@ -625,21 +613,18 @@ class ProductionHACModel:
                 tau_dynamic = 6.0 + 3.0 * injection_buffer[i] / 15.0 + 10.0 * tail_factor - 3.0 * depth_factor
             # Memória da tempestade (energy_memory alonga tau)
             tau_dynamic += 6.0 * np.tanh(energy_memory / 30.0)
-            tau_dynamic = np.clip(tau_dynamic, 4.0, 60.0)  # aumentado limite superior para plasmasfera
 
-            # Plasmasfera: alimentação lenta e realimentação
-            # Uma fração do anel vai para a plasmasfera
+            # Plasmasfera: alimentação e realimentação via tau efetivo
             ring_to_plasma = self.config.RING_TO_PLASMA * abs(dst_ring[i-1]) * dt_hours
-            # Decaimento da plasmasfera (muito lento)
             plasma_decay = plasmasphere_energy[i-1] / self.config.TAU_PLASMASPHERE * dt_hours
             plasmasphere_energy[i] = plasmasphere_energy[i-1] + ring_to_plasma - plasma_decay
             plasmasphere_energy[i] = np.clip(plasmasphere_energy[i], 0, 200)
-            # Realimentação do anel pela plasmasfera
-            plasma_feedback = self.config.PLASMA_TO_RING * plasmasphere_energy[i-1] / self.config.TAU_PLASMASPHERE
-            # Adiciona ao Q_raw (como injeção adicional lenta)
-            Q_raw -= plasma_feedback  # sinal negativo porque Q_raw é negativo
+            # A plasmasfera alonga o tau efetivo (reduz a taxa de decaimento)
+            plasma_tau_extension = self.config.PLASMA_TO_RING * plasmasphere_energy[i] / self.config.TAU_PLASMASPHERE * 10.0
+            effective_tau = tau_dynamic + plasma_tau_extension
+            effective_tau = np.clip(effective_tau, 4.0, 60.0)
 
-            dst_ring[i] = dst_ring[i-1] + (Q_raw - dst_ring[i-1] / tau_dynamic) * dt_hours
+            dst_ring[i] = dst_ring[i-1] + (Q_raw - dst_ring[i-1] / effective_tau) * dt_hours
             dst_ring[i] = np.clip(dst_ring[i], -450, 40)
 
             dst_physical[i] = dst_ring[i] + dst_pressure[i]
@@ -675,7 +660,10 @@ class ProductionHACModel:
 
             for step in range(steps):
                 tau_dyn = np.clip(14.0 + 12.0 * np.tanh(abs(dst_ring_fut) / 180.0), 6.0, 40.0)
-                alpha = np.exp(-dt_median / tau_dyn)
+                # Plasmasfera no forecast também alonga tau
+                plasma_tau_ext = self.config.PLASMA_TO_RING * plasma_fut / self.config.TAU_PLASMASPHERE * 10.0
+                effective_tau_f = tau_dyn + plasma_tau_ext
+                alpha = np.exp(-dt_median / effective_tau_f)
                 time_elapsed = step * dt_median
                 decay = np.exp(-time_elapsed / 4.5)
                 recent_window = vbs_real[-18:]
@@ -693,16 +681,13 @@ class ProductionHACModel:
                 tail_unloading_f = (0.14 + 0.12 * np.clip(tail_fut / self.config.SUBSTORM_TRIGGER, 0, 3)) * tail_fut * dt_median
                 tail_fut = np.clip(tail_fut + tail_loading_f - tail_unloading_f, 0, self.config.TAIL_ENERGY_MAX)
 
-                # Plasmasfera simplificada no forecast
                 plasma_decay_f = plasma_fut / self.config.TAU_PLASMASPHERE * dt_median
                 plasma_fut = max(0, plasma_fut - plasma_decay_f)
-                plasma_feedback_f = self.config.PLASMA_TO_RING * plasma_fut / self.config.TAU_PLASMASPHERE
 
                 ring_driver_f = 0.88 * tail_unloading_f + 0.12 * injection_buffer[-1]
-                q_fut = q_forecast * (1.0 - np.exp(-ring_driver_f / self.config.Q_SATURATION))
-                q_fut -= plasma_feedback_f
+                q_fut = q_forecast * np.tanh(ring_driver_f / self.config.Q_SATURATION)
 
-                dst_ring_fut = dst_ring_fut * alpha + q_fut * tau_dyn * (1.0 - alpha)
+                dst_ring_fut = dst_ring_fut * alpha + q_fut * effective_tau_f * (1.0 - alpha)
 
                 pdyn_future = pdyn_persist * np.exp(-time_elapsed / 2.0)
                 dst_pressure_future = np.clip(7.26 * np.sqrt(max(0.0, pdyn_future)) - 11.0, -20, 35)
