@@ -620,7 +620,7 @@ class ProductionHACModel:
             plasmasphere_energy[i] = plasmasphere_energy[i-1] + ring_to_plasma - plasma_decay
             plasmasphere_energy[i] = np.clip(plasmasphere_energy[i], 0, 200)
             # A plasmasfera alonga o tau efetivo (reduz a taxa de decaimento)
-            plasma_tau_extension = self.config.PLASMA_TO_RING * plasmasphere_energy[i] / self.config.TAU_PLASMASPHERE * 5.0
+            plasma_tau_extension = self.config.PLASMA_TO_RING * plasmasphere_energy[i] / self.config.TAU_PLASMASPHERE * 7.0
             effective_tau = tau_dynamic + plasma_tau_extension
             effective_tau = np.clip(effective_tau, 4.0, 60.0)
 
